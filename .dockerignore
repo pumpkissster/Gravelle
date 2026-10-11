@@ -1,0 +1,8 @@
+*
+!Dockerfile
+!server.py
+!requirements.txt
+!release.json
+!LICENSE
+!static/
+!static/**

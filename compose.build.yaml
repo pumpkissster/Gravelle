@@ -1,0 +1,46 @@
+# 源码构建专用：docker compose -f compose.build.yaml up -d --build
+# 服务名、挂载与正式拉取版保持一致，方便保留已有资料。
+services:
+  sumi-reader:
+    build:
+      context: .
+      args:
+        GRAVELLE_RELEASE_REPOSITORY: "${GRAVELLE_RELEASE_REPOSITORY:-pumpkissster/gravelle}"
+    image: gravelle-reader:local
+    restart: unless-stopped
+    user: "${PUID:-1000}:${PGID:-1000}"
+    ports:
+      - "${WEB_PORT:-8080}:8080"
+    environment:
+      LIBRARY_PATH: /library
+      DATA_PATH: /data
+      HOST: 0.0.0.0
+      PORT: "8080"
+      READER_PASSWORD: "${READER_PASSWORD:-}"
+      SCAN_INTERVAL: "${SCAN_INTERVAL:-300}"
+    volumes:
+      - type: bind
+        source: "${COMICS_PATH:-./library}"
+        target: /library
+        read_only: true
+      - type: bind
+        source: "${DATA_PATH:-./data}"
+        target: /data
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/health', timeout=5).read()"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    stop_grace_period: 20s

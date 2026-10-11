@@ -1,0 +1,14 @@
+.env
+data/
+data-windows/
+library/
+__pycache__/
+*.py[cod]
+.DS_Store
+work/
+sumi-reader-nas.zip
+gravelle-reader-nas.zip
+dist/
+outputs/
+VERIFICATION.md
+/【*/

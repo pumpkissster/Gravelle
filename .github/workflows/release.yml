@@ -1,0 +1,373 @@
+name: Build and release Gravelle
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_version:
+        description: "版本号，必须与 server.py 的 VERSION 一致，例如 1.8.2"
+        required: true
+        type: string
+      publish:
+        description: "正式发布 GitHub Release；关闭时仅构建测试资产"
+        default: false
+        required: true
+        type: boolean
+      publish_docker:
+        description: "正式发布时同时推送 Docker Hub（需先配置账号与令牌）"
+        default: false
+        required: true
+        type: boolean
+      source_tag:
+        description: "补发已有版本的 Docker 镜像时填写原标签（如 v1.8.2）；初次发布留空"
+        default: ""
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gravelle-release
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      source_sha: ${{ steps.version.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.source_tag || github.sha }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      - name: Validate source version and publish branch
+        id: version
+        env:
+          REQUESTED_VERSION: ${{ inputs.release_version }}
+          PUBLISH: ${{ inputs.publish }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          SOURCE_TAG: ${{ inputs.source_tag }}
+        run: |
+          python - <<'PY'
+          import ast, os, pathlib, re, subprocess
+          tree = ast.parse(pathlib.Path('server.py').read_text(encoding='utf-8'))
+          version = next(ast.literal_eval(n.value) for n in tree.body
+                         if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'VERSION' for t in n.targets))
+          assert re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', version), 'Only stable three-part versions are released'
+          assert os.environ['REQUESTED_VERSION'] == version, 'Requested version must match server.VERSION'
+          source_tag = os.environ['SOURCE_TAG']
+          assert not source_tag or source_tag == 'v' + version, 'source_tag must be the exact existing stable version tag'
+          source_sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          if os.environ['PUBLISH'] == 'true':
+              assert os.environ['GITHUB_REF'] == 'refs/heads/' + os.environ['DEFAULT_BRANCH'], 'Publish from the default branch only'
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write(f'version={version}\ntag=v{version}\nsource_sha={source_sha}\n')
+          PY
+      - run: python -m pip install -r requirements.txt
+      - name: Backend regression tests
+        run: python -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Frontend regression tests
+        run: node --test tests/test_*.js
+
+  windows:
+    needs: test
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ needs.test.outputs.source_sha }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          architecture: x64
+          cache: pip
+      - name: Install Inno Setup if not already available
+        shell: pwsh
+        run: |
+          $compiler = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path -LiteralPath $compiler)) {
+            choco install innosetup --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'Inno Setup installation failed' }
+          }
+      - name: Build Windows installer and portable package
+        shell: pwsh
+        env:
+          RELEASE_REPOSITORY: ${{ github.repository }}
+        run: ./desktop/build_windows.ps1 -Repository $env:RELEASE_REPOSITORY -OutputDirectory 'dist/windows'
+      - name: Smoke test the frozen Windows server
+        shell: pwsh
+        run: python desktop/smoke_windows.py --executable dist/windows/portable/Gravelle/GravelleServer.exe --work-root work/windows-smoke --report work/windows-smoke/report.json
+      - name: Preserve the Windows smoke report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-smoke-report
+          path: work/windows-smoke/report.json
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Verify required Windows assets
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.test.outputs.version }}
+        run: |
+          foreach ($name in @("Gravelle-Setup-$env:RELEASE_VERSION-x64.exe", "Gravelle-Windows-$env:RELEASE_VERSION-x64.zip")) {
+            $asset = Join-Path 'dist/windows' $name
+            if (-not (Test-Path -LiteralPath $asset -PathType Leaf)) { throw "Missing release asset: $name" }
+          }
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-release
+          path: |
+            dist/windows/*.exe
+            dist/windows/*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  docker-validate:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ needs.test.outputs.source_sha }}
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - name: Build and load validation image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/${{ matrix.arch }}
+          load: true
+          push: false
+          tags: gravelle:ci-${{ matrix.arch }}
+          build-args: |
+            GRAVELLE_VERSION=${{ needs.test.outputs.version }}
+            GRAVELLE_RELEASE_REPOSITORY=${{ github.repository }}
+            VCS_REF=${{ needs.test.outputs.source_sha }}
+            SOURCE_URL=https://github.com/${{ github.repository }}
+          cache-from: type=gha,scope=gravelle-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=gravelle-${{ matrix.arch }}
+      - name: Test both Compose definitions and locked-down image startup
+        env:
+          RELEASE_VERSION: ${{ needs.test.outputs.version }}
+          TEST_IMAGE: gravelle:ci-${{ matrix.arch }}
+          GRAVELLE_IMAGE: gravelle:ci-${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          docker compose -f compose.yaml config --quiet
+          docker compose -f compose.build.yaml config --quiet
+          docker image inspect "$TEST_IMAGE" --format '{{json .Config.User}}' | grep -Fx '"1000:1000"'
+          mkdir -p "$RUNNER_TEMP/gravelle-library" "$RUNNER_TEMP/gravelle-data"
+          sudo chown 1000:1000 "$RUNNER_TEMP/gravelle-data"
+          container=$(docker run -d --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --tmpfs /tmp:rw,noexec,nosuid,size=64m,mode=1777 \
+            --mount "type=bind,src=$RUNNER_TEMP/gravelle-library,dst=/library,readonly" \
+            --mount "type=bind,src=$RUNNER_TEMP/gravelle-data,dst=/data" \
+            -p 127.0.0.1::8080 "$TEST_IMAGE")
+          trap 'docker logs "$container"; docker rm -f "$container"' EXIT
+          port=$(docker port "$container" 8080/tcp | sed 's/.*://')
+          ready=false
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent "http://127.0.0.1:$port/api/health" > "$RUNNER_TEMP/health.json"; then
+              ready=true
+              break
+            fi
+            sleep 2
+          done
+          test "$ready" = true
+          python - <<'PY'
+          import json, os, pathlib
+          health = json.loads((pathlib.Path(os.environ['RUNNER_TEMP']) / 'health.json').read_text())
+          assert health == {'status': 'ok', 'version': os.environ['RELEASE_VERSION']}, health
+          PY
+          docker exec "$container" python -c "from pathlib import Path; p=Path('/data/ci-check'); p.write_text('ok'); p.unlink(); assert Path('/library').is_dir()"
+      - name: Export validation image for testing without Docker Hub
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/${{ matrix.arch }}
+          push: false
+          outputs: type=oci,dest=${{ runner.temp }}/gravelle-linux-${{ matrix.arch }}.oci.tar
+          build-args: |
+            GRAVELLE_VERSION=${{ needs.test.outputs.version }}
+            GRAVELLE_RELEASE_REPOSITORY=${{ github.repository }}
+            VCS_REF=${{ needs.test.outputs.source_sha }}
+            SOURCE_URL=https://github.com/${{ github.repository }}
+          cache-from: type=gha,scope=gravelle-${{ matrix.arch }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: docker-validation-${{ matrix.arch }}
+          path: ${{ runner.temp }}/gravelle-linux-${{ matrix.arch }}.oci.tar
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  publish:
+    if: inputs.publish
+    needs: [test, windows, docker-validate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    environment: release
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_VERSION: ${{ needs.test.outputs.version }}
+      RELEASE_TAG: ${{ needs.test.outputs.tag }}
+      RELEASE_REPOSITORY: ${{ github.repository }}
+      SOURCE_SHA: ${{ needs.test.outputs.source_sha }}
+      DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE }}
+      DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ needs.test.outputs.source_sha }}
+      - name: Validate Docker Hub configuration
+        if: inputs.publish_docker
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          python - <<'PY'
+          import os, re
+          assert re.fullmatch(r'[a-z0-9][a-z0-9_-]*/[a-z0-9][a-z0-9_-]{1,254}', os.environ['DOCKERHUB_IMAGE']), 'Set DOCKERHUB_IMAGE to your actual namespace/image, without a tag'
+          assert os.environ['DOCKERHUB_USERNAME'] and os.environ['DOCKERHUB_TOKEN'], 'Set DOCKERHUB_USERNAME and secret DOCKERHUB_TOKEN; leave publish_docker=false before configuring Docker Hub'
+          PY
+      - uses: actions/download-artifact@v8
+        with:
+          name: windows-release
+          path: dist/release
+      - name: Assemble source and Docker deployment assets
+        env:
+          PUBLISH_DOCKER: ${{ inputs.publish_docker }}
+        run: |
+          set -euo pipefail
+          python packaging/package_source.py --output-dir dist/release --version "$RELEASE_VERSION"
+          if [ "$PUBLISH_DOCKER" = true ]; then
+            docker_note="Docker Hub 镜像：\`$DOCKERHUB_IMAGE:$RELEASE_VERSION\`（linux/amd64、linux/arm64）"
+          else
+            docker_note="Docker Hub 镜像：本次尚未发布，暂请使用源码构建；Docker 配置包已准备。"
+          fi
+          cat > dist/release-notes.md <<EOF
+          Windows 安装包：Gravelle-Setup-$RELEASE_VERSION-x64.exe
+
+          $docker_note
+
+          Docker 安装配置包：Gravelle-Docker-$RELEASE_VERSION.zip，部署步骤见包内 docs/docker-release.md。
+
+          更新前请备份服务端的数据目录。文件校验值见 SHA256SUMS.txt。
+          EOF
+      - name: Create or resume a draft release
+        id: release
+        env:
+          PUBLISH_DOCKER: ${{ inputs.publish_docker }}
+        run: |
+          set -euo pipefail
+          upload_assets=true
+          remote_tag=$(git ls-remote --tags origin "refs/tags/$RELEASE_TAG" "refs/tags/$RELEASE_TAG^{}")
+          if [ -n "$remote_tag" ]; then
+            git fetch --no-tags origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+            test "$(git rev-parse "$RELEASE_TAG^{commit}")" = "$SOURCE_SHA"
+          fi
+          if gh release view "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" --json isDraft,targetCommitish,assets > "$RUNNER_TEMP/release.json"; then
+            python - <<'PY'
+          import json, os, pathlib
+          release = json.loads((pathlib.Path(os.environ['RUNNER_TEMP']) / 'release.json').read_text())
+          if release['isDraft']:
+              assert release['targetCommitish'] == os.environ['SOURCE_SHA'], 'Existing draft belongs to a different source commit'
+          else:
+              assert os.environ['PUBLISH_DOCKER'] == 'true', 'Published Windows assets are immutable; use a new version for changes'
+              version = os.environ['RELEASE_VERSION']
+              required = {f'Gravelle-Setup-{version}-x64.exe', f'Gravelle-Windows-{version}-x64.zip',
+                          f'Gravelle-Docker-{version}.zip', f'Gravelle-Source-{version}.zip', 'SHA256SUMS.txt'}
+              assert required <= {asset['name'] for asset in release['assets']}, 'Published release is missing required assets; do not replace it automatically'
+              with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+                  output.write('existing_published=true\n')
+          PY
+            if jq -e '.isDraft == false' "$RUNNER_TEMP/release.json" >/dev/null; then
+              upload_assets=false
+            fi
+          else
+            gh release create "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" --target "$SOURCE_SHA" \
+              --draft --title "Gravelle $RELEASE_VERSION" --notes-file dist/release-notes.md --generate-notes
+          fi
+          if [ "$upload_assets" = true ]; then
+            gh release upload "$RELEASE_TAG" dist/release/* --repo "$RELEASE_REPOSITORY" --clobber
+          fi
+      - uses: docker/setup-qemu-action@v4
+        if: inputs.publish_docker
+      - uses: docker/setup-buildx-action@v4
+        if: inputs.publish_docker
+      - uses: docker/login-action@v4
+        if: inputs.publish_docker
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Push versioned Docker Hub image
+        if: inputs.publish_docker
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ vars.DOCKERHUB_IMAGE }}:${{ needs.test.outputs.version }}
+          build-args: |
+            GRAVELLE_VERSION=${{ needs.test.outputs.version }}
+            GRAVELLE_RELEASE_REPOSITORY=${{ github.repository }}
+            VCS_REF=${{ needs.test.outputs.source_sha }}
+            SOURCE_URL=https://github.com/${{ github.repository }}
+          cache-from: |
+            type=gha,scope=gravelle-amd64
+            type=gha,scope=gravelle-arm64
+          sbom: true
+          provenance: mode=min
+      - name: Record whether the Docker image is published
+        env:
+          PUBLISH_DOCKER: ${{ inputs.publish_docker }}
+        run: |
+          gh release view "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" --json body > "$RUNNER_TEMP/release-body.json"
+          python - <<'PY'
+          import json, os, pathlib, re
+          body = json.loads((pathlib.Path(os.environ['RUNNER_TEMP']) / 'release-body.json').read_text())['body']
+          if os.environ['PUBLISH_DOCKER'] == 'true':
+              note = f"Docker Hub 镜像：`{os.environ['DOCKERHUB_IMAGE']}:{os.environ['RELEASE_VERSION']}`（linux/amd64、linux/arm64）"
+          else:
+              note = 'Docker Hub 镜像：本次尚未发布，暂请使用源码构建；Docker 配置包已准备。'
+          if re.search(r'^Docker Hub 镜像：.*$', body, flags=re.M):
+              body = re.sub(r'^Docker Hub 镜像：.*$', lambda match: note, body, flags=re.M)
+          else:
+              body = body.rstrip() + '\n\n' + note + '\n'
+          pathlib.Path('dist/docker-release-notes.md').write_text(body, encoding='utf-8')
+          PY
+          gh release edit "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" --notes-file dist/docker-release-notes.md
+      - name: Publish the GitHub release
+        if: steps.release.outputs.existing_published != 'true'
+        run: gh release edit "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" --draft=false --latest
+      - name: Promote the tested image to latest
+        if: inputs.publish_docker
+        run: |
+          latest_tag=$(gh release view --repo "$RELEASE_REPOSITORY" --json tagName --jq .tagName)
+          if [ "$latest_tag" = "$RELEASE_TAG" ]; then
+            docker buildx imagetools create --tag "$DOCKERHUB_IMAGE:latest" "$DOCKERHUB_IMAGE:$RELEASE_VERSION"
+          else
+            echo 'This release is not the current GitHub latest; leaving Docker latest unchanged.'
+          fi
