@@ -5,7 +5,7 @@ services:
     build:
       context: .
       args:
-        GRAVELLE_RELEASE_REPOSITORY: "${GRAVELLE_RELEASE_REPOSITORY:-pumpkissster/gravelle}"
+        GRAVELLE_RELEASE_REPOSITORY: "${GRAVELLE_RELEASE_REPOSITORY:-pumpkissster/Gravelle}"
     image: gravelle-reader:local
     restart: unless-stopped
     user: "${PUID:-1000}:${PGID:-1000}"

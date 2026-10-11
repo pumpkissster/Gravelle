@@ -2,9 +2,11 @@
 
 支持 Windows 10（1809 或更新）／Windows 11 x64。安装包自带 Python、图片处理依赖与网页程序，不需要 Docker 或手动安装 Python。
 
+1.8.3 起，安装程序提供简体中文和 English，按 Windows 系统界面语言自动选择；启动器使用项目 SVG 字标生成的品牌图。升级沿用原账户与资料目录。
+
 ## 安装与启动
 
-1. 从 [GitHub Releases](https://github.com/pumpkissster/gravelle/releases) 下载 `Gravelle-Setup-版本号-x64.exe` 并安装。默认仅安装给当前 Windows 用户。
+1. 从 [GitHub Releases](https://github.com/pumpkissster/Gravelle/releases) 下载 `Gravelle-Setup-版本号-x64.exe` 并安装。默认仅安装给当前 Windows 用户。
 2. 打开“Gravelle”，选择写真根文件夹。网页可在该根目录内创建多个写真库。
 3. 设置端口（默认 8080）；需要手机、平板访问时，勾选“允许局域网访问”。
 4. 点击“检查目录与网络”，确认目录可读、端口未被占用。
@@ -40,7 +42,7 @@ New-NetFirewallRule -Name 'Gravelle-LAN-8080' -DisplayName 'Gravelle LAN (TCP 80
 在 Windows x64 安装 Python 3.12 或更新版本，以及官方 [Inno Setup](https://jrsoftware.org/isdl.php)，在项目目录运行：
 
 ```powershell
-./desktop/build_windows.ps1 -Repository pumpkissster/gravelle
+./desktop/build_windows.ps1 -Repository pumpkissster/Gravelle
 ```
 
 脚本在项目 `work/windows-build/venv` 创建隔离环境，输出 `dist/windows/Gravelle-Setup-版本号-x64.exe`、便携 zip 和 `SHA256SUMS.txt`。若编译器不在默认位置，可以用 `-InnoCompiler 完整路径` 指定。`-PortableOnly` 仅构建便携测试版。

@@ -4,14 +4,14 @@
 
 ## 从 Docker Hub 安装
 
-镜像仓库为 [pumpkissster/gravelle](https://hub.docker.com/r/pumpkissster/gravelle)，正式安装使用固定版本 `pumpkissster/gravelle:1.8.2`。Docker 会按宿主机选择 amd64 或 arm64 镜像。
+镜像仓库为 [pumpkissster/gravelle](https://hub.docker.com/r/pumpkissster/gravelle)，正式安装使用固定版本 `pumpkissster/gravelle:1.8.3`。Docker 会按宿主机选择 amd64 或 arm64 镜像。
 
-1. 从 [GitHub Release](https://github.com/pumpkissster/gravelle/releases/tag/v1.8.2) 下载 `Gravelle-Docker-1.8.2.zip`，解压到固定的项目目录。
+1. 从 [GitHub Release](https://github.com/pumpkissster/Gravelle/releases/tag/v1.8.3) 下载 `Gravelle-Docker-1.8.3.zip`，解压到固定的项目目录。
 2. 将 `.env.example` 复制为 `.env`，填写以下项目。如果已有配置包中的镜像地址为空，手动填写下列固定版本即可：
 
 | 配置 | 内容 |
 | --- | --- |
-| `GRAVELLE_IMAGE` | `pumpkissster/gravelle:1.8.2` |
+| `GRAVELLE_IMAGE` | `pumpkissster/gravelle:1.8.3` |
 | `COMICS_PATH` | 宿主机写真根目录，例如 `/volume1/photosets` |
 | `DATA_PATH` | 宿主机资料目录，模板为 `/volume1/docker/sumi-reader/data`；已有安装保留原值 |
 | `PUID` / `PGID` | 对作品目录有读取权限、对资料目录有读写权限的用户 UID / GID |
@@ -42,7 +42,7 @@ docker compose ps
 docker compose -f compose.build.yaml up -d --build
 ```
 
-此方式不需要 Docker Hub 账号，也不需要设置 `GRAVELLE_IMAGE`。`GRAVELLE_RELEASE_REPOSITORY` 仅在源码构建时指定更新检查仓库，默认为 `pumpkissster/gravelle`。正式镜像内已内置发布仓库；如需要自行维护分支，在 Compose 的 `environment` 中明确添加非空的 `GRAVELLE_RELEASE_REPOSITORY: 你的账号/仓库`。
+此方式不需要 Docker Hub 账号，也不需要设置 `GRAVELLE_IMAGE`。`GRAVELLE_RELEASE_REPOSITORY` 仅在源码构建时指定更新检查仓库，默认为 `pumpkissster/Gravelle`。正式镜像内已内置发布仓库；如需要自行维护分支，在 Compose 的 `environment` 中明确添加非空的 `GRAVELLE_RELEASE_REPOSITORY: 你的账号/仓库`。
 
 ## 更新和旧版迁移
 

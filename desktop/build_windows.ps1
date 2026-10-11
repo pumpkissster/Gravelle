@@ -1,5 +1,5 @@
 param(
-    [string]$Repository = 'pumpkissster/gravelle',
+    [string]$Repository = 'pumpkissster/Gravelle',
     [string]$OutputDirectory = 'dist/windows',
     [string]$Python = 'python',
     [string]$InnoCompiler = '',
@@ -40,8 +40,9 @@ try {
 
     $prepareCode = @'
 from pathlib import Path
-import ast, json, sys
+import ast, io, json, sys
 from PIL import Image
+import resvg_py
 root=Path.cwd()
 tree=ast.parse((root/'server.py').read_text(encoding='utf-8'))
 version=next(ast.literal_eval(node.value) for node in tree.body if isinstance(node,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='VERSION' for t in node.targets))
@@ -52,6 +53,15 @@ config={'repository':repo,'asset_name':'Gravelle-Setup-{version}-x64.exe','sha25
 (build/'release.json').write_text(json.dumps({'repository':repo},indent=2)+'\n',encoding='utf-8')
 with Image.open(root/'static/gravelle-icon.png') as image:
     image.save(root/'desktop/gravelle.ico',sizes=[(16,16),(32,32),(48,48),(64,64),(128,128),(256,256)])
+# Render from the supplied SVG on every build, keeping the checked-in source
+# launcher asset and frozen resources in sync without a runtime SVG dependency.
+wordmark=root/'desktop/assets/gravelle-wordmark.png'
+wordmark.parent.mkdir(exist_ok=True)
+png=resvg_py.svg_to_bytes(svg_path=str(root/'static/gravelle-wordmark.svg'),width=600,skip_system_fonts=True)
+with Image.open(io.BytesIO(png)) as image:
+    if image.mode!='RGBA' or image.width!=600 or image.getextrema()[3]!=(0,255):
+        raise ValueError('The Gravelle wordmark must be a transparent RGBA PNG, 600 pixels wide.')
+wordmark.write_bytes(png)
 (build/'version.txt').write_text(version,encoding='ascii')
 print('Preparing Gravelle '+version+' for '+repo)
 '@
@@ -90,6 +100,7 @@ for name in ('Pillow','PyInstaller'):
 '@
     & $Python -c $licenseCode $bundleDirectory
     if ($LASTEXITCODE -ne 0) { throw 'Unable to collect license notices.' }
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'languages/LICENSE-Inno-Setup.txt') -Destination (Join-Path $bundleDirectory 'licenses/Inno-Setup-LICENSE.txt') -Force
     $archivePath = Join-Path $artifactDirectory ("Gravelle-Windows-$version-x64.zip")
     # zipfile handles Unicode paths and files larger than Compress-Archive's limit.
     & $Python -c 'from pathlib import Path; import sys,zipfile; root=Path(sys.argv[1]); output=Path(sys.argv[2]); z=zipfile.ZipFile(output,"w",zipfile.ZIP_DEFLATED); [z.write(p,"Gravelle/"+p.relative_to(root).as_posix()) for p in sorted(root.rglob("*")) if p.is_file()]; z.close()' $bundleDirectory $archivePath

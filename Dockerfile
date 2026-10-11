@@ -1,7 +1,7 @@
 FROM python:3.12-slim
 
 ARG GRAVELLE_VERSION=source
-ARG GRAVELLE_RELEASE_REPOSITORY=pumpkissster/gravelle
+ARG GRAVELLE_RELEASE_REPOSITORY=pumpkissster/Gravelle
 ARG VCS_REF=unknown
 ARG SOURCE_URL=
 

@@ -1,2 +1,4 @@
 -r ../requirements.txt
 PyInstaller==6.22.3
+# Build-only SVG renderer. The launcher loads the generated PNG with Pillow.
+resvg-py==0.5.0

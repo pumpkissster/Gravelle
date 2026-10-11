@@ -54,7 +54,7 @@ class ReleaseValidationTests(unittest.TestCase):
                 release_version(value)
 
     def test_repository_is_an_identifier_not_a_url(self):
-        self.assertEqual(release_repository(" pumpkissster/gravelle "), "pumpkissster/gravelle")
+        self.assertEqual(release_repository(" pumpkissster/Gravelle "), "pumpkissster/Gravelle")
         self.assertEqual(release_repository("example-org/project_reader"), "example-org/project_reader")
         for value in (None, "", "https://github.com/example/repo", "http://127.0.0.1/x", "example/../repo",
                       "example/%2e%2e", "example/repo?url=localhost", "example/repo#x", "example//repo",

@@ -17,7 +17,27 @@ from desktop.core import (LauncherConfig, LauncherError, ReleaseConfig, SingleIn
                           lan_addresses, load_config, load_release_config, network_diagnostics,
                           save_config, validate_download_url, verify_installer, version_key)
 from desktop.runtime import ServerController
-from desktop.launcher import InstallerLaunchError, launch_verified_installer
+from desktop.launcher import InstallerLaunchError, launch_verified_installer, launcher_window_metrics
+
+
+class WindowSizingTests(unittest.TestCase):
+    def test_regular_desktop_uses_spacious_default_size(self):
+        metrics = launcher_window_metrics(1920, 1080, 1)
+        self.assertEqual((metrics["width"], metrics["height"]), (700, 720))
+        self.assertLessEqual(metrics["min_width"], metrics["width"])
+        self.assertLessEqual(metrics["min_height"], metrics["height"])
+
+    def test_small_and_high_dpi_desktops_keep_window_and_minimum_inside_screen(self):
+        for width, height, scale in ((1366, 768, 1), (1280, 720, 1.5), (1920, 1080, 2),
+                                     (3840, 2160, 3), (800, 600, 1.25)):
+            with self.subTest(screen=(width, height), scale=scale):
+                metrics = launcher_window_metrics(width, height, scale)
+                self.assertGreater(metrics["width"], 0)
+                self.assertGreater(metrics["height"], 0)
+                self.assertLess(metrics["width"], width)
+                self.assertLess(metrics["height"], height)
+                self.assertLessEqual(metrics["min_width"], metrics["width"])
+                self.assertLessEqual(metrics["min_height"], metrics["height"])
 
 
 class ConfigurationTests(unittest.TestCase):
@@ -87,20 +107,20 @@ class UpdateTests(unittest.TestCase):
             root = Path(folder)
             self.assertIsNone(load_release_config(root))
             (root / "desktop").mkdir()
-            (root / "desktop" / "release.json").write_text('{"repository":"pumpkissster/gravelle"}')
-            self.assertEqual(load_release_config(root).repository, "pumpkissster/gravelle")
+            (root / "desktop" / "release.json").write_text('{"repository":"pumpkissster/Gravelle"}')
+            self.assertEqual(load_release_config(root).repository, "pumpkissster/Gravelle")
 
     def test_api_html_url_never_controls_navigation(self):
         class Response:
             def __enter__(self): return self
             def __exit__(self, *args): pass
-            def geturl(self): return "https://api.github.com/repos/pumpkissster/gravelle/releases/latest"
+            def geturl(self): return "https://api.github.com/repos/pumpkissster/Gravelle/releases/latest"
             def read(self, limit):
                 return b'{"tag_name":"v2.0.0","html_url":"https://evil.example/setup.exe"}'
         with patch("desktop.core.urlopen", return_value=Response()):
-            result = check_update(ReleaseConfig("pumpkissster/gravelle"), "1.8.2")
+            result = check_update(ReleaseConfig("pumpkissster/Gravelle"), "1.8.2")
         self.assertTrue(result["available"])
-        self.assertEqual(result["url"], "https://github.com/pumpkissster/gravelle/releases")
+        self.assertEqual(result["url"], "https://github.com/pumpkissster/Gravelle/releases")
 
     def test_redirect_and_download_trust(self):
         validate_download_url("https://release-assets.githubusercontent.com/a?signature=123")
@@ -114,12 +134,12 @@ class UpdateTests(unittest.TestCase):
             def __init__(self, tag): self.tag = tag
             def __enter__(self): return self
             def __exit__(self, *args): pass
-            def geturl(self): return "https://api.github.com/repos/pumpkissster/gravelle/releases/latest"
+            def geturl(self): return "https://api.github.com/repos/pumpkissster/Gravelle/releases/latest"
             def read(self, limit):
                 return json.dumps({"tag_name": self.tag, "prerelease": False, "draft": False}).encode()
         for tag in ("v1.9.0-rc.1", "v01.9.0", "v1.09.0", "v1.9.00", "V1.9.0", "v1.9.0+build", "v1000000000.0.0"):
             with self.subTest(tag=tag), patch("desktop.core.urlopen", return_value=Response(tag)):
-                result = check_update(ReleaseConfig("pumpkissster/gravelle"), "1.8.2")
+                result = check_update(ReleaseConfig("pumpkissster/Gravelle"), "1.8.2")
                 self.assertFalse(result["available"])
                 self.assertNotIn("tag", result)
 
@@ -140,7 +160,7 @@ class UpdateTests(unittest.TestCase):
                 return (digest + "  " + filename).encode()
             destination.write(installer)
         with tempfile.TemporaryDirectory() as folder, patch("desktop.core._download", side_effect=fake_download):
-            result = download_update(ReleaseConfig("pumpkissster/gravelle"), {"tag": "v2.0.0"}, Path(folder))
+            result = download_update(ReleaseConfig("pumpkissster/Gravelle"), {"tag": "v2.0.0"}, Path(folder))
             self.assertTrue(verify_installer(Path(result["path"]), result["sha256"]))
             self.assertFalse(list(Path(folder).glob("*.part")))
 
@@ -151,7 +171,7 @@ class UpdateTests(unittest.TestCase):
             destination.write(b"corrupt")
         with tempfile.TemporaryDirectory() as folder, patch("desktop.core._download", side_effect=fake_download):
             with self.assertRaises(LauncherError):
-                download_update(ReleaseConfig("pumpkissster/gravelle"), {"tag": "v2.0.0"}, Path(folder))
+                download_update(ReleaseConfig("pumpkissster/Gravelle"), {"tag": "v2.0.0"}, Path(folder))
             self.assertEqual(list(Path(folder).iterdir()), [])
 
 

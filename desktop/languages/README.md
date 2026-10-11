@@ -1,0 +1,9 @@
+# Installer languages
+
+`ChineseSimplified.isl` is vendored unchanged from the official Inno Setup **7.1.0** source release, commit [`7d634620f1d1caca6c76e8398da7133153db9e7b`](https://github.com/jrsoftware/issrc/blob/7d634620f1d1caca6c76e8398da7133153db9e7b/Files/Languages/ChineseSimplified.isl). It declares compatibility with Inno Setup 6.5.0 and later. Its translator credits remain in the file. `LICENSE-Inno-Setup.txt` is the license from the same source release. English messages use the compiler's `Default.isl`. Builds do not download language files or rely on a machine-local Chinese translation.
+
+The installer follows the current Windows display language using [`LanguageDetectionMethod=uilanguage`](https://jrsoftware.org/ishelp/topic_setup_languagedetectionmethod.htm), and always offers the [language chooser](https://jrsoftware.org/ishelp/topic_setup_showlanguagedialog.htm). English is the fallback for other system languages. [`UsePreviousLanguage=no`](https://jrsoftware.org/ishelp/topic_setup_usepreviouslanguage.htm) lets an upgrade from the English-only 1.8.2 installer pick Chinese on a Chinese Windows system. Explicit `/LANG=english` and `/LANG=chinesesimplified` also work for unattended deployment.
+
+The existing AppId, per-user install mode, install directory and English language identifier are unchanged. Upgrades replace the same installation. The uninstaller retains the language selected at installation; changing Windows language later does not change an existing uninstaller. Reinstalling or upgrading lets the user choose again. Uninstalling retains application data outside the installation directory.
+
+Gravelle's shortcut task and completion-page action use language-specific `[CustomMessages]` in `installer.iss`. When updating Inno Setup, compile both languages and review new message keys before changing this pinned translation.

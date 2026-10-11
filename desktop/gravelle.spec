@@ -13,18 +13,20 @@ analysis = Analysis(
         (str(root / 'static'), 'static'),
         (str(resources / 'release.json'), '.'),
         (str(resources / 'desktop' / 'release.json'), 'desktop'),
+        (str(root / 'desktop' / 'assets' / 'gravelle-wordmark.png'), 'desktop/assets'),
     ],
     hiddenimports=['server', 'desktop.runtime', 'PIL.Image'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=['resvg_py'],
     noarchive=False,
 )
 pyz = PYZ(analysis.pure)
 common = dict(exclude_binaries=True, debug=False, bootloader_ignore_signals=False,
               strip=False, upx=False, icon=str(root / 'desktop' / 'gravelle.ico'))
-launcher = EXE(pyz, analysis.scripts, [], name='Gravelle', console=False, **common)
+launcher = EXE(pyz, analysis.scripts, [], name='Gravelle', console=False,
+               manifest=str(root / 'desktop' / 'gravelle.manifest'), **common)
 service = EXE(pyz, analysis.scripts, [], name='GravelleServer', console=True, **common)
 bundle = COLLECT(launcher, service, analysis.binaries, analysis.datas,
                  strip=False, upx=False, name='Gravelle')

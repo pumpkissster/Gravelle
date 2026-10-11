@@ -45,7 +45,7 @@ class V18Tests(unittest.TestCase):
 
     def test_user_avatar_default_upload_cache_reset_restart(self):
         initial = self.app.request("/api/session")[1]
-        self.assertEqual(initial["version"], "1.8.2")
+        self.assertEqual(initial["version"], "1.8.3")
         self.assertTrue(initial["user"]["avatar_url"].startswith("/default-avatar.png"))
         transparent = Image.new("RGBA", (600, 400), (255, 0, 0, 0))
         status, updated, _ = self.app.request("/api/profile", {"avatar_upload": upload(transparent)})

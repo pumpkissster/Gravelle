@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       release_version:
-        description: "版本号，必须与 server.py 的 VERSION 一致，例如 1.8.2"
+        description: "版本号，必须与 server.py 的 VERSION 一致，例如 1.8.3"
         required: true
         type: string
       publish:
@@ -18,7 +18,7 @@ on:
         required: true
         type: boolean
       source_tag:
-        description: "补发已有版本的 Docker 镜像时填写原标签（如 v1.8.2）；初次发布留空"
+        description: "补发已有版本的 Docker 镜像时填写原标签（如 v1.8.3）；初次发布留空"
         default: ""
         required: false
         type: string
@@ -276,6 +276,16 @@ jobs:
 
           更新前请备份服务端的数据目录。文件校验值见 SHA256SUMS.txt。
           EOF
+          if [ "$RELEASE_VERSION" = '1.8.3' ]; then
+            cat >> dist/release-notes.md <<'EOF'
+
+          本次更新：
+          - GitHub 仓库名称统一为 Gravelle，更新检查和官方链接同步调整。
+          - Windows 安装程序支持简体中文与英文，默认跟随系统界面语言，也可手动选择。
+          - 启动器采用用户提供的 SVG 字标，调整浅粉配色、分组卡片和操作区布局；小屏窗口可滚动配置区域。
+          - 启动器加入 Windows 高 DPI 感知，改善 4K 高缩放屏幕上的文字清晰度。
+          EOF
+          fi
       - name: Create or resume a draft release
         id: release
         env:

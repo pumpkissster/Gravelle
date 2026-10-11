@@ -42,7 +42,7 @@ import zipfile
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
-VERSION = "1.8.2"
+VERSION = "1.8.3"
 MEDIA_TYPES = {"manga_jp", "manga_kr", "comic_us", "photo"}
 IMAGE_TYPES = {
     ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
