@@ -27,13 +27,14 @@ Gravelle 是支持 Windows、Docker 和 NAS 的个人写真阅读器，也能读
 
 ## Docker / NAS 部署
 
-**当前尚无已发布的 Docker Hub 镜像，请使用完整源码构建。** 不要把示例镜像名当作可拉取地址；后续镜像以发行说明实际公布的地址为准。
+Docker Hub 镜像为 [`pumpkissster/gravelle`](https://hub.docker.com/r/pumpkissster/gravelle)，固定版本使用 `pumpkissster/gravelle:1.8.2`，支持 `linux/amd64`、`linux/arm64`。
 
-下载并解压源码包，在项目目录复制 `.env.example` 为 `.env`，填写宿主机路径和运行用户：
+下载 [Release](https://github.com/pumpkissster/gravelle/releases/tag/v1.8.2) 中的 Docker 配置包，解压后复制 `.env.example` 为 `.env`，确认镜像地址并填写宿主机路径和运行用户：
 
 ```dotenv
+GRAVELLE_IMAGE=pumpkissster/gravelle:1.8.2
 COMICS_PATH=/volume1/photosets
-DATA_PATH=/volume1/docker/gravelle/data
+DATA_PATH=/volume1/docker/sumi-reader/data
 PUID=1000
 PGID=1000
 WEB_PORT=8080
@@ -42,12 +43,15 @@ WEB_PORT=8080
 创建目录，确保运行用户可读写真、可读写资料。UID/GID 用 `id 你的用户名` 查询，然后运行：
 
 ```sh
-docker compose -f compose.build.yaml up -d --build
+docker compose pull
+docker compose up -d
 ```
 
-打开 `http://服务器局域网IP:8080`，注册并创建写真库。群晖 Container Manager 可在「项目」中使用源码目录和 `compose.build.yaml`。支持 `linux/amd64`、`linux/arm64`。
+打开 `http://服务器局域网IP:8080`，注册并创建写真库。群晖 Container Manager 可在「项目」中使用配置目录的 `compose.yaml` 与 `.env`；UID/GID 填实际具有目录权限的用户，不要直接套用示例数值。
 
-宿主机 `COMICS_PATH` 只读挂载到 **`/library`**，网页目录请选择 `/library` 或其子目录；`DATA_PATH` 挂载到 **`/data`**。其他磁盘需先挂载到 `/library/子目录` 才能在网页选择。`compose.yaml` 留给正式镜像安装。
+宿主机 `COMICS_PATH` 只读挂载到 **`/library`**，网页目录请选择 `/library` 或其子目录；`DATA_PATH` 挂载到 **`/data`**。其他磁盘需先挂载到 `/library/子目录` 才能在网页选择。已有安装保留原数据路径、运行用户与项目名称。
+
+也可下载完整源码，执行 `docker compose -f compose.build.yaml up -d --build` 自行构建。详细权限、更新与排查见 [Docker 部署说明](docs/docker-release.md)。
 
 ## 整理文件夹与自动资料
 
