@@ -1114,13 +1114,14 @@ class ReadingPreferenceTests(unittest.TestCase):
         self.app.request(self.route + '/progress', {'page': 1, 'completed': False})
         self.app.request(self.route + '/favorite', {'favorite': True})
         bookmark = self.app.request(self.route + '/bookmarks', {'page': 1, 'note': '保留书签'})[1]['bookmark']
-        before = self.app.request(self.route)[1]
         other_library = self.app.create_library(name='不受影响的库', media_type='photo')
         other = self.app.books(other_library['id'])['books'][0]
         other_route = '/api/books/' + other['id']
         self.app.request(other_route + '/metadata', {'reading_mode': 'webtoon', 'reading_direction': 'rtl'})
         self.assertEqual(self.app.request(self.library_route, {'exclude_rules': ['样例.cbz']})[0], 200)
         self.assertEqual(len(self.app.books(self.library['id'])['books']), 1)
+        # Fixture changes may update shared model avatars; snapshot only the action under test.
+        before = self.app.request(self.route)[1]
         # Defaults are deliberately unchanged: the explicit action must still reset overrides.
         self.assertEqual(self.app.request(self.library_route, {'apply_reading_defaults': True})[0], 200)
         self.app.books(self.library['id'])
