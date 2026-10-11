@@ -92,8 +92,16 @@ def check_port(config: LauncherConfig) -> dict:
     config.validate(False)
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as candidate:
-            if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
-                candidate.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            if os.name == "nt":
+                if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+                    candidate.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            else:
+                # ReaderServer.allow_reuse_address permits a restart while
+                # previous connections are in TIME_WAIT. Match that on POSIX;
+                # an active listener still prevents this bind. On Windows keep
+                # exclusive binding: SO_REUSEADDR can otherwise take over an
+                # existing listener's address.
+                candidate.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             candidate.bind((config.host, config.port))
     except OSError as error:
         return {"available": False, "message": f"端口 {config.port} 已被占用或不可用，请更换端口。", "error": str(error)}

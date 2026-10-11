@@ -156,6 +156,20 @@ class UpdateTests(unittest.TestCase):
 
 
 class NetworkTests(unittest.TestCase):
+    def test_port_probe_uses_posix_reuse_and_windows_exclusive_binding(self):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+        config = LauncherConfig(str(Path.cwd()), 18080)
+        for platform, option_name in (("posix", "SO_REUSEADDR"), ("nt", "SO_EXCLUSIVEADDRUSE")):
+            with self.subTest(platform=platform):
+                candidate = MagicMock()
+                candidate.__enter__.return_value = candidate
+                with patch("desktop.core.os", SimpleNamespace(name=platform)), \
+                        patch("desktop.core.socket.SO_EXCLUSIVEADDRUSE", 4, create=True), \
+                        patch("desktop.core.socket.socket", return_value=candidate):
+                    self.assertTrue(check_port(config)["available"])
+                    candidate.setsockopt.assert_called_once_with(socket.SOL_SOCKET, getattr(socket, option_name), 1)
+
     def test_filters_loopback_linklocal_and_duplicate_addresses(self):
         with patch("server._lan_ipv4_addresses", return_value=["127.0.0.1", "169.254.1.2", "192.168.1.2", "192.168.1.2", "invalid"]):
             self.assertEqual(lan_addresses(), ["192.168.1.2"])
@@ -170,6 +184,9 @@ class NetworkTests(unittest.TestCase):
 
     def test_port_conflict_does_not_stop_existing_listener(self):
         with socket.socket() as listener:
+            # Match ReaderServer's own reuse option: the probe must still
+            # reject a live service even when that service enables reuse.
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             listener.bind(("127.0.0.1", 0))
             listener.listen()
             config = LauncherConfig(str(Path.cwd()), listener.getsockname()[1])
