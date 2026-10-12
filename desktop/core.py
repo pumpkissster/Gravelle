@@ -29,6 +29,33 @@ class LauncherConfig:
     library_path: str = str(Path.home() / "Pictures")
     port: int = 8080
     lan_enabled: bool = False
+    library_paths: tuple[str, ...] | None = None
+
+    def __post_init__(self):
+        # Keep the original positional argument and JSON key for older
+        # launchers, while the ordered array is authoritative for new ones.
+        values = (self.library_path,) if self.library_paths is None else self.library_paths
+        if not isinstance(values, (list, tuple)) or not values:
+            raise LauncherError("请至少选择一个写真根文件夹。")
+        paths, seen = [], set()
+        for index, value in enumerate(values, 1):
+            if not isinstance(value, str) or not value.strip():
+                raise LauncherError(f"第 {index} 个写真根文件夹路径无效。")
+            path = Path(value.strip()).expanduser()
+            if not path.is_absolute():
+                raise LauncherError(f"第 {index} 个写真根文件夹需要使用完整路径。")
+            try:
+                path = path.resolve()
+            except (OSError, ValueError) as error:
+                raise LauncherError(f"无法解析写真根文件夹：{path}。") from error
+            identity = os.path.normcase(str(path))
+            if identity not in seen:
+                paths.append(str(path))
+                seen.add(identity)
+        if len(paths) > 20:
+            raise LauncherError("写真根文件夹最多可以添加 20 个。")
+        object.__setattr__(self, "library_paths", tuple(paths))
+        object.__setattr__(self, "library_path", paths[0])
 
     @property
     def host(self) -> str:
@@ -43,19 +70,16 @@ class LauncherConfig:
             raise LauncherError("端口需要是 1 至 65535 之间的整数。")
         if not isinstance(self.lan_enabled, bool):
             raise LauncherError("局域网访问设置无效。")
-        if not isinstance(self.library_path, str) or not self.library_path.strip():
-            raise LauncherError("请选择写真文件夹。")
-        path = Path(self.library_path).expanduser()
-        if not path.is_absolute():
-            raise LauncherError("写真文件夹需要使用完整路径。")
         if require_directory:
-            try:
-                if not path.is_dir():
-                    raise LauncherError("写真文件夹不存在。请选择可访问的文件夹。")
-                with os.scandir(path) as entries:
-                    next(entries, None)
-            except OSError as error:
-                raise LauncherError("无法读取写真文件夹，请检查访问权限。") from error
+            for value in self.library_paths:
+                path = Path(value)
+                try:
+                    if not path.is_dir():
+                        raise LauncherError(f"写真根文件夹不存在：{path}。")
+                    with os.scandir(path) as entries:
+                        next(entries, None)
+                except OSError as error:
+                    raise LauncherError(f"无法读取写真根文件夹：{path}。请检查访问权限。") from error
         return self
 
 
@@ -125,11 +149,13 @@ def lan_addresses() -> list[str]:
 
 
 def network_diagnostics(config: LauncherConfig, running: bool = False) -> dict:
-    config.validate(False)
+    config.validate()
     addresses = lan_addresses() if config.lan_enabled else []
     urls = [f"http://{address}:{config.port}/" for address in addresses]
     result = {"local_url": config.local_url, "lan_enabled": config.lan_enabled,
-              "lan_urls": urls, "port": config.port, "firewall_verified": False}
+              "lan_urls": urls, "port": config.port, "firewall_verified": False,
+              "library_paths": list(config.library_paths),
+              "directories": [{"path": path, "readable": True} for path in config.library_paths]}
     if running:
         checks = []
         for address in ["127.0.0.1", *addresses]:
@@ -146,6 +172,7 @@ def network_diagnostics(config: LauncherConfig, running: bool = False) -> dict:
             result["message"] += " 请在其他设备打开局域网地址验证访问；此检查无法确认入站防火墙规则。"
     else:
         result.update(check_port(config))
+    result["message"] = f"{len(config.library_paths)} 个写真根文件夹可读取。" + result["message"]
     return result
 
 

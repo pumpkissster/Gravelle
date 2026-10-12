@@ -30,13 +30,13 @@ from desktop.core import LauncherConfig, check_port
 from desktop.runtime import ServerController
 
 
-def sample_png() -> bytes:
+def sample_png(color=(234, 80, 152)) -> bytes:
     def chunk(kind, data):
         return (struct.pack("!I", len(data)) + kind + data +
                 struct.pack("!I", zlib.crc32(kind + data) & 0xffffffff))
     # Two-by-two pink/white pixels; stdlib-only so the smoke driver does not
     # depend on any image codecs beyond the application's own bundled Pillow.
-    pixels = b"\x00\xea\x50\x98\xff\xff\xff\x00\xff\xff\xff\xea\x50\x98"
+    pixels = b"\x00" + bytes(color) + b"\xff\xff\xff\x00\xff\xff\xff" + bytes(color)
     return (b"\x89PNG\r\n\x1a\n" +
             chunk(b"IHDR", struct.pack("!2I5B", 2, 2, 8, 2, 0, 0, 0)) +
             chunk(b"IDAT", zlib.compress(pixels)) + chunk(b"IEND", b""))
@@ -98,9 +98,15 @@ def run_smoke(executable: Path, work_root: Path) -> dict:
         source_image = book_folder / "001.png"
         source_image.write_bytes(image)
         source_digest = hashlib.sha256(image).hexdigest()
+        second_media = test_root / "第二根目录"
+        second_folder = second_media / "几何样例" / "2026-10-11 几何图形"
+        second_folder.mkdir(parents=True)
+        second_image = sample_png((80, 120, 160))
+        second_source = second_folder / "001.png"
+        second_source.write_bytes(second_image)
         data = test_root / "data"
         log_path = test_root / "server.log"
-        config = LauncherConfig(str(media), random_port())
+        config = LauncherConfig(port=random_port(), library_paths=[str(media), str(second_media)])
         report["port"] = config.port
         controller = ServerController(data, log_path, command_prefix=[str(executable)])
         try:
@@ -138,6 +144,19 @@ def run_smoke(executable: Path, work_root: Path) -> dict:
             require(status == 200 and account.get("authenticated"), "Disposable login failed")
             passed("registration_logout_login")
 
+            status, roots, _ = client.request("/api/directories")
+            require(status == 200 and roots.get("root_paths") == [str(media), str(second_media)],
+                    "Frozen launcher did not pass both allowed roots")
+            passed("multiple_allowed_roots")
+            status, helper, _ = client.request("/batch-selection.js")
+            require(status == 200 and b"GravelleBatchSelection" in helper,
+                    "Frozen bundle is missing the batch-selection frontend module")
+            passed("packaged_batch_selection_module")
+            status, helper, _ = client.request("/page-router.js")
+            require(status == 200 and b"GravellePageRouter" in helper,
+                    "Frozen bundle is missing the page-router frontend module")
+            passed("packaged_page_router_module")
+
             status, result, _ = client.request("/api/libraries", {
                 "name": "冻结包几何样例", "paths": [str(media)], "media_type": "photo",
                 "reading_mode": "single", "reading_direction": "ltr", "hide_date_prefix": True})
@@ -164,6 +183,41 @@ def run_smoke(executable: Path, work_root: Path) -> dict:
             require(hashlib.sha256(source_image.read_bytes()).hexdigest() == source_digest,
                     "The smoke scan modified its source image")
             passed("photo_library_scan_page_and_cover", books=1, pages=1)
+
+            status, created, _ = client.request("/api/libraries", {
+                "name": "冻结包第二根目录", "paths": [str(second_media)], "media_type": "photo"})
+            require(status == 201, "Frozen service rejected a library in its second root")
+            second_library_id = created["library"]["id"]
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                status, listing, _ = client.request("/api/library?library_id=" + second_library_id)
+                if status == 200 and not listing.get("scanning"):
+                    break
+                time.sleep(.1)
+            require(status == 200 and not listing.get("scanning") and len(listing.get("books", [])) == 1,
+                    "Frozen scanner failed in the second root")
+            second_book = listing["books"][0]
+            require(second_book["id"] != book["id"], "Same-named folders across roots aliased a book ID")
+            status, page, _ = client.request(f"/api/books/{second_book['id']}/pages/0")
+            require(status == 200 and page == second_image, "Frozen reader served the wrong root's page")
+            passed("second_root_scan_and_original_page")
+
+            model_ids = []
+            for name in ("冻结演示模特甲", "冻结演示模特乙"):
+                status, created, _ = client.request("/api/models", {"name": name})
+                require(status == 201 and created.get("model", {}).get("id"), "Frozen model creation failed")
+                model_ids.append(created["model"]["id"])
+            ids = [book["id"], second_book["id"]]
+            status, changed, _ = client.request("/api/books/batch", {
+                "action": "models", "ids": ids, "model_ids": model_ids})
+            require(status == 200 and changed.get("updated") == ids, "Frozen batch model replacement failed")
+            for book_id in ids:
+                status, detail, _ = client.request(f"/api/books/{book_id}")
+                require(status == 200 and [item["id"] for item in detail["models"]] == model_ids,
+                        "Frozen batch model associations were not persisted")
+            require(source_image.read_bytes() == image and second_source.read_bytes() == second_image,
+                    "Multi-root or model operations changed original files")
+            passed("batch_model_replacement_across_roots")
 
             child = controller.process
             controller.stop()

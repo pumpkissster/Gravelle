@@ -10,7 +10,18 @@
   const End = window.SumiReaderEnd;
   const Performance = window.SumiPerformance;
   const Avatars = window.GravelleAvatars;
-  const selection = { enabled: false, ids: new Set(), busy: false };
+  const Users = window.GravelleUsers;
+  const Batch = window.GravelleBatchSelection;
+  const Routes = window.GravellePageRouter;
+  const routing = { current: Routes.parse(location.hash), ready: false, restoring: false, generation: 0 };
+  let activeUser = null;
+  let authGeneration = 0;
+  const userManagement = { users: [], libraries: [], loaded: false, loading: false, error: false, updatedAt: 0, request: 0, busy: false, editingId: null, generation: 0 };
+  const visibleLibraries = { libraries: [], selected: new Set(), loaded: false, loading: false, busy: false, dirty: false, generation: 0 };
+  let profileMutationBusy = false;
+  let profileFormGeneration = 0;
+  const selection = { enabled: false, ids: new Set(), busy: false, revision: 0 };
+  const batchModels = { ids: [], selected: new Set(), context: null, generation: 0, busy: false };
   const avatarEdits = {};
   let modelMutationBusy = false;
   let renderedLibraryData = '';
@@ -34,27 +45,77 @@
   reader.endBoundaryAt = 0;
   reader.lastWheelAt = 0;
 
+  const isAdmin = () => Users.isAdmin(state.session?.user);
+  const can = permission => Users.can(state.session?.user, permission);
+  function requireAccess(permission = 'admin') {
+    const allowed = permission === 'admin' ? isAdmin() : can(permission);
+    if (!allowed) toast('当前账号没有此操作的权限。');
+    return allowed;
+  }
+  function stored(name) {
+    if (!activeUser) return null;
+    try {
+      const key = Users.storageKey(name, activeUser);
+      let value = localStorage.getItem(key);
+      if (value === null && Users.isAdmin(activeUser) && Number(activeUser.id) === 1) {
+        value = localStorage.getItem(name);
+        if (value !== null) localStorage.setItem(key, value);
+      }
+      return value;
+    } catch (_) { return null; }
+  }
+  function storePreference(name, value) {
+    try { if (activeUser) localStorage.setItem(Users.storageKey(name, activeUser), value); } catch (_) { /* Optional device preference. */ }
+  }
+  function activateAccount(user) {
+    if (String(activeUser?.id ?? '') === String(user?.id ?? '')) { activeUser = user || null; return; }
+    routing.ready = false; routing.restoring = false; routing.generation += 1;
+    authGeneration += 1;
+    reader.pending = null; clearTimeout(reader.saveTimer);
+    if (reader.open) closeReader(false);
+    ['library-dialog', 'book-detail', 'metadata-dialog', 'model-dialog', 'bookmark-dialog', 'profile-dialog', 'remove-dialog', 'user-dialog', 'users-dialog', 'batch-model-dialog'].forEach(id => { if ($('#' + id).open) $('#' + id).close(); });
+    reader.saveChains.clear(); reader.settingsChains.clear(); reader.pageCache.clear();
+    clearTimeout(state.poll); state.poll = null; state.refreshPromise = null;
+    stopCatalogFlow(); resetSelection(); selection.busy = false;
+    state.books = []; state.libraries = []; state.models = []; state.bookmarks = [];
+    state.loaded = false; state.loading = true; state.scanning = false; state.scanErrors = []; state.libraryError = null; state.lastScan = null; state.rootPath = '/library';
+    state.view = 'home'; state.libraryId = ''; state.modelId = ''; state.query = ''; state.series = ''; state.sort = 'added';
+    state.detailBook = null; state.editingBook = null; state.editingModel = null; state.editingLibrary = null; state.selectedModels.clear(); state.bookmarkTarget = null; state.directoryPath = '';
+    $('#search').value = ''; $('#sort').value = 'added';
+    ['book-grid', 'library-tiles', 'library-nav', 'continue-card', 'models-grid', 'bookmark-list', 'detail-content', 'metadata-models'].forEach(id => $('#' + id).replaceChildren());
+    userManagement.generation += 1; Object.assign(userManagement, { users: [], libraries: [], loaded: false, loading: false, error: false, updatedAt: 0, request: 0, busy: false, editingId: null });
+    $('#users-list').replaceChildren(); $('#users-status').textContent = ''; $('#user-form').reset();
+    visibleLibraries.generation += 1; Object.assign(visibleLibraries, { libraries: [], selected: new Set(), loaded: false, loading: false, busy: false, dirty: false });
+    $('#my-libraries-options').replaceChildren(); $('#my-libraries-status').textContent = '';
+    activeUser = user || null;
+    state.prefs = { mode: 'single', direction: 'ltr', ...readPrefs() };
+    librarySorts.clear(); readLibrarySorts().forEach((value, key) => librarySorts.set(key, value));
+    applyInterfaceTheme(interfaceTheme());
+    Performance.setUser(activeUser);
+    catalogPaging.signature = ''; chapterPaging.signature = ''; renderedLibraryData = '';
+  }
+
   function readLibrarySorts() {
     try {
-      const saved = JSON.parse(localStorage.getItem('sumi-library-sorts') || '{}');
+      const saved = JSON.parse(stored('sumi-library-sorts') || '{}');
       return new Map(Object.entries(saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : {}).map(([id, sort]) => [id, End.normalizeSort(sort)]));
     } catch (_) { return new Map(); }
   }
   function librarySort(id) { return librarySorts.get(String(id)) || 'added'; }
   function saveLibrarySort(id, sort) {
     librarySorts.set(String(id), End.normalizeSort(sort));
-    try { localStorage.setItem('sumi-library-sorts', JSON.stringify(Object.fromEntries(librarySorts))); } catch (_) { /* Sorting still applies during this visit. */ }
+    storePreference('sumi-library-sorts', JSON.stringify(Object.fromEntries(librarySorts)));
   }
 
   function interfaceTheme() {
-    try { return localStorage.getItem('sumi-interface-theme') === 'light' ? 'light' : 'dark'; }
+    try { return stored('sumi-interface-theme') === 'light' ? 'light' : 'dark'; }
     catch (_) { return 'dark'; }
   }
   function applyInterfaceTheme(theme) {
     const value = theme === 'light' ? 'light' : 'dark';
     document.documentElement.dataset.interfaceTheme = value;
     document.querySelector('meta[name="theme-color"]')?.setAttribute('content', value === 'light' ? '#fcf8fa' : '#19161a');
-    try { localStorage.setItem('sumi-interface-theme', value); } catch (_) { /* Optional device preference. */ }
+    storePreference('sumi-interface-theme', value);
   }
   applyInterfaceTheme(interfaceTheme());
 
@@ -85,7 +146,7 @@
 
   function readPrefs() {
     let saved = {};
-    try { saved = JSON.parse(localStorage.getItem('sumi-preferences') || '{}') || {}; } catch (_) { /* Storage may be disabled. */ }
+    try { saved = JSON.parse(stored('sumi-preferences') || '{}') || {}; } catch (_) { /* Storage may be disabled. */ }
     const prefs = { ...defaultPrefs };
     Object.keys(defaultPrefs).forEach(key => { if (allowedPrefs[key].includes(saved[key])) prefs[key] = saved[key]; });
     return prefs;
@@ -94,7 +155,7 @@
   function savePref(key, value) {
     if (!allowedPrefs[key]?.includes(value)) return;
     state.prefs[key] = value;
-    try { localStorage.setItem('sumi-preferences', JSON.stringify(Object.fromEntries(Object.keys(defaultPrefs).map(key => [key, state.prefs[key]])))); } catch (_) { /* Reading still works without local storage. */ }
+    storePreference('sumi-preferences', JSON.stringify(Object.fromEntries(Object.keys(defaultPrefs).map(key => [key, state.prefs[key]]))));
   }
 
   class ApiError extends Error {
@@ -102,12 +163,14 @@
   }
 
   async function api(path, options = {}) {
+    const generation = authGeneration;
     let response;
     try {
       response = await fetch(path, { credentials: 'same-origin', cache: 'no-store', ...options, headers: { ...(options.body !== undefined ? { 'Content-Type': 'application/json' } : {}), ...options.headers } });
     } catch (_) { throw new ApiError('无法连接媒体库，请检查服务端或网络连接。', 0); }
     let data;
     try { data = await response.json(); } catch (_) { data = {}; }
+    if (generation !== authGeneration) throw new ApiError('账户已切换。', 401);
     if (!response.ok) {
       if (response.status === 401 && !['/api/login', '/api/register', '/api/profile'].includes(path)) handleUnauthorized();
       throw new ApiError(typeof data.error === 'string' ? data.error : (data.error?.message || data.message || `请求失败（${response.status}）`), response.status);
@@ -148,9 +211,11 @@
     if (reader.open) closeReader(false);
     state.session = { ...state.session, authenticated: false, user: null };
     showLogin();
+    $('#login-error').textContent = '登录已失效，请重新登录。'; $('#login-error').hidden = false;
   }
 
   function showLogin() {
+    activateAccount(null);
     stopCatalogFlow();
     renderedLibraryData = '';
     settingsAccessGeneration += 1;
@@ -166,7 +231,7 @@
     $('#update-release').removeAttribute('href');
     $('#settings-lan-url').removeAttribute('href');
     $('#settings-lan-url').textContent = '正在获取…';
-    ['library-dialog', 'book-detail', 'metadata-dialog', 'model-dialog', 'bookmark-dialog', 'profile-dialog', 'remove-dialog'].forEach(id => { if ($('#' + id).open) $('#' + id).close(); });
+    ['library-dialog', 'book-detail', 'metadata-dialog', 'model-dialog', 'bookmark-dialog', 'profile-dialog', 'remove-dialog', 'user-dialog', 'users-dialog', 'batch-model-dialog'].forEach(id => { if ($('#' + id).open) $('#' + id).close(); });
     closeAccountMenu();
     $('#app').hidden = true;
     $('#login-screen').hidden = false;
@@ -188,9 +253,11 @@
   }
 
   function showLibrary() {
+    activateAccount(state.session?.user);
     $('#login-screen').hidden = true;
     $('#app').hidden = false;
     renderAccount();
+    loadVisibleLibraries();
   }
 
   function closeAccountMenu() {
@@ -202,6 +269,7 @@
     const name = user?.username || '个人账户';
     $('#account-name').textContent = name;
     $('#settings-account-name').textContent = name;
+    $('#settings-account-role').textContent = isAdmin() ? '管理员' : '用户';
     ['account-avatar', 'settings-account-avatar'].forEach(id => {
       $('#' + id).replaceChildren(Avatars.createImage(user, { alt: '', lazy: false }));
     });
@@ -258,12 +326,34 @@
     closeAccountMenu();
     const user = state.session?.user;
     if (!user) return;
+    profileFormGeneration += 1; profileMutationBusy = false;
     $('#profile-username').value = user.username || '';
     beginAvatarEdit('profile', user);
     ['profile-current-password', 'profile-password', 'profile-password-confirm'].forEach(id => { $('#' + id).value = ''; });
     $('#profile-error').hidden = true;
+    discardVisibilityDraft(); loadVisibleLibraries(true);
+    setProfileTab('basic'); setProfileBusy(false);
     $('#profile-dialog').showModal();
     $('#profile-username').focus();
+  }
+  function setProfileTab(tab, focus = false) {
+    ['basic', 'permissions'].forEach(name => {
+      const active = name === tab; $('#profile-' + name).hidden = !active;
+      const button = $('#profile-tab-' + name); button.setAttribute('aria-selected', String(active)); button.tabIndex = active ? 0 : -1;
+      if (active && focus) button.focus();
+    });
+  }
+  function setProfileBusy(busy) {
+    profileMutationBusy = busy; visibleLibraries.busy = busy;
+    $$('#profile-form input, #profile-form button').forEach(input => { input.disabled = busy; });
+    $('#profile-save').textContent = busy ? '正在保存…' : '保存修改';
+    syncVisibleLibraries();
+    if (!busy) $('#profile-save').disabled = Boolean(avatarEdits.profile?.pending || avatarEdits.profile?.invalid);
+  }
+  function discardVisibilityDraft() {
+    visibleLibraries.generation += 1; visibleLibraries.loading = false; visibleLibraries.busy = false; visibleLibraries.dirty = false;
+    visibleLibraries.selected = new Set(visibleLibraries.libraries.filter(library => library.visible).map(library => String(library.id)));
+    renderVisibleLibraries();
   }
 
   const typeLabels = { photo: '写真', manga_jp: '日漫', manga_kr: '韩漫', comic_us: '美漫' };
@@ -301,23 +391,85 @@
       return true;
     }).sort((a, b) => End.compareBooks(a, b, state.view === 'home' ? 'added' : state.view === 'recent' ? 'updated' : state.sort));
   }
+  function currentViewRoute() {
+    return Routes.normalize({ view: state.view, id: state.view === 'library' ? state.libraryId : state.modelId, query: state.query, sort: state.sort, series: state.series });
+  }
+  function commitRoute(route, { replace = false } = {}) {
+    const value = Routes.normalize(route); const hash = Routes.hash(value);
+    const previous = Routes.hash(Routes.parse(location.hash));
+    routing.current = value;
+    if (location.hash !== hash) {
+      const entry = { gravelleRoute: hash, gravellePrevious: replace ? history.state?.gravellePrevious : previous };
+      history[replace ? 'replaceState' : 'pushState'](entry, '', hash);
+    }
+  }
+  function syncViewRoute(replace = false) {
+    if (!routing.ready || routing.restoring || !state.session?.authenticated) return;
+    commitRoute(currentViewRoute(), { replace });
+  }
+  function returnFromOverlay() {
+    if (!routing.ready || !state.session?.authenticated) return;
+    routing.generation += 1; routing.restoring = false;
+    const target = Routes.returnTo(routing.current);
+    if (history.state?.gravellePrevious === Routes.hash(target)) history.back();
+    else { commitRoute(target, { replace: true }); restoreLocation(); }
+  }
+  async function restoreLocation() {
+    // Keep a deep link intact while the login screen or a failed catalog request is visible.
+    if (!state.session?.authenticated || !state.loaded) return;
+    const requested = Routes.parse(location.hash);
+    if (selection.busy && Routes.hash(requested) !== Routes.hash(routing.current)) {
+      commitRoute(routing.current, { replace: true }); toast('批量操作进行中，请稍候。'); return;
+    }
+    const resolved = Routes.resolve(requested, state);
+    const route = resolved.route; const generation = ++routing.generation;
+    routing.ready = true; routing.restoring = true;
+    commitRoute(route, { replace: true });
+    try {
+      ['library-dialog', 'metadata-dialog', 'model-dialog', 'bookmark-dialog', 'profile-dialog', 'user-dialog', 'users-dialog', 'batch-model-dialog'].forEach(id => { if ($('#' + id).open) $('#' + id).close(); });
+      const base = Routes.base(route);
+      navigate(base.view, { libraryId: base.view === 'library' ? base.id : undefined, modelId: base.view === 'model' ? base.id : undefined, query: base.query || '', sort: base.sort, series: base.series || '', fromRoute: true });
+      if (reader.open && !(route.view === 'reader' && String(reader.book?.id) === route.id)) closeReader(true, { fromRoute: true });
+      if ($('#book-detail').open && !(route.view === 'book' && String(state.detailBook?.id) === route.id)) $('#book-detail').close();
+      if (resolved.unavailable) toast('作品或写真库不存在，或当前账号无权访问。');
+      if (route.view === 'book') {
+        const book = state.books.find(item => String(item.id) === route.id) || { id: route.id, title: '作品' };
+        if (!$('#book-detail').open || String(state.detailBook?.id) !== route.id) await showBookDetail(book, { fromRoute: true });
+      } else if (route.view === 'reader') {
+        const book = state.books.find(item => String(item.id) === route.id) || { id: route.id, title: '作品' };
+        if (reader.open && String(reader.book?.id) === route.id) { if (route.page) setReaderPage(route.page - 1); }
+        else await openBook(book, route.page ? route.page - 1 : null, null, { fromRoute: true });
+      }
+    } finally { if (generation === routing.generation) routing.restoring = false; }
+  }
   function navigate(view, options = {}) {
     if (!Object.hasOwn(viewLabels, view)) return;
+    if (!options.fromRoute && state.loaded) {
+      const candidate = Routes.resolve({ view, id: view === 'library' ? String(options.libraryId ?? state.libraryId) : String(options.modelId ?? state.modelId) }, state);
+      if (candidate.unavailable) { toast('写真库或模特不存在，或当前账号无权访问。'); view = candidate.route.view; }
+    }
     const libraryId = String(options.libraryId ?? state.libraryId);
     const modelId = String(options.modelId ?? state.modelId);
     const samePage = state.view === view && (view !== 'library' || libraryId === String(state.libraryId)) && (view !== 'model' || modelId === String(state.modelId));
+    if (selection.busy && !samePage) { toast('批量操作进行中，请稍候。'); return; }
+    if (!options.fromRoute) { routing.generation += 1; routing.restoring = false; }
     closeAccountMenu();
     $('#sidebar').classList.remove('is-open'); $('#nav-backdrop').hidden = true; $('#nav-toggle').setAttribute('aria-expanded', 'false');
-    if (samePage) { if (view === 'search') $('#search').focus({ preventScroll: true }); return; }
+    if (samePage && !options.fromRoute) {
+      if (['book', 'reader'].includes(routing.current.view)) syncViewRoute();
+      if (view === 'search') $('#search').focus({ preventScroll: true }); return;
+    }
     resetSelection();
-    state.view = view; state.query = ''; state.series = ''; $('#search').value = '';
+    state.view = view; state.query = options.query || ''; state.series = options.series || ''; $('#search').value = state.query;
     if (options.libraryId !== undefined) state.libraryId = String(options.libraryId);
     if (view === 'library') { state.sort = librarySort(state.libraryId); $('#sort').value = state.sort; }
+    if (options.sort) { state.sort = End.normalizeSort(options.sort); $('#sort').value = state.sort; }
     if (options.modelId !== undefined) state.modelId = String(options.modelId);
     renderLibraryNavigation(); renderSeries(); renderLibrary();
+    syncViewRoute();
     window.scrollTo({ top: 0, behavior: 'instant' });
     if (view === 'search') $('#search').focus();
-    if (['models', 'bookmarks'].includes(view)) refreshLibrary();
+    if (['models', 'bookmarks'].includes(view) && !options.fromRoute) refreshLibrary();
   }
   function updateCounts() {
     const counts = { libraries: state.libraries.length, recent: state.books.filter(isReading).length, favorite: state.books.filter(book => book.favorite).length, bookmarks: state.bookmarks.length, models: state.models.length };
@@ -334,9 +486,9 @@
       library: `${typeLabels[currentLibrary()?.media_type] || '日漫'} · ${scopedBooks().length} 本作品`
     }[state.view] || '';
     $('#heading-description').textContent = description; $('#heading-description').hidden = !description;
-    $('#create-library').hidden = state.view !== 'libraries';
-    $('#edit-library').hidden = state.view !== 'library' || !currentLibrary();
-    $('#create-model').hidden = state.view !== 'models';
+    $('#create-library').hidden = state.view !== 'libraries' || !isAdmin();
+    $('#edit-library').hidden = state.view !== 'library' || !currentLibrary() || !isAdmin();
+    $('#create-model').hidden = state.view !== 'models' || !can('manage_models');
   }
   function makeCover(book, containerClass, lazy = true) {
     const wrap = node('div', containerClass); const image = node('img');
@@ -353,7 +505,7 @@
   }
   function makeBookCard(book) {
     const article = node('article', 'book-card'); const open = node('button', 'book-open'); open.type = 'button'; open.dataset.bookId = String(book.id);
-    open.setAttribute('aria-label', `查看《${book.title}》详情，共 ${book.page_count} 页`); open.addEventListener('click', () => selection.enabled && state.view === 'library' ? toggleSelection(book.id) : showBookDetail(book));
+    open.setAttribute('aria-label', `查看《${book.title}》详情，共 ${book.page_count} 页`); open.addEventListener('click', () => selection.enabled && Batch.kind(state.view, isAdmin()) === 'books' ? toggleSelection(book.id) : showBookDetail(book));
     const cover = makeCover(book, 'cover-wrap'); cover.append(node('span', 'book-pages', `${book.page_count} 页`));
     if (book.progress) { const bar = node('span', 'cover-progress'); bar.style.width = Math.min(100, (book.progress.page + 1) / book.page_count * 100) + '%'; cover.append(bar); }
     const title = node('span', 'book-title', book.title); title.title = book.title;
@@ -365,7 +517,7 @@
     if (meta.textContent) open.append(meta);
     const favorite = node('button', 'favorite-button'); favorite.type = 'button'; favorite.dataset.bookId = String(book.id); favorite.setAttribute('aria-label', `${book.favorite ? '取消收藏' : '收藏'}《${book.title}》`); favorite.setAttribute('aria-pressed', String(Boolean(book.favorite))); favorite.append(icon('heart'));
     favorite.addEventListener('click', async () => { favorite.disabled = true; try { await toggleFavorite(book); } catch (error) { if (error.status !== 401) toast(error.message); favorite.disabled = false; } }); article.append(open, favorite);
-    if (state.view === 'library') { article.classList.toggle('is-selected', selection.enabled && selection.ids.has(String(book.id))); article.append(selectionCheckbox(book.id, book.title, 'book-select')); }
+    if (Batch.kind(state.view, isAdmin()) === 'books') { article.classList.toggle('is-selected', selection.enabled && selection.ids.has(String(book.id))); article.append(selectionCheckbox(book.id, book.title, 'book-select')); }
     return article;
   }
   function renderContinue() {
@@ -390,8 +542,21 @@
       return card;
     }));
   }
-  function resetSelection() { selection.enabled = false; selection.ids.clear(); }
-  function selectionItems() { return state.view === 'libraries' ? state.libraries : state.view === 'library' ? filteredBooks() : []; }
+  function resetSelection() {
+    selection.enabled = false; selection.ids.clear(); selection.revision += 1;
+    batchModels.context = null; batchModels.generation += 1; batchModels.busy = false; batchModels.ids = []; batchModels.selected.clear();
+    if ($('#batch-model-dialog').open) $('#batch-model-dialog').close();
+  }
+  function selectionItems() { return state.view === 'libraries' ? state.libraries : Batch.kind(state.view, isAdmin()) === 'books' ? filteredBooks() : []; }
+  function selectionContext() { return { auth: authGeneration, revision: selection.revision, view: state.view, libraryId: state.libraryId, modelId: state.modelId }; }
+  function isSelectionCurrent(context) {
+    return context && context.auth === authGeneration && context.revision === selection.revision && context.view === state.view && String(context.libraryId) === String(state.libraryId) && String(context.modelId) === String(state.modelId);
+  }
+  async function refreshAfterBatch(context) {
+    // A scan poll begun before the write may contain the old model associations.
+    if (state.refreshPromise) await state.refreshPromise;
+    if (context.auth === authGeneration) await refreshLibrary();
+  }
   function selectionCheckbox(id, name, className) {
     const input = node('input', 'selection-checkbox ' + className); input.type = 'checkbox'; input.value = String(id);
     input.hidden = !selection.enabled; input.checked = selection.ids.has(String(id)); input.disabled = selection.busy;
@@ -403,14 +568,14 @@
     renderSelection();
   }
   function renderSelection() {
-    const visible = ['libraries', 'library'].includes(state.view);
+    const visible = Boolean(Batch.kind(state.view, isAdmin()));
     const active = visible && selection.enabled;
     $('#selection-toolbar').hidden = !active; $('#app').dataset.selecting = String(active);
+    ['search', 'sort', 'series-filter'].forEach(id => { $('#' + id).disabled = selection.busy; });
     $('#selection-manage').hidden = !visible; $('#selection-manage').disabled = selection.busy;
     $('#selection-manage').setAttribute('aria-pressed', String(active));
     if (!visible) return;
-    const available = new Set((state.view === 'libraries' ? state.libraries : scopedBooks()).map(item => String(item.id)));
-    selection.ids.forEach(id => { if (!available.has(id)) selection.ids.delete(id); });
+    selection.ids = Batch.retain(selection.ids, selectionItems());
     $$('.selection-checkbox').forEach(input => {
       input.hidden = !active; input.checked = active && selection.ids.has(input.value); input.disabled = selection.busy;
       input.closest('article')?.classList.toggle('is-selected', input.checked);
@@ -420,21 +585,23 @@
     $('#selection-count').hidden = !selection.enabled; $('#selection-count').textContent = `已选择 ${selection.ids.size} 项`;
     const items = selectionItems(); const all = items.length > 0 && items.every(item => selection.ids.has(String(item.id)));
     $('#selection-all').textContent = all ? '取消全选' : '全选'; $('#selection-all').hidden = !selection.enabled; $('#selection-all').disabled = selection.busy || !items.length;
-    ['remove', 'scan', 'favorite', 'random'].forEach(action => {
+    const actions = Batch.actions(state.view, isAdmin());
+    ['models', 'remove', 'scan', 'favorite', 'random'].forEach(action => {
       const button = $('#selection-' + action);
-      button.hidden = !selection.enabled || (action === 'scan' && state.view !== 'libraries') || (action === 'favorite' && state.view !== 'library');
+      button.hidden = !selection.enabled || !actions.includes(action);
       button.disabled = selection.busy || !selection.ids.size || (action === 'scan' && state.scanning);
     });
   }
   function removeConfirmation(kind, count, name = '') {
+    if (kind === 'users') return `确认删除用户「${name}」？\n\n这会清除该用户的阅读记录、收藏、书签及个人阅读设置，并使其登录失效。共享写真库、作品资料和源文件都会保留。`;
     if (kind === 'models') return `确认删除模特「${name}」？\n\n这会删除模特资料和头像，解除作品关联及写真库的默认模特设置。作品、阅读记录、收藏、书签和源文件都会保留。\n\n扫描不会自动重新创建已删除的模特；需要时可以手动新建。`;
     return kind === 'libraries' ? `确认移除 ${count} 个写真库？\n\n这会移除写真库及其作品、阅读记录、收藏和书签。不会删除或修改任何源文件。` : `确认移除 ${count} 本作品？\n\n这会移除作品及其阅读记录、收藏和书签。不会删除或修改任何源文件。已移除的作品不会在下次扫描时自动重新加入。`;
   }
   let resolveRemoval = null;
   function confirmRemoval(kind, count, name = '') {
     if (resolveRemoval) return Promise.resolve(false);
-    $('#remove-title').textContent = kind === 'models' ? '删除模特' : kind === 'libraries' ? '移除写真库' : '移除作品';
-    $('#remove-confirm').textContent = kind === 'models' ? '确认删除' : '确认移除';
+    $('#remove-title').textContent = kind === 'users' ? '删除用户' : kind === 'models' ? '删除模特' : kind === 'libraries' ? '移除写真库' : '移除作品';
+    $('#remove-confirm').textContent = ['models', 'users'].includes(kind) ? '确认删除' : '确认移除';
     $('#remove-description').textContent = removeConfirmation(kind, count, name);
     return new Promise(resolve => { resolveRemoval = resolve; $('#remove-dialog').showModal(); $('#remove-cancel').focus(); });
   }
@@ -445,23 +612,102 @@
   }
   async function batchAction(action) {
     if (selection.busy || !selection.ids.size) return;
-    const kind = state.view === 'libraries' ? 'libraries' : 'books'; const ids = [...selection.ids];
+    const kind = Batch.kind(state.view, isAdmin()); const ids = [...selection.ids]; const context = selectionContext();
+    if (!kind || !Batch.actions(state.view, isAdmin()).includes(action)) return;
+    if (kind === 'libraries' && !requireAccess()) return;
+    if (action === 'remove' && !requireAccess(kind === 'libraries' ? 'admin' : 'remove_books')) return;
+    if (action === 'scan' && !requireAccess('scan_libraries')) return;
     if (action === 'random') {
       const selected = new Set(ids); const books = state.books.filter(book => selected.has(String(kind === 'libraries' ? book.library_id : book.id)));
       if (!books.length) { toast('所选项目中没有可阅读的作品。'); return; }
       openBook(books[Math.floor(Math.random() * books.length)], 0); return;
     }
-    if (action === 'remove' && !await confirmRemoval(kind, ids.length)) return;
-    selection.busy = true; renderLibrary();
+    if (ids.length > 500) { toast('每次最多管理 500 项，请减少选择后重试。'); return; }
+    if (action === 'models') { showBatchModelForm(); return; }
+    selection.busy = true; renderSelection();
     try {
+      if (action === 'remove' && !await confirmRemoval(kind, ids.length)) return;
+      if (!isSelectionCurrent(context)) return;
       await post('/api/' + kind + '/batch', { action, ids, ...(action === 'favorite' ? { favorite: true } : {}) });
-      if (action === 'remove') resetSelection();
+      if (!isSelectionCurrent(context)) return;
+      if (action === 'remove') { selection.ids.clear(); selection.enabled = false; }
       if (action === 'scan') state.scanning = true;
-      await refreshLibrary(); toast(action === 'remove' ? '已移除所选记录，源文件保留。' : action === 'favorite' ? '所选作品已收藏。' : '已开始扫描所选写真库。');
-    } catch (error) { if (error.status !== 401) toast(error.message); }
-    finally { selection.busy = false; renderLibrary(); }
+      await refreshAfterBatch(context);
+      if (context.auth === authGeneration) toast(action === 'remove' ? '已移除所选记录，源文件保留。' : action === 'favorite' ? '所选作品已收藏。' : '已开始扫描所选写真库。');
+    } catch (error) { if (context.auth === authGeneration && error.status !== 401) toast(error.message); }
+    finally { if (context.auth === authGeneration) { selection.busy = false; renderLibrary(); } }
+  }
+  function closeBatchModelForm() {
+    if (batchModels.busy) return;
+    if ($('#batch-model-dialog').open) $('#batch-model-dialog').close();
+  }
+  function syncBatchModelForm() {
+    const empty = !batchModels.selected.size;
+    $('#batch-model-selection').textContent = `已选择 ${batchModels.selected.size} 位模特`;
+    $('#batch-model-clear-field').hidden = !empty;
+    if (!empty) $('#batch-model-clear').checked = false;
+    $$('input, button', $('#batch-model-form')).forEach(input => { input.disabled = batchModels.busy; });
+    $('#batch-model-save').disabled = batchModels.busy || (empty && !$('#batch-model-clear').checked);
+    $('#batch-model-save').textContent = batchModels.busy ? '保存中…' : empty ? '清除关联' : '保存';
+  }
+  function renderBatchModels() {
+    renderModelOptions($('#batch-model-options'), $('#batch-model-search').value, batchModels.selected, syncBatchModelForm);
+    syncBatchModelForm();
+  }
+  function showBatchModelForm() {
+    if (!requireAccess('edit_metadata') || selection.busy || !selection.ids.size) return;
+    batchModels.ids = [...selection.ids]; batchModels.context = selectionContext(); batchModels.generation += 1; batchModels.busy = false;
+    const ids = new Set(batchModels.ids); batchModels.selected = Batch.initialModelIds(state.books.filter(book => ids.has(String(book.id))));
+    $('#batch-model-description').textContent = `替换所选 ${ids.size} 本作品关联的模特。`;
+    $('#batch-model-search').value = ''; $('#batch-model-new').value = ''; $('#batch-model-new-row').hidden = true;
+    $('#batch-model-show-new').setAttribute('aria-expanded', 'false'); $('#batch-model-clear').checked = false; $('#batch-model-error').hidden = true;
+    renderBatchModels(); $('#batch-model-dialog').showModal(); $('#batch-model-search').focus();
+  }
+  async function createBatchModel() {
+    if (!requireAccess('manage_models') || batchModels.busy || !isSelectionCurrent(batchModels.context)) return;
+    const name = $('#batch-model-new').value.trim(); if (!name) { $('#batch-model-new').focus(); return; }
+    const generation = batchModels.generation; const context = batchModels.context;
+    batchModels.busy = true; selection.busy = true; syncBatchModelForm(); renderSelection(); $('#batch-model-error').hidden = true;
+    try {
+      const result = await post('/api/models', { name });
+      if (generation !== batchModels.generation || !isSelectionCurrent(context)) return;
+      const existing = state.models.find(model => String(model.id) === String(result.model.id));
+      if (existing) Object.assign(existing, result.model); else state.models.push(result.model);
+      state.models.sort((a, b) => collator.compare(a.name, b.name)); updateCounts();
+      batchModels.selected.add(String(result.model.id)); $('#batch-model-new').value = ''; $('#batch-model-search').value = '';
+      $('#batch-model-new-row').hidden = true; $('#batch-model-show-new').setAttribute('aria-expanded', 'false'); renderBatchModels();
+    } catch (error) {
+      if (generation === batchModels.generation && context.auth === authGeneration && error.status !== 401) { $('#batch-model-error').textContent = error.message; $('#batch-model-error').hidden = false; }
+    } finally {
+      if (generation === batchModels.generation && context.auth === authGeneration) { batchModels.busy = false; selection.busy = false; syncBatchModelForm(); renderSelection(); }
+    }
+  }
+  async function saveBatchModels(event) {
+    event.preventDefault();
+    if (!requireAccess('edit_metadata') || batchModels.busy || !isSelectionCurrent(batchModels.context)) return;
+    const modelIds = [...batchModels.selected];
+    if (!modelIds.length && !$('#batch-model-clear').checked) { $('#batch-model-clear').focus(); return; }
+    if (modelIds.length > 100) { $('#batch-model-error').textContent = '每次最多关联 100 位模特。'; $('#batch-model-error').hidden = false; return; }
+    const ids = [...batchModels.ids]; const generation = batchModels.generation; const context = batchModels.context;
+    batchModels.busy = true; selection.busy = true; syncBatchModelForm(); renderSelection(); $('#batch-model-error').hidden = true;
+    try {
+      await post('/api/books/batch', { action: 'models', ids, model_ids: modelIds });
+      if (generation !== batchModels.generation || !isSelectionCurrent(context)) return;
+      // Reflect the successful write even if a subsequent catalog refresh loses its connection.
+      const changed = new Set(ids); const models = modelIds.map(id => state.models.find(model => String(model.id) === id)).filter(Boolean);
+      state.books.forEach(book => { if (changed.has(String(book.id))) book.models = models; });
+      selection.ids = Batch.retain(selection.ids, selectionItems());
+      await refreshAfterBatch(context);
+      if (generation !== batchModels.generation || context.auth !== authGeneration) return;
+      batchModels.busy = false; $('#batch-model-dialog').close(); toast('所选作品的模特已更新。');
+    } catch (error) {
+      if (generation === batchModels.generation && context.auth === authGeneration && error.status !== 401) { $('#batch-model-error').textContent = error.message; $('#batch-model-error').hidden = false; }
+    } finally {
+      if (context.auth === authGeneration) { selection.busy = false; if (generation === batchModels.generation) { batchModels.busy = false; syncBatchModelForm(); } renderLibrary(); }
+    }
   }
   async function removeCurrent(kind) {
+    if (!requireAccess(kind === 'libraries' ? 'admin' : 'remove_books')) return;
     const id = kind === 'libraries' ? state.editingLibrary : state.editingBook?.id;
     if (!id || selection.busy || !await confirmRemoval(kind, 1)) return;
     selection.busy = true;
@@ -469,6 +715,8 @@
     const save = $(kind === 'libraries' ? '#library-save' : '#metadata-save'); save.disabled = true;
     try {
       await post('/api/' + kind + '/' + encodeURIComponent(id) + '/remove', {});
+      if (kind === 'books' && ['book', 'reader'].includes(routing.current.view) && routing.current.id === String(id)) commitRoute(Routes.base(routing.current), { replace: true });
+      if (kind === 'libraries' && routing.current.view === 'library' && routing.current.id === String(id)) commitRoute({ view: 'libraries' }, { replace: true });
       $(kind === 'libraries' ? '#library-dialog' : '#metadata-dialog').close();
       if (kind === 'books' && $('#book-detail').open) $('#book-detail').close();
       resetSelection(); await refreshLibrary();
@@ -488,13 +736,15 @@
     const raw = !state.query.trim() && !state.series;
     $('#empty-title').textContent = onboarding ? '从第一个写真库开始。' : !raw ? '没有找到匹配的作品。' : { libraries: '你的第一本作品，正等着入架。', library: state.scanning ? '正在整理你的写真库…' : '这个写真库还没有作品。', recent: '阅读记录将从这里开始。', favorite: '把喜欢的作品留在这里。', search: '没有找到匹配的作品。', bookmarks: '为喜欢的页面留一个位置。', models: '认识藏馆中的每一位模特。', model: '还没有关联这位模特的作品。' }[state.view] || '这里暂时没有内容。';
     $('#empty-description').textContent = onboarding ? '创建写真库，设置目录与阅读习惯。' : !raw ? '试试作品名称、模特或写真库名称，或调整筛选条件。' : { libraries: '把图片文件夹放入媒体目录，再扫描写真库。', library: `将作品放入 ${library?.path || '/library'}，扫描后会自动入库。`, recent: '打开任意作品，Gravelle会记录每次阅读的位置和时间。', favorite: '点击作品旁的爱心，或在详情页收藏作品。', search: '在上方搜索全部写真库中的作品。', bookmarks: '阅读时点击书签按钮，保存当前页并添加备注。', models: '新建模特，再到作品的“编辑资料”中关联。一部作品可以关联多位模特。', model: '在作品的“编辑资料”中选择这位模特。' }[state.view] || '';
-    const showGuide = ['home', 'libraries', 'library'].includes(state.view) && raw; $('#folder-guide').hidden = !showGuide; $('#empty-scan').hidden = !showGuide; $('#empty-hint').hidden = !showGuide;
+    const showGuide = ['home', 'libraries', 'library'].includes(state.view) && raw && isAdmin(); $('#folder-guide').hidden = !showGuide; $('#empty-scan').hidden = !showGuide; $('#empty-hint').hidden = !showGuide;
+    if (onboarding && visibleLibraries.loaded && visibleLibraries.libraries.length) { $('#empty-title').textContent = '暂无显示的写真库。'; $('#empty-description').textContent = '可在设置 → 用户管理 → 编辑用户信息 → 权限中选择需要显示的写真库。'; $('#empty-scan').hidden = true; $('#folder-guide').hidden = true; $('#empty-hint').hidden = true; }
+    else if (onboarding && !isAdmin()) { $('#empty-title').textContent = '暂无可访问的写真库。'; $('#empty-description').textContent = '请联系管理员分配写真库访问权限。'; }
   }
   function renderNotice() {
     const notice = $('#notice'); notice.replaceChildren(); notice.classList.toggle('error', Boolean(state.libraryError));
     if (state.libraryError) { notice.append(node('span', '', state.libraryError)); const retry = node('button', '', '重新连接'); retry.addEventListener('click', reconnectLibrary); notice.append(retry); notice.hidden = false; }
     else if (state.scanning) { notice.append(node('span', 'spinner'), node('span', '', '正在扫描媒体文件夹，新作品会自动出现在写真库。')); notice.hidden = false; } else notice.hidden = true;
-    $$('.scan-trigger').forEach(button => { button.disabled = state.scanning || (!state.libraries.length && state.loading); $('span', button).textContent = !state.libraries.length ? '创建第一个写真库' : state.scanning ? '扫描中…' : '扫描写真库'; });
+    $$('.scan-trigger').forEach(button => { button.hidden = !isAdmin() || !can('scan_libraries'); button.disabled = state.scanning || (!state.libraries.length && state.loading); $('span', button).textContent = !state.libraries.length ? '创建第一个写真库' : state.scanning ? '扫描中…' : '扫描写真库'; });
   }
   function renderErrors(errors = []) {
     const wrap = $('#scan-errors'); wrap.hidden = !errors.length; wrap.replaceChildren(); if (!errors.length) return;
@@ -513,11 +763,11 @@
       const card = node('article', 'model-card'); const open = node('button', 'model-open'); const portrait = node('div', 'model-portrait');
       portrait.append(modelAvatar(model));
       open.append(portrait, node('strong', '', model.name), node('small', '', `${model.book_count || 0} 本作品`)); open.setAttribute('aria-label', `查看模特 ${model.name} 的作品`); open.addEventListener('click', () => navigate('model', { modelId: model.id }));
-      const edit = node('button', 'model-edit', '编辑'); edit.addEventListener('click', () => showModelForm(model)); card.append(open, edit); return card;
+      const edit = node('button', 'model-edit', '编辑'); edit.addEventListener('click', () => showModelForm(model)); card.append(open); if (can('manage_models')) card.append(edit); return card;
     }));
   }
   function loadSettingsAccess() {
-    if (settingsAccessRequest || !state.session?.authenticated || (settingsAccessReadAt && Date.now() - settingsAccessReadAt < 30000)) return;
+    if (settingsAccessRequest || !isAdmin() || !state.session?.authenticated || (settingsAccessReadAt && Date.now() - settingsAccessReadAt < 30000)) return;
     const link = $('#settings-lan-url');
     const generation = settingsAccessGeneration;
     if (!settingsAccessReadAt) { link.textContent = '正在获取…'; link.removeAttribute('href'); }
@@ -548,7 +798,7 @@
     } catch (_) { return null; }
   }
   async function checkUpdates() {
-    if (settingsUpdateRequest || !state.session?.authenticated) return;
+    if (!requireAccess() || settingsUpdateRequest || !state.session?.authenticated) return;
     const generation = settingsUpdateGeneration;
     const button = $('#check-updates');
     const status = $('#update-status');
@@ -589,6 +839,9 @@
     return operation;
   }
   function renderSettings() {
+    $('.service-panel').hidden = !isAdmin(); $('#users-panel').hidden = false; $('#subaccounts-setting').hidden = !isAdmin();
+    renderSubaccountSummary();
+    if (isAdmin()) loadUsers();
     Object.keys(defaultPrefs).forEach(key => { $('#pref-' + key).value = state.prefs[key]; }); $('#settings-version').textContent = 'v' + String(state.session?.version || '1.8.2').replace(/^v/, '');
     $('#settings-connection').textContent = state.libraryError ? '连接异常 · ' + state.libraryError : '已连接';
     $('#settings-connection').classList.toggle('connection-error', Boolean(state.libraryError));
@@ -596,6 +849,141 @@
     renderAccount();
     loadSettingsAccess();
     window.SumiPerformance?.render();
+  }
+  function renderSubaccountSummary() {
+    const count = $('#subaccounts-count');
+    if (!isAdmin()) { count.textContent = ''; return; }
+    if (userManagement.loaded) {
+      const total = userManagement.users.filter(Users.canManage).length;
+      count.textContent = `${total} 个子账户${userManagement.loading ? ' · 正在更新…' : userManagement.error ? ' · 更新失败' : ''}`;
+    } else count.textContent = userManagement.loading ? '正在读取…' : userManagement.error ? '暂时无法读取数量' : '尚未读取';
+  }
+  function renderUsers() {
+    renderSubaccountSummary();
+    $('#user-create').disabled = userManagement.loading || userManagement.busy || !userManagement.loaded;
+    $('#users-list').setAttribute('aria-busy', String(userManagement.busy || userManagement.loading));
+    $('#users-close').disabled = userManagement.busy; $('#users-done').disabled = userManagement.busy;
+    const users = userManagement.users.filter(Users.canManage);
+    $('#users-list').replaceChildren(...users.map(user => {
+      const row = node('div', 'user-list-row'); const info = node('div', 'user-list-info');
+      info.append(node('strong', '', user.username), node('span', 'user-list-summary', user.role === 'admin' ? '管理员 · 全部写真库' : `${user.enabled ? '已启用' : '已禁用'} · ${user.library_ids?.length || 0} 个写真库`)); row.append(info);
+      if (Users.canManage(user)) {
+        const actions = node('div', 'user-list-actions'); const edit = node('button', 'button button-secondary', '编辑'); edit.type = 'button'; edit.disabled = userManagement.busy; edit.setAttribute('aria-label', `编辑用户 ${user.username}`); edit.addEventListener('click', () => showUserForm(user));
+        const toggle = node('button', 'button button-secondary', user.enabled ? '禁用' : '启用'); toggle.type = 'button'; toggle.disabled = userManagement.busy; toggle.setAttribute('aria-label', `${user.enabled ? '禁用' : '启用'}用户 ${user.username}`); toggle.addEventListener('click', () => toggleUser(user)); actions.append(edit, toggle); row.append(actions);
+      }
+      return row;
+    }));
+    if (!users.length && userManagement.loaded && !userManagement.loading) $('#users-list').append(node('p', 'field-hint users-empty', '暂无子账户。'));
+  }
+  function showUsersList() {
+    if (!requireAccess()) return;
+    if (!$('#users-dialog').open) $('#users-dialog').showModal();
+    loadUsers(true);
+  }
+  async function loadUsers(force = false) {
+    if (!isAdmin() || (userManagement.loading && !force) || (userManagement.loaded && !force && Date.now() - userManagement.updatedAt < 30000)) return;
+    const generation = userManagement.generation; const request = ++userManagement.request;
+    userManagement.loading = true; userManagement.error = false; $('#users-status').textContent = '正在读取用户…'; renderUsers();
+    try {
+      const result = await api('/api/users');
+      if (generation !== userManagement.generation || request !== userManagement.request || !isAdmin()) return;
+      if (!Array.isArray(result?.users) || !Array.isArray(result?.libraries)) throw new Error('无法读取子账户资料，请重试。');
+      userManagement.users = result.users; userManagement.libraries = result.libraries;
+      userManagement.loaded = true; userManagement.updatedAt = Date.now(); $('#users-status').textContent = '';
+    } catch (error) {
+      if (generation === userManagement.generation && request === userManagement.request && error.status !== 401) {
+        userManagement.error = true;
+        $('#users-status').textContent = error.message;
+        const retry = node('button', 'button button-secondary', '重试'); retry.type = 'button'; retry.addEventListener('click', () => loadUsers(true)); $('#users-status').append(document.createTextNode(' '), retry);
+      }
+    } finally { if (generation === userManagement.generation && request === userManagement.request) { userManagement.loading = false; renderUsers(); } }
+  }
+  function syncUserLibrarySelection() {
+    const choices = $$('#user-libraries input'); const selected = choices.filter(input => input.checked).length;
+    $('#user-libraries-all').checked = choices.length > 0 && selected === choices.length;
+    $('#user-libraries-all').indeterminate = selected > 0 && selected < choices.length;
+    $('#user-libraries-all').disabled = userManagement.busy || !choices.length;
+    $('#user-libraries-none').disabled = userManagement.busy || !choices.length;
+    choices.forEach(input => { $('.visibility-library-content small', input.closest('label')).textContent = input.checked ? '已授权' : '未授权'; });
+  }
+  function setUserTab(tab, focus = false) {
+    ['basic', 'permissions'].forEach(name => {
+      const active = name === tab; $('#user-' + name).hidden = !active;
+      const button = $('#user-tab-' + name); button.setAttribute('aria-selected', String(active)); button.tabIndex = active ? 0 : -1;
+      if (active && focus) button.focus();
+    });
+    $('.dialog-body', $('#user-dialog')).scrollTop = 0;
+  }
+  function setUserBusy(busy) {
+    userManagement.busy = busy;
+    $$('#user-form input, #user-form button').forEach(input => { input.disabled = busy; });
+    syncUserLibrarySelection(); renderUsers();
+  }
+  async function showUserForm(user = null) {
+    if (!requireAccess() || userManagement.busy) return;
+    if (!userManagement.loaded) { await loadUsers(); if (!userManagement.loaded || !isAdmin()) return; }
+    if (user && !Users.canManage(user)) return;
+    userManagement.editingId = user?.id ?? null;
+    $('#user-form').reset(); $('#user-error').hidden = true; setUserTab('basic');
+    $('#user-dialog-title').textContent = user ? '编辑用户' : '新增用户'; $('#user-username').value = user?.username || '';
+    $('#user-password-label').textContent = user ? '重置密码' : '密码'; $('#user-password').required = !user; $('#user-password').placeholder = user ? '留空则不修改密码' : '至少 8 个字符';
+    $('#user-password-confirm').required = !user; $('#user-enabled').checked = user?.enabled !== false; $('#user-delete').hidden = !user;
+    $('#user-save').textContent = user ? '保存修改' : '创建用户';
+    const allowed = new Set((user?.library_ids || []).map(String));
+    $('#user-libraries').replaceChildren(...userManagement.libraries.map(library => {
+      const label = node('label', 'library-visibility-card'); const tile = node('span', 'visibility-library-icon'); tile.append(icon('folder'));
+      const content = node('span', 'visibility-library-content'); content.append(node('strong', '', library.name), node('small', '', allowed.has(String(library.id)) ? '已授权' : '未授权'));
+      const input = node('input', 'visibility-input'); input.type = 'checkbox'; input.value = String(library.id); input.checked = allowed.has(String(library.id)); input.setAttribute('role', 'switch'); input.setAttribute('aria-label', `授权写真库 ${library.name}`); input.addEventListener('change', syncUserLibrarySelection);
+      const toggle = node('span', 'visibility-switch'); toggle.setAttribute('aria-hidden', 'true'); label.append(tile, content, input, toggle); return label;
+    }));
+    if (!userManagement.libraries.length) $('#user-libraries').append(node('p', 'field-hint', '暂无写真库'));
+    setUserBusy(false); if (!$('#user-dialog').open) $('#user-dialog').showModal(); $('#user-username').focus();
+  }
+  async function toggleUser(user) {
+    if (!requireAccess() || !Users.canManage(user) || userManagement.busy) return;
+    const generation = userManagement.generation; setUserBusy(true); $('#users-status').textContent = '';
+    try { await post('/api/users/' + encodeURIComponent(user.id), { enabled: !user.enabled }); await loadUsers(true); toast(user.enabled ? '用户已禁用，其登录已失效。' : '用户已启用。'); }
+    catch (error) { if (generation === userManagement.generation && error.status !== 401) $('#users-status').textContent = error.message; }
+    finally { if (generation === userManagement.generation) setUserBusy(false); }
+  }
+  function syncVisibleLibraries() {
+    const choices = $$('#my-libraries-options input'); const selected = choices.filter(input => input.checked).length;
+    $('#my-libraries-all').checked = choices.length > 0 && selected === choices.length;
+    $('#my-libraries-all').indeterminate = selected > 0 && selected < choices.length;
+    $('#my-libraries-all').disabled = visibleLibraries.busy || visibleLibraries.loading || !visibleLibraries.loaded || !choices.length;
+    $('#my-libraries-all').closest('label').hidden = !visibleLibraries.libraries.length;
+    $('#my-libraries-none').disabled = visibleLibraries.busy || visibleLibraries.loading || !visibleLibraries.loaded || !choices.length;
+    choices.forEach(input => { input.disabled = visibleLibraries.busy || visibleLibraries.loading || !visibleLibraries.loaded; });
+  }
+  function renderVisibleLibraries() {
+    $('#my-libraries-options').replaceChildren(...visibleLibraries.libraries.map(library => {
+      const label = node('label', 'library-visibility-card'); const tile = node('span', 'visibility-library-icon'); tile.append(icon('folder'));
+      const content = node('span', 'visibility-library-content'); const title = node('strong', '', library.name); const status = node('small', '', visibleLibraries.selected.has(String(library.id)) ? '显示中' : '已隐藏'); content.append(title, status);
+      const input = node('input', 'visibility-input'); input.type = 'checkbox'; input.value = String(library.id); input.checked = visibleLibraries.selected.has(String(library.id)); input.setAttribute('role', 'switch'); input.setAttribute('aria-label', `显示写真库 ${library.name}`);
+      input.addEventListener('change', event => {
+        if (event.target.checked) visibleLibraries.selected.add(String(library.id)); else visibleLibraries.selected.delete(String(library.id));
+        status.textContent = event.target.checked ? '显示中' : '已隐藏';
+        visibleLibraries.dirty = true; syncVisibleLibraries();
+      }); const toggle = node('span', 'visibility-switch'); toggle.setAttribute('aria-hidden', 'true'); label.append(tile, content, input, toggle); return label;
+    }));
+    syncVisibleLibraries();
+  }
+  async function loadVisibleLibraries(force = false) {
+    if (!state.session?.authenticated || visibleLibraries.loading || (visibleLibraries.loaded && !force)) return;
+    const generation = visibleLibraries.generation;
+    if (force) visibleLibraries.loaded = false;
+    visibleLibraries.loading = true; $('#my-libraries-status').textContent = '正在读取写真库…'; syncVisibleLibraries();
+    try {
+      const result = await api('/api/my-libraries');
+      if (generation !== visibleLibraries.generation) return;
+      visibleLibraries.libraries = result.libraries || [];
+      if (!visibleLibraries.dirty) visibleLibraries.selected = new Set(visibleLibraries.libraries.filter(library => library.visible).map(library => String(library.id)));
+      else { const authorized = new Set(visibleLibraries.libraries.map(library => String(library.id))); visibleLibraries.selected.forEach(id => { if (!authorized.has(id)) visibleLibraries.selected.delete(id); }); }
+      visibleLibraries.loaded = true; $('#my-libraries-status').textContent = visibleLibraries.libraries.length ? '' : '暂无可显示的写真库。';
+      if (!state.libraries.length && state.loaded && ['home', 'libraries'].includes(state.view)) renderEmpty();
+    } catch (error) {
+      if (generation === visibleLibraries.generation && error.status !== 401) { $('#my-libraries-status').textContent = error.message; const retry = node('button', 'button button-secondary', '重试'); retry.type = 'button'; retry.addEventListener('click', () => loadVisibleLibraries(true)); $('#my-libraries-status').append(document.createTextNode(' '), retry); }
+    } finally { if (generation === visibleLibraries.generation) { visibleLibraries.loading = false; renderVisibleLibraries(); } }
   }
   function renderPagination(container, page, onChange) {
     container.replaceChildren();
@@ -676,20 +1064,35 @@
     // before the server responds. Scan timestamps alone are not visible.
     const libraries = state.libraries.map(({ last_scan, ...library }) => library);
     return JSON.stringify([libraries, state.books, state.models, state.bookmarks, state.rootPath,
-      state.scanning, state.scanErrors, state.loading, state.loaded, state.libraryError, state.view, state.libraryId, state.modelId]);
+      state.scanning, state.scanErrors, state.loading, state.loaded, state.libraryError, state.view, state.libraryId, state.modelId, state.session?.user]);
   }
   async function refreshLibrary() {
     if (state.refreshPromise) return state.refreshPromise; if (!state.session?.authenticated) return;
+    const generation = authGeneration;
     const operation = (async () => { try {
+      const session = await api('/api/session');
+      if (!session.authenticated) { handleUnauthorized(); return; }
+      state.session = session;
+      if (String(session.user?.id) !== String(activeUser?.id)) { showLibrary(); await refreshLibrary(); return; }
+      activeUser = session.user;
       const [libraries, data, models, bookmarks] = await Promise.all([api('/api/libraries'), api('/api/library'), api('/api/models'), api('/api/bookmarks')]);
+      if (generation !== authGeneration) return;
       state.libraries = libraries.libraries || []; state.rootPath = libraries.root_path || '/library'; if (state.libraryId && !currentLibrary()) { state.libraryId = ''; if (state.view === 'library') state.view = 'libraries'; }
       state.books = (data.books || []).filter(book => book.id !== undefined && book.page_count > 0); state.models = models.models || []; state.bookmarks = bookmarks.bookmarks || []; state.scanning = Boolean(data.scanning); state.lastScan = data.last_scan; state.scanErrors = data.errors || []; state.libraryError = null; state.loaded = true;
     } catch (error) { if (error.status !== 401) state.libraryError = error.message; } finally {
+      if (generation !== authGeneration) return;
       state.loading = false;
       if (state.session?.authenticated && renderedLibraryData !== libraryDataSignature()) { renderLibraryNavigation(); renderSeries(); renderLibrary(); }
       clearTimeout(state.poll); if (state.scanning && state.session?.authenticated) state.poll = setTimeout(() => refreshLibrary(), 1500);
     } })();
     state.refreshPromise = operation; try { await operation; } finally { if (state.refreshPromise === operation) state.refreshPromise = null; }
+    if (state.session?.authenticated && state.loaded && !routing.restoring) {
+      const resolved = Routes.resolve(routing.current, state);
+      if (!routing.ready || Routes.hash(resolved.route) !== Routes.hash(routing.current)) {
+        if (resolved.unavailable) commitRoute(resolved.route, { replace: true });
+        await restoreLocation();
+      }
+    }
   }
   async function reconnectLibrary() {
     if (!state.session?.authenticated) { try { state.session = await api('/api/session'); if (!state.session.authenticated) { showLogin(); return; } showLibrary(); } catch (error) { if (error.status !== 401) { state.libraryError = error.message; renderNotice(); } return; } } await refreshLibrary();
@@ -732,6 +1135,7 @@
     }
   }
   function showLibraryForm(library = null) {
+    if (!requireAccess()) return;
     libraryFormGeneration += 1; $('#library-create-author').disabled = false; $('#library-save').disabled = false;
     $('#library-remove').hidden = !library; $('#library-remove').disabled = false;
     const type = library?.media_type || 'photo'; const typeSelect = $('#library-type');
@@ -749,21 +1153,38 @@
     $('#library-hide-date-field').hidden = !photo;
   }
   async function browseDirectory(path) {
+    if (!requireAccess()) return;
     const request = ++libraryBrowseRequest;
-    $('#directory-picker').hidden = false; $('#directory-list').replaceChildren(node('p', 'field-hint', '正在读取目录…')); $('#directory-error').hidden = true; $('#directory-select').disabled = true; $('#directory-parent').disabled = true;
+    $('#directory-picker').hidden = false; $('#directory-list').replaceChildren(node('p', 'field-hint', '正在读取目录…')); $('#directory-error').hidden = true; $('#directory-select').disabled = true; $('#directory-parent').disabled = true; $('#directory-roots').disabled = true;
     try { const data = await api('/api/directories?path=' + encodeURIComponent(path || state.rootPath)); if (request !== libraryBrowseRequest) return; state.directoryPath = data.path; $('#directory-current').textContent = data.path; $('#directory-current').title = data.path; $('#directory-select').disabled = false; $('#directory-parent').disabled = !data.parent; $('#directory-parent').dataset.path = data.parent || '';
+      const roots = (data.root_paths || [data.root_path || state.rootPath]).filter(value => typeof value === 'string' && value); const select = $('#directory-roots'); select.replaceChildren(...roots.map(root => { const option = node('option', '', root); option.value = root; return option; })); select.value = data.root_path || roots[0] || ''; select.disabled = false; $('#directory-roots-field').hidden = roots.length < 2;
       const buttons = (data.directories || []).map(directory => { const button = node('button', 'directory-item'); button.type = 'button'; button.append(icon('folder'), node('span', '', directory.name), icon('right')); button.addEventListener('click', () => browseDirectory(directory.path)); return button; }); $('#directory-list').replaceChildren(...(buttons.length ? buttons : [node('p', 'field-hint', '没有子目录')]));
-    } catch (error) { if (request !== libraryBrowseRequest) return; $('#directory-list').replaceChildren(); $('#directory-error').textContent = error.message; $('#directory-error').hidden = false; }
+    } catch (error) {
+      if (request !== libraryBrowseRequest) return;
+      if (path && path !== state.rootPath && [400, 403, 422].includes(error.status)) { await browseDirectory(''); if ($('#library-dialog').open) toast('原目录暂不可访问，请重新选择。'); return; }
+      $('#directory-list').replaceChildren(); $('#directory-error').textContent = error.message; $('#directory-error').hidden = false; $('#directory-roots').disabled = false;
+    }
   }
   async function scanLibrary() {
+    if (!requireAccess('scan_libraries')) return;
     if (!state.libraries.length) { showLibraryForm(); return; } if (state.scanning) return; state.scanning = true; state.libraryError = null; renderLibrary();
     try { await post(state.view === 'library' && state.libraryId ? '/api/libraries/' + encodeURIComponent(state.libraryId) + '/scan' : '/api/scan', {}); await refreshLibrary(); } catch (error) { state.scanning = false; if (error.status !== 401) state.libraryError = error.message; renderLibrary(); }
   }
   function showSettings() { navigate('settings'); }
-  async function showBookDetail(book) {
+  async function handleUnavailableBook(book, error) {
+    if (![403, 404].includes(error.status) || !['book', 'reader'].includes(routing.current.view) || routing.current.id !== String(book.id)) return false;
+    commitRoute({ view: 'libraries' }, { replace: true });
+    await restoreLocation(); toast('作品不存在，或当前账号无权访问。'); return true;
+  }
+  async function showBookDetail(book, options = {}) {
+    if (!book) return;
+    if (!options.fromRoute && routing.ready) {
+      routing.generation += 1; routing.restoring = false;
+      commitRoute({ view: 'book', id: String(book.id), from: Routes.base(routing.current) });
+    }
     state.detailBook = book; $('#detail-content').replaceChildren(makeLoading('正在打开作品资料…')); if (!$('#book-detail').open) $('#book-detail').showModal();
     try { const latest = await api(bookUrl(book.id)); if (state.detailBook?.id !== book.id) return; state.detailBook = latest; const cached = state.books.find(item => item.id === latest.id); if (cached) Object.assign(cached, latest); renderDetail(latest); }
-    catch (error) { if (error.status !== 401) $('#detail-content').replaceChildren(makePageError(error.message, () => showBookDetail(book))); }
+    catch (error) { if (state.detailBook?.id !== book.id || await handleUnavailableBook(book, error)) return; if (error.status !== 401) $('#detail-content').replaceChildren(makePageError(error.message, () => showBookDetail(book))); }
   }
   function renderDetail(book) {
     const layout = node('div', 'detail-layout'); const poster = makeCover(book, 'detail-poster', false); const info = node('div', 'detail-info');
@@ -777,7 +1198,7 @@
     if (book.author && joinDistinctText([...(book.models || []).map(model => model.name), book.author]) !== joinDistinctText((book.models || []).map(model => model.name))) info.append(node('p', 'detail-author', `作者 · ${book.author}`));
     const actions = node('div', 'detail-actions'); const read = node('button', 'button button-primary', book.progress ? '▶ 继续阅读' : '▶ 开始阅读'); read.id = 'detail-read'; read.addEventListener('click', () => { $('#book-detail').close(); openBook(book); });
     const favorite = node('button', 'button button-secondary', book.favorite ? '♥ 已收藏' : '♡ 收藏'); favorite.id = 'detail-favorite'; favorite.setAttribute('aria-pressed', String(Boolean(book.favorite))); favorite.addEventListener('click', async () => { favorite.disabled = true; try { await toggleFavorite(book); } catch (error) { toast(error.message); favorite.disabled = false; } });
-    const edit = node('button', 'button button-secondary', '编辑资料'); edit.id = 'detail-edit'; edit.addEventListener('click', () => showMetadataForm(book)); actions.append(read, favorite, edit); info.append(actions);
+    const edit = node('button', 'button button-secondary', '编辑资料'); edit.id = 'detail-edit'; edit.addEventListener('click', () => showMetadataForm(book)); actions.append(read, favorite); if (can('edit_metadata')) actions.append(edit); info.append(actions);
     const history = node('div', 'detail-history'); history.append(node('h3', '', '阅读记录')); if (book.progress) history.append(node('p', '', `上次读到第 ${book.progress.page + 1} / ${book.page_count} 页`), node('small', '', `最近阅读 · ${formatDate(book.progress.updated_at, true)}`)); else history.append(node('p', 'detail-muted', '还没有阅读记录，翻开后会自动记录位置与时间。')); info.append(history);
     if ((book.bookmarks || []).length) { const saved = node('div', 'detail-bookmarks'); saved.append(node('h3', '', `书签 · ${book.bookmarks.length}`)); book.bookmarks.forEach(bookmark => { const button = node('button', 'detail-bookmark', `第 ${bookmark.page + 1} 页${bookmark.note ? ' · ' + bookmark.note : ''}`); button.addEventListener('click', () => { $('#book-detail').close(); openBook(book, bookmark.page); }); saved.append(button); }); info.append(saved); }
     const path = node('p', 'detail-path', book.path); path.title = book.path; info.append(path); layout.append(poster, info); $('#detail-content').replaceChildren(layout);
@@ -795,9 +1216,12 @@
     $('#metadata-save').disabled = false;
   }
   function showMetadataForm(book) {
+    if (!requireAccess('edit_metadata')) return;
     metadataFormGeneration += 1;
     clearMetadataCoverUpload();
     $('#metadata-remove').disabled = false;
+    $('#metadata-remove').hidden = !can('remove_books');
+    $('#metadata-show-new-model').hidden = !can('manage_models');
     state.editingBook = book;
     state.selectedModels = new Set((book.models || []).map(model => String(model.id)));
     $('#metadata-name').value = book.title;
@@ -817,19 +1241,24 @@
     renderMetadataModels(); updateMetadataReadingDirection(); updateCoverPreview();
     if (!$('#metadata-dialog').open) $('#metadata-dialog').showModal();
   }
-  function renderMetadataModels() {
-    const query = $('#metadata-model-search').value.trim().normalize('NFKC').toLocaleLowerCase('zh-CN');
+  function renderModelOptions(container, search, selected, onChange) {
+    const query = search.trim().normalize('NFKC').toLocaleLowerCase('zh-CN');
     const models = state.models.filter(model => !query || model.name.normalize('NFKC').toLocaleLowerCase('zh-CN').includes(query));
-    $('#metadata-models').replaceChildren(...models.map(model => {
+    container.replaceChildren(...models.map(model => {
       const label = node('label', 'model-checkbox'); const input = node('input');
-      input.type = 'checkbox'; input.value = model.id; input.checked = state.selectedModels.has(String(model.id));
+      input.type = 'checkbox'; input.value = model.id; input.checked = selected.has(String(model.id));
       input.addEventListener('change', () => {
-        if (input.checked) state.selectedModels.add(String(model.id)); else state.selectedModels.delete(String(model.id));
-        $('#metadata-model-selection').textContent = `已选择 ${state.selectedModels.size} 位模特`;
+        if (input.checked) selected.add(String(model.id)); else selected.delete(String(model.id));
+        onChange();
       });
       label.append(input, node('span', '', model.name)); return label;
     }));
-    if (!models.length) $('#metadata-models').append(node('p', 'field-hint', query ? '未找到模特' : '暂无模特'));
+    if (!models.length) container.append(node('p', 'field-hint', query ? '未找到模特' : '暂无模特'));
+  }
+  function renderMetadataModels() {
+    renderModelOptions($('#metadata-models'), $('#metadata-model-search').value, state.selectedModels, () => {
+      $('#metadata-model-selection').textContent = `已选择 ${state.selectedModels.size} 位模特`;
+    });
     $('#metadata-model-selection').textContent = `已选择 ${state.selectedModels.size} 位模特`;
   }
   function updateMetadataReadingDirection() {
@@ -896,7 +1325,7 @@
     ['model-name', 'model-avatar-upload', 'model-avatar-reset', 'model-remove', 'model-close'].forEach(id => { $('#' + id).disabled = busy; });
     $('#model-save').disabled = busy || Boolean(avatarEdits.model?.pending || avatarEdits.model?.invalid);
   }
-  function showModelForm(model = null) { if (modelMutationBusy) return; beginAvatarEdit('model', model); setModelMutationBusy(false); state.editingModel = model?.id || null; $('#model-dialog-title').textContent = model ? '编辑模特' : '新建模特'; $('#model-name').value = model?.name || ''; $('#model-remove').hidden = !model; $('#model-error').hidden = true; $('#model-dialog').showModal(); $('#model-name').focus(); }
+  function showModelForm(model = null) { if (!requireAccess('manage_models') || modelMutationBusy) return; beginAvatarEdit('model', model); setModelMutationBusy(false); state.editingModel = model?.id || null; $('#model-dialog-title').textContent = model ? '编辑模特' : '新建模特'; $('#model-name').value = model?.name || ''; $('#model-remove').hidden = !model; $('#model-error').hidden = true; $('#model-dialog').showModal(); $('#model-name').focus(); }
   function showBookmarkForm() { if (!reader.book || reader.loadedPage === null) { toast('请等当前图片加载完成。'); return; } state.bookmarkTarget = { bookId: reader.book.id, page: reader.index }; $('#bookmark-page-label').textContent = `《${reader.book.title}》 · 第 ${reader.index + 1} 页`; $('#bookmark-note').value = ''; $('#bookmark-error').hidden = true; $('#bookmark-dialog').showModal(); $('#bookmark-note').focus(); }
 
   function readerMessage(message, type = 'info', actionLabel, action) {
@@ -922,7 +1351,7 @@
     if (!reader.open || $('#reader').dataset.controls !== 'visible') return;
     reader.chromeTimer = setTimeout(() => {
       const editing = $('.reader-toolbar input:focus, .reader-toolbar select:focus, .reader-footer input:focus');
-      if (editing || !$('#reader-menu').hidden || !$('#reader-help-panel').hidden || !$('#chapter-drawer').hidden || $('#bookmark-dialog').open) { scheduleReaderChrome(); return; }
+      if (editing || reader.choice?.active || !$('#reader-menu').hidden || !$('#reader-help-panel').hidden || !$('#chapter-drawer').hidden || $('#bookmark-dialog').open) { scheduleReaderChrome(); return; }
       setReaderChrome(false);
     }, 3200);
   }
@@ -937,8 +1366,101 @@
       element.inert = !visible;
     });
     $('#reader-turn-hint').hidden = !intro || !reader.book;
-    if (!visible) { $('#reader-menu').hidden = true; $('#reader-menu-toggle').setAttribute('aria-expanded', 'false'); }
+    if (!visible) { closeReaderChoice(); $('#reader-menu').hidden = true; $('#reader-menu-toggle').setAttribute('aria-expanded', 'false'); }
     if (visible) scheduleReaderChrome();
+  }
+
+  // The hidden native selects remain the source of truth for reading settings.
+  // A shared listbox keeps the popup outside the scrolling mobile toolbar.
+  function setupReaderChoices() {
+    const panel = node('div', 'reader-choice-popover'); panel.id = 'reader-choice-popover'; panel.hidden = true; panel.setAttribute('role', 'listbox');
+    reader.choice = { panel, active: null, controls: new Map() };
+    $('#reader').append(panel);
+    [['mode', '阅读方式'], ['direction', '阅读方向'], ['fit', '图片适配']].forEach(([key, label]) => {
+      const select = $('#reader-' + key); const wrapper = node('div', 'reader-choice');
+      const trigger = node('button', 'reader-choice-trigger'); trigger.type = 'button'; trigger.id = 'reader-' + key + '-trigger';
+      const value = node('span', 'reader-choice-value'); const chevron = icon('right'); chevron.classList.add('reader-choice-chevron'); chevron.setAttribute('aria-hidden', 'true');
+      trigger.append(value, chevron); trigger.setAttribute('aria-haspopup', 'listbox'); trigger.setAttribute('aria-expanded', 'false'); trigger.setAttribute('aria-controls', panel.id);
+      select.closest('label').replaceWith(wrapper); select.hidden = true; select.tabIndex = -1; select.setAttribute('aria-hidden', 'true'); wrapper.append(select, trigger);
+      reader.choice.controls.set(key, { select, trigger, value, label });
+      trigger.addEventListener('click', () => reader.choice.active === key ? closeReaderChoice(true) : openReaderChoice(key));
+      trigger.addEventListener('keydown', event => {
+        if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+        event.preventDefault(); event.stopPropagation(); openReaderChoice(key, event.key);
+      });
+      select.addEventListener('change', syncReaderChoices);
+    });
+    panel.addEventListener('keydown', event => {
+      const options = $$('[role="option"]:not(:disabled)', panel); const current = options.indexOf(document.activeElement);
+      if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+        event.preventDefault(); event.stopPropagation();
+        const index = event.key === 'Home' ? 0 : event.key === 'End' ? options.length - 1 : (current + (event.key === 'ArrowDown' ? 1 : -1) + options.length) % options.length;
+        options[index]?.focus();
+      } else if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); event.stopPropagation(); document.activeElement?.click(); }
+      else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeReaderChoice(true); }
+      else if (event.key === 'Tab') closeReaderChoice(true);
+    });
+    $('#reader').addEventListener('pointerdown', event => {
+      if (reader.choice.active && !event.target.closest('.reader-choice, .reader-choice-popover')) closeReaderChoice();
+    }, true);
+    $('#reader').addEventListener('focusin', event => {
+      if (reader.choice.active && !event.target.closest('.reader-choice, .reader-choice-popover')) closeReaderChoice();
+    });
+    window.addEventListener('resize', positionReaderChoice);
+    $('.reader-options').addEventListener('scroll', positionReaderChoice, { passive: true });
+    syncReaderChoices();
+  }
+  function syncReaderChoices() {
+    if (!reader.choice) return;
+    reader.choice.controls.forEach(({ select, trigger, value, label }, key) => {
+      value.textContent = select.selectedOptions[0]?.textContent || label;
+      trigger.disabled = select.disabled;
+      trigger.setAttribute('aria-label', `${label}：${value.textContent}`);
+      trigger.title = key === 'direction' && state.prefs.mode === 'webtoon' ? '条漫模式固定从上到下' : label;
+      if (select.disabled && reader.choice.active === key) closeReaderChoice();
+    });
+    if (reader.choice.active) {
+      const selected = reader.choice.controls.get(reader.choice.active).select.value;
+      $$('[role="option"]', reader.choice.panel).forEach(option => option.setAttribute('aria-selected', String(option.dataset.value === selected)));
+    }
+  }
+  function openReaderChoice(key, edge = '') {
+    const control = reader.choice.controls.get(key);
+    if (!reader.open || control.select.disabled) return;
+    closeReaderChoice(); reader.choice.active = key;
+    const panel = reader.choice.panel; control.trigger.setAttribute('aria-expanded', 'true'); panel.setAttribute('aria-labelledby', control.trigger.id);
+    const heading = node('span', 'reader-choice-heading', control.label); heading.setAttribute('aria-hidden', 'true');
+    panel.replaceChildren(heading, ...Array.from(control.select.options).filter(option => !option.hidden).map(option => {
+      const button = node('button', 'reader-choice-option'); button.type = 'button'; button.tabIndex = -1; button.disabled = option.disabled; button.dataset.value = option.value;
+      button.setAttribute('role', 'option'); button.setAttribute('aria-selected', String(option.selected)); button.append(node('span', '', option.textContent), icon('check'));
+      button.addEventListener('click', () => {
+        if (control.select.disabled) { closeReaderChoice(); return; }
+        control.select.value = option.value; closeReaderChoice(true); control.select.dispatchEvent(new Event('change', { bubbles: true })); scheduleReaderChrome();
+      });
+      return button;
+    }));
+    panel.hidden = false; positionReaderChoice(); setReaderChrome(true);
+    const options = $$('[role="option"]:not(:disabled)', panel);
+    const focused = edge === 'Home' ? options[0] : edge === 'End' ? options.at(-1) : options.find(option => option.getAttribute('aria-selected') === 'true') || (edge === 'ArrowUp' ? options.at(-1) : options[0]);
+    focused?.focus({ preventScroll: true });
+  }
+  function positionReaderChoice() {
+    if (!reader.choice?.active) return;
+    const panel = reader.choice.panel; const rect = reader.choice.controls.get(reader.choice.active).trigger.getBoundingClientRect();
+    const width = document.documentElement.clientWidth; const height = window.innerHeight;
+    panel.style.maxHeight = Math.max(80, height - 24) + 'px';
+    const left = Math.max(12, Math.min(rect.right - panel.offsetWidth, width - panel.offsetWidth - 12));
+    const top = rect.bottom + 8 + panel.offsetHeight <= height - 12 ? rect.bottom + 8 : Math.max(12, rect.top - panel.offsetHeight - 8);
+    panel.style.left = left + 'px'; panel.style.top = top + 'px';
+  }
+  function closeReaderChoice(restoreFocus = false) {
+    if (!reader.choice?.active) return;
+    const { trigger } = reader.choice.controls.get(reader.choice.active);
+    const containedFocus = reader.choice.panel.contains(document.activeElement);
+    reader.choice.active = null; reader.choice.panel.hidden = true; trigger.setAttribute('aria-expanded', 'false');
+    if (restoreFocus && !trigger.disabled && reader.open) trigger.focus({ preventScroll: true });
+    else if (containedFocus && reader.open) $('#reader-viewport').focus({ preventScroll: true });
+    scheduleReaderChrome();
   }
 
   function cancelPageTurn() {
@@ -965,12 +1487,12 @@
     if (key === 'direction' && state.prefs.mode === 'webtoon') return;
     const bookId = reader.book.id;
     const field = key === 'mode' ? 'reading_mode' : 'reading_direction';
-    const override = field + '_override';
+    const generation = authGeneration;
     savePref(key, value);
-    reader.book[field] = value; reader.book[override] = value;
+    reader.book[field] = value; reader.book.reading_preferences = { ...reader.book.reading_preferences, [field]: value };
     reader.book.reading_direction = state.prefs.mode === 'webtoon' ? 'ttb' : state.prefs.direction;
     const cached = state.books.find(book => book.id === bookId);
-    if (cached) { cached[field] = value; cached[override] = value; cached.reading_direction = reader.book.reading_direction; }
+    if (cached) { cached[field] = value; cached.reading_preferences = { ...cached.reading_preferences, [field]: value }; cached.reading_direction = reader.book.reading_direction; }
     applyReaderPrefs();
     if (key === 'mode') setReaderMode();
     else if (state.prefs.mode !== 'webtoon') renderPage();
@@ -979,8 +1501,9 @@
     // the last selected value, even when a previous request is still in flight.
     const previous = reader.settingsChains.get(bookId) || Promise.resolve();
     const operation = previous.catch(() => {}).then(async () => {
+      if (generation !== authGeneration || !state.session?.authenticated) return;
       try {
-        await post(bookUrl(bookId) + '/metadata', { [field]: value }, { keepalive: true });
+        await post(bookUrl(bookId) + '/reading-preferences', { [field]: value }, { keepalive: true });
         if (reader.open && reader.book?.id === bookId) clearReaderMessage('settings-error');
       } catch (error) {
         if (error.status !== 401) {
@@ -1008,9 +1531,11 @@
     $('#reader-help-arrows').textContent = photo ? '上一页 / 下一页，跟随阅读方向' : '上一话 / 下一话，跟随阅读方向';
     ['mode', 'fit'].forEach(key => { $('#reader-' + key).value = state.prefs[key]; });
     $('#reader-mode').disabled = !reader.book;
+    $('#reader-fit').disabled = !reader.book;
     $('#reader-direction').disabled = vertical || !reader.book;
     $('#reader-direction-vertical').hidden = !vertical;
     $('#reader-direction').value = vertical ? 'ttb' : state.prefs.direction;
+    syncReaderChoices();
     $('#reader-theme').setAttribute('aria-label', `切换为${state.prefs.theme === 'dark' ? '浅' : '深'}色阅读背景`);
     $('#tap-left').setAttribute('aria-label', state.prefs.direction === 'rtl' ? '下一页' : '上一页');
     $('#tap-right').setAttribute('aria-label', state.prefs.direction === 'rtl' ? '上一页' : '下一页');
@@ -1023,7 +1548,15 @@
     $('#reader-turn-text').textContent = vertical ? '上下滚动，继续阅读' : state.prefs.direction === 'rtl' ? '点击左侧，翻到下一页' : '点击右侧，翻到下一页';
   }
 
-  async function openBook(book, startPage = null, sequence = null) {
+  async function openBook(book, startPage = null, sequence = null, options = {}) {
+    if (!book) return;
+    if (!options.fromRoute && routing.ready) {
+      routing.generation += 1; routing.restoring = false;
+      let from = routing.current.view === 'reader' ? Routes.returnTo(routing.current) : routing.current;
+      if (routing.current.view === 'reader' && from.view === 'book') from = { ...from, id: String(book.id) };
+      commitRoute({ view: 'reader', id: String(book.id), page: startPage === null ? undefined : Number(startPage) + 1, from });
+    }
+    if ($('#book-detail').open) $('#book-detail').close();
     hideReaderEnd(false);
     reader.endSequence = sequence?.libraryId === String(book.library_id) ? sequence : End.readingSequence(state.books, book, librarySort(book.library_id));
     reader.endBoundaryAt = 0; reader.lastWheelAt = 0;
@@ -1063,9 +1596,10 @@
       if (!reader.open || token !== reader.token) return;
       if (!latest.page_count) throw new ApiError('这个文件夹里暂时没有可阅读的图片。', 404);
       reader.book = latest;
+      if (reader.endSequence?.libraryId !== String(latest.library_id)) reader.endSequence = End.readingSequence(state.books, latest, librarySort(latest.library_id));
       const library = state.libraries.find(item => String(item.id) === String(latest.library_id));
       state.prefs.mode = latest.reading_mode || library?.reading_mode || 'single';
-      state.prefs.direction = latest.reading_direction_override || library?.reading_direction || (latest.reading_direction === 'rtl' ? 'rtl' : 'ltr');
+      state.prefs.direction = Users.readingDirection(latest, library);
       reader.sizes = Array.from({ length: latest.page_count }, () => ({}));
       reader.coverAlone = true; reader.offset = false;
       $('#cover-alone').checked = true; $('#spread-offset').checked = false;
@@ -1086,6 +1620,7 @@
       setReaderChrome(true, true);
     } catch (error) {
       if (token !== reader.token || !reader.open) return;
+      if (await handleUnavailableBook(book, error)) return;
       if (error.status !== 401) {
         $('#page-image-wrap').replaceChildren(makePageError(error.message, () => openBook(book)));
         readerMessage(error.message, 'error', '重新打开', () => openBook(book));
@@ -1111,6 +1646,7 @@
 
   function updateReaderPosition() {
     if (!reader.book) return;
+    if (routing.ready && routing.current.view === 'reader' && routing.current.id === String(reader.book.id)) commitRoute({ ...routing.current, page: reader.index + 1 }, { replace: true });
     const spread = state.prefs.mode === 'webtoon' ? [reader.index] : currentSpread();
     $('#page-input').value = spread[0] + 1;
     $('#page-total').textContent = (spread.length > 1 ? '–' + (spread[spread.length - 1] + 1) : '') + ' / ' + reader.book.page_count;
@@ -1459,8 +1995,8 @@
     nextButton.id = 'reader-end-next'; nextButton.disabled = !next;
     const last = action('left', '返回最后一页', () => hideReaderEnd()); last.id = 'reader-end-last';
     const first = action('book', '返回第一页', () => { hideReaderEnd(); setReaderPage(0); }); first.id = 'reader-end-first';
-    const library = action('folder', '返回写真库', () => { closeReader(); if ($('#book-detail').open) $('#book-detail').close(); selectLibrary(book.library_id); }); library.id = 'reader-end-library';
-    const detail = action('book', '返回作品详情', () => { closeReader(); showBookDetail(book); }); detail.id = 'reader-end-detail';
+    const library = action('folder', '返回写真库', () => { closeReader(true, { fromRoute: true }); if ($('#book-detail').open) $('#book-detail').close(); selectLibrary(book.library_id); }); library.id = 'reader-end-library';
+    const detail = action('book', '返回作品详情', () => { closeReader(true, { fromRoute: true }); showBookDetail(book); }); detail.id = 'reader-end-detail';
     primary.append(favorite, nextButton); secondary.append(last, first, library, detail); actions.append(primary, secondary);
     const note = node('p', 'reader-end-next-note', next ? `下一本 · ${next.title}` : '已是当前排列中的最后一本。'); note.id = 'reader-end-next-note';
     const error = node('p', 'reader-end-error'); error.hidden = true; error.setAttribute('role', 'alert');
@@ -1473,7 +2009,7 @@
       const button = node('button', 'reader-end-recommendation'); button.type = 'button'; button.dataset.bookId = String(item.id);
       button.setAttribute('aria-label', `查看推荐作品《${item.title}》详情`);
       button.append(makeCover(item, 'reader-end-cover'), node('strong', '', item.title), node('small', '', `${item.page_count} 页`));
-      button.addEventListener('click', () => { closeReader(); showBookDetail(item); }); grid.append(button);
+      button.addEventListener('click', () => { closeReader(true, { fromRoute: true }); showBookDetail(item); }); grid.append(button);
     });
     related.append(suggestions.length ? grid : node('p', 'reader-end-empty', '这个写真库暂时没有其他作品。'));
     panel.append(heading, actions, note, error, related); overlay.append(panel);
@@ -1575,7 +2111,7 @@
     const alreadyCaptured = reader.lastVisible?.bookId === reader.book.id
       && reader.lastVisible.page === index && reader.lastVisible.completed === completed;
     if (!alreadyCaptured) {
-      reader.pending = { bookId: reader.book.id, page: index, completed, seq: ++reader.saveSeq };
+      reader.pending = { bookId: reader.book.id, page: index, completed, seq: ++reader.saveSeq, accountGeneration: authGeneration };
       reader.lastVisible = { bookId: reader.book.id, page: index, completed };
       $('#save-status').textContent = '等待保存…';
       clearTimeout(reader.saveTimer);
@@ -1590,6 +2126,7 @@
     reader.pending = null;
     const predecessor = reader.saveChains.get(item.bookId) || Promise.resolve();
     const operation = predecessor.catch(() => {}).then(async () => {
+      if (item.accountGeneration !== authGeneration || !state.session?.authenticated) return;
       if (reader.open && reader.book?.id === item.bookId) $('#save-status').textContent = '正在保存…';
       try {
         const data = await post(bookUrl(item.bookId) + '/progress', { page: item.page, completed: item.completed }, { keepalive });
@@ -1617,7 +2154,8 @@
     return operation;
   }
 
-  function closeReader(save = true) {
+  function closeReader(save = true, options = {}) {
+    closeReaderChoice();
     hideReaderEnd(false);
     const saved = save ? Promise.allSettled([flushProgress(true), ...reader.saveChains.values(), ...reader.settingsChains.values()]) : Promise.resolve();
     const closingBookId = reader.book?.id;
@@ -1640,6 +2178,7 @@
       (returnTo || $('#search')).focus({ preventScroll: true });
     }
     if (save) saved.then(() => { if (!reader.open && state.session?.authenticated) refreshLibrary(); });
+    if (save && !options.fromRoute && routing.current.view === 'reader') returnFromOverlay();
   }
 
   $('#login-form').addEventListener('submit', async event => {
@@ -1661,6 +2200,7 @@
       showLibrary();
       state.loading = !state.loaded;
       await refreshLibrary();
+      await restoreLocation();
     } catch (error) {
       $('#login-error').textContent = error.status === 401 ? '用户名或密码不正确，请再试一次。' : error.message;
       $('#login-error').hidden = false;
@@ -1669,7 +2209,7 @@
   });
 
   $('#logout').addEventListener('click', async () => {
-    try { await flushProgress(true); state.session = await post('/api/logout', {}); handleUnauthorized(); }
+    try { await flushProgress(true); state.session = await post('/api/logout', {}); handleUnauthorized(); $('#login-error').hidden = true; }
     catch (error) { if (error.status !== 401) toast(error.message); }
   });
   $('#account-toggle').addEventListener('click', () => {
@@ -1682,28 +2222,88 @@
   ['account-settings', 'sidebar-settings'].forEach(id => { $('#' + id).addEventListener('click', () => navigate('settings')); });
   $('#interface-theme').addEventListener('change', event => applyInterfaceTheme(event.target.value));
   $('#check-updates').addEventListener('click', checkUpdates);
-  $('#edit-profile').addEventListener('click', showProfileForm);
-  $('#profile-close').addEventListener('click', () => $('#profile-dialog').close());
-  $('#profile-dialog').addEventListener('close', () => { clearAvatarEdit('profile'); ['profile-current-password', 'profile-password', 'profile-password-confirm'].forEach(id => { $('#' + id).value = ''; }); });
-  $('#profile-form').addEventListener('submit', async event => {
-    event.preventDefault();
-    const edit = avatarEdits.profile;
-    const button = $('#profile-save'); button.disabled = true; $('#profile-error').hidden = true;
+  $('#manage-users').addEventListener('click', showUsersList);
+  ['users-close', 'users-done'].forEach(id => $('#' + id).addEventListener('click', () => { if (!userManagement.busy) $('#users-dialog').close(); }));
+  $('#users-dialog').addEventListener('cancel', event => { if (userManagement.busy) event.preventDefault(); });
+  $('#my-libraries-none').addEventListener('click', () => {
+    if (!state.session?.authenticated || visibleLibraries.busy || visibleLibraries.loading || !visibleLibraries.loaded) return;
+    visibleLibraries.selected.clear(); visibleLibraries.dirty = true; renderVisibleLibraries();
+  });
+  $('#my-libraries-all').addEventListener('change', event => {
+    if (!state.session?.authenticated || visibleLibraries.busy || visibleLibraries.loading || !visibleLibraries.loaded) return;
+    visibleLibraries.selected = new Set(event.target.checked ? visibleLibraries.libraries.map(library => String(library.id)) : []);
+    visibleLibraries.dirty = true; renderVisibleLibraries();
+  });
+  $('#user-create').addEventListener('click', () => showUserForm());
+  $('#user-close').addEventListener('click', () => { if (!userManagement.busy) $('#user-dialog').close(); });
+  $('#user-dialog').addEventListener('cancel', event => { if (userManagement.busy) event.preventDefault(); });
+  $('#user-dialog').addEventListener('close', () => { $('#user-password').value = ''; $('#user-password-confirm').value = ''; $('#user-error').hidden = true; userManagement.editingId = null; });
+  ['basic', 'permissions'].forEach(tab => $('#user-tab-' + tab).addEventListener('click', () => { if (!userManagement.busy) setUserTab(tab); }));
+  $('#user-dialog .profile-tabs').addEventListener('keydown', event => { if (userManagement.busy || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return; event.preventDefault(); setUserTab(event.key === 'Home' ? 'basic' : event.key === 'End' ? 'permissions' : $('#user-basic').hidden ? 'basic' : 'permissions', true); });
+  $('#user-libraries-all').addEventListener('change', event => { if (userManagement.busy) return; $$('#user-libraries input').forEach(input => { input.checked = event.target.checked; }); syncUserLibrarySelection(); });
+  $('#user-libraries-none').addEventListener('click', () => { if (userManagement.busy) return; $$('#user-libraries input').forEach(input => { input.checked = false; }); syncUserLibrarySelection(); });
+  $('#user-form').addEventListener('submit', async event => {
+    event.preventDefault(); if (!requireAccess() || userManagement.busy) return;
+    const generation = userManagement.generation; $('#user-error').hidden = true;
     try {
-      const password = $('#profile-password').value;
-      if (password !== $('#profile-password-confirm').value) throw new Error('两次输入的新密码不一致。');
-      if (password && !$('#profile-current-password').value) throw new Error('修改密码时，请输入当前密码。');
-      const payload = { username: $('#profile-username').value.trim(), ...avatarPayload('profile') };
-      if (password) { payload.password = password; payload.current_password = $('#profile-current-password').value; }
-      state.session = await post('/api/profile', payload);
-      renderAccount(); renderSettings(); if (avatarEdits.profile === edit) $('#profile-dialog').close(); toast('用户信息已保存。');
-    } catch (error) { if (avatarEdits.profile === edit) { $('#profile-error').textContent = error.message; $('#profile-error').hidden = false; } }
-    finally { if (avatarEdits.profile === edit) button.disabled = Boolean(edit?.pending || edit?.invalid); }
+      const payload = Users.payload({ username: $('#user-username').value, password: $('#user-password').value, password_confirm: $('#user-password-confirm').value, enabled: $('#user-enabled').checked, library_ids: $$('#user-libraries input:checked').map(input => input.value) }, { creating: userManagement.editingId === null, libraries: userManagement.libraries });
+      const id = userManagement.editingId; const changedPassword = Boolean(payload.password); setUserBusy(true);
+      await post('/api/users' + (id === null ? '' : '/' + encodeURIComponent(id)), payload);
+      if (generation !== userManagement.generation) return;
+      $('#user-dialog').close(); userManagement.loaded = false; await loadUsers(true); toast(id === null ? '用户已创建。' : changedPassword ? '用户资料与密码已更新，其登录已失效。' : '用户资料已更新。');
+    } catch (error) { if (generation === userManagement.generation && error.status !== 401) { if (error.field) setUserTab('basic'); $('#user-error').textContent = error.message; $('#user-error').hidden = false; if (error.field) $('#user-' + error.field)?.focus(); } }
+    finally { if (generation === userManagement.generation) setUserBusy(false); }
+  });
+  $('#user-delete').addEventListener('click', async () => {
+    if (!requireAccess() || userManagement.busy) return;
+    const id = userManagement.editingId; const user = userManagement.users.find(item => String(item.id) === String(id));
+    if (!Users.canManage(user)) return;
+    const generation = userManagement.generation;
+    if (!await confirmRemoval('users', 1, user.username) || generation !== userManagement.generation) return;
+    setUserBusy(true); $('#user-error').hidden = true;
+    try { await post('/api/users/' + encodeURIComponent(id) + '/delete', {}); if (generation !== userManagement.generation) return; $('#user-dialog').close(); userManagement.loaded = false; await loadUsers(true); toast('用户及其个人记录已删除，共享资料和源文件保留。'); }
+    catch (error) { if (generation === userManagement.generation && error.status !== 401) { $('#user-error').textContent = error.message; $('#user-error').hidden = false; } }
+    finally { if (generation === userManagement.generation) setUserBusy(false); }
+  });
+  $('#edit-profile').addEventListener('click', showProfileForm);
+  ['basic', 'permissions'].forEach(tab => $('#profile-tab-' + tab).addEventListener('click', () => { if (!profileMutationBusy) setProfileTab(tab); }));
+  $('#profile-dialog .profile-tabs').addEventListener('keydown', event => { if (profileMutationBusy || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return; event.preventDefault(); setProfileTab(event.key === 'Home' ? 'basic' : event.key === 'End' ? 'permissions' : $('#profile-basic').hidden ? 'basic' : 'permissions', true); });
+  $('#profile-close').addEventListener('click', () => { if (!profileMutationBusy) $('#profile-dialog').close(); });
+  $('#profile-dialog').addEventListener('cancel', event => { if (profileMutationBusy) event.preventDefault(); });
+  $('#profile-dialog').addEventListener('close', () => { profileFormGeneration += 1; clearAvatarEdit('profile'); discardVisibilityDraft(); setProfileBusy(false); ['profile-current-password', 'profile-password', 'profile-password-confirm'].forEach(id => { $('#' + id).value = ''; }); });
+  $('#profile-form').addEventListener('submit', async event => {
+    event.preventDefault(); if (profileMutationBusy || !state.session?.authenticated) return;
+    const generation = profileFormGeneration; let savingPart = 'basic'; $('#profile-error').hidden = true;
+    try {
+      const payload = Users.profilePayload({ username: $('#profile-username').value, current_password: $('#profile-current-password').value, password: $('#profile-password').value, password_confirm: $('#profile-password-confirm').value }, avatarPayload('profile'));
+      const profile = payload.username !== state.session.user.username || payload.password || payload.avatar_upload || payload.avatar_reset ? payload : null;
+      if (visibleLibraries.dirty && (!visibleLibraries.loaded || visibleLibraries.loading)) { savingPart = 'permissions'; throw new Error('写真库设置尚未加载，请重试读取后保存。'); }
+      const visibility = visibleLibraries.dirty ? Users.visibilityPayload([...visibleLibraries.selected], visibleLibraries.libraries) : null;
+      setProfileBusy(true);
+      const ensureCurrent = () => { if (generation !== profileFormGeneration || !state.session?.authenticated) throw new ApiError('账户已切换。', 401); };
+      await Users.saveChanges({ profile, visibility,
+        saveProfile: data => { savingPart = 'basic'; return post('/api/profile', data); },
+        saveVisibility: data => { savingPart = 'permissions'; return post('/api/my-libraries', data); },
+        onProfileSaved: session => { ensureCurrent(); state.session = session; activeUser = session.user; $('#profile-username').value = session.user.username; beginAvatarEdit('profile', session.user); ['profile-current-password', 'profile-password', 'profile-password-confirm'].forEach(id => { $('#' + id).value = ''; }); renderAccount(); setProfileBusy(true); },
+        onVisibilitySaved: result => { ensureCurrent(); visibleLibraries.libraries = result.libraries || []; visibleLibraries.selected = new Set(visibleLibraries.libraries.filter(library => library.visible).map(library => String(library.id))); visibleLibraries.dirty = false; resetSelection(); }
+      });
+      ensureCurrent(); await refreshLibrary(); ensureCurrent(); setProfileBusy(false); $('#profile-dialog').close(); toast('用户信息已保存。');
+    } catch (error) {
+      if (generation !== profileFormGeneration || !state.session?.authenticated) return;
+      if (error.status === 401) {
+        try { const session = await api('/api/session'); if (!session.authenticated) { handleUnauthorized(); return; } if (String(session.user?.id) !== String(activeUser?.id)) { state.session = session; showLibrary(); return; } state.session = session; }
+        catch (_) { if (!state.session?.authenticated) return; }
+      }
+      if (generation !== profileFormGeneration) return;
+      setProfileTab(error.field ? 'basic' : savingPart);
+      $('#profile-error').textContent = error.profileSaved ? '个人资料已保存，写真库显示未保存：' + error.message : error.message; $('#profile-error').hidden = false;
+      if (error.field) $('#profile-' + error.field)?.focus();
+    } finally { if (generation === profileFormGeneration) setProfileBusy(false); }
   });
   $('#create-library').addEventListener('click', () => showLibraryForm());
   $('#home-all-libraries').addEventListener('click', () => navigate('libraries'));
   ['selection-manage', 'selection-toggle'].forEach(id => $('#' + id).addEventListener('click', () => {
-    if (selection.busy || !['libraries', 'library'].includes(state.view)) return;
+    if (selection.busy || !Batch.kind(state.view, isAdmin())) return;
     selection.enabled = !selection.enabled; selection.ids.clear(); renderSelection();
     if (!selection.enabled) $('#selection-manage').focus({ preventScroll: true });
   }));
@@ -1712,7 +2312,22 @@
     const items = selectionItems(); const all = items.every(item => selection.ids.has(String(item.id)));
     items.forEach(item => { if (all) selection.ids.delete(String(item.id)); else selection.ids.add(String(item.id)); }); renderSelection();
   });
-  ['remove', 'scan', 'favorite', 'random'].forEach(action => $('#selection-' + action).addEventListener('click', () => batchAction(action)));
+  ['models', 'remove', 'scan', 'favorite', 'random'].forEach(action => $('#selection-' + action).addEventListener('click', () => batchAction(action)));
+  ['batch-model-close', 'batch-model-cancel'].forEach(id => $('#' + id).addEventListener('click', closeBatchModelForm));
+  $('#batch-model-dialog').addEventListener('cancel', event => { if (batchModels.busy) event.preventDefault(); });
+  $('#batch-model-dialog').addEventListener('close', () => { batchModels.context = null; batchModels.generation += 1; batchModels.ids = []; batchModels.selected.clear(); batchModels.busy = false; });
+  $('#batch-model-search').addEventListener('input', renderBatchModels);
+  $('#batch-model-search').addEventListener('keydown', event => { if (event.key === 'Enter') event.preventDefault(); });
+  $('#batch-model-show-new').addEventListener('click', () => {
+    if (batchModels.busy || !requireAccess('manage_models')) return;
+    const row = $('#batch-model-new-row'); row.hidden = !row.hidden;
+    $('#batch-model-show-new').setAttribute('aria-expanded', String(!row.hidden));
+    if (!row.hidden) { if (!$('#batch-model-new').value) $('#batch-model-new').value = $('#batch-model-search').value.trim(); $('#batch-model-new').focus(); }
+  });
+  $('#batch-model-new').addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); createBatchModel(); } });
+  $('#batch-model-add').addEventListener('click', createBatchModel);
+  $('#batch-model-clear').addEventListener('change', syncBatchModelForm);
+  $('#batch-model-form').addEventListener('submit', saveBatchModels);
   $('#library-remove').addEventListener('click', () => removeCurrent('libraries'));
   $('#metadata-remove').addEventListener('click', () => removeCurrent('books'));
   $('#remove-cancel').addEventListener('click', () => finishRemoval(false));
@@ -1736,10 +2351,12 @@
   $('#library-mode').addEventListener('change', updateLibraryReadingDirection);
   $('#library-add-path').addEventListener('click', () => { if ($$('.library-path-row', $('#library-paths')).length < 20) addLibraryPath('', true); });
   $('#directory-parent').addEventListener('click', event => browseDirectory(event.currentTarget.dataset.path));
+  $('#directory-roots').addEventListener('change', event => browseDirectory(event.currentTarget.value));
   $('#directory-select').addEventListener('click', () => { if (libraryBrowseInput?.isConnected) libraryBrowseInput.value = state.directoryPath; $('#directory-picker').hidden = true; });
   $('#library-author').addEventListener('change', () => { const creating = $('#library-author').value === '__new__'; $('#library-author-new').hidden = !creating; $('#library-author-error').hidden = true; if (creating) $('#library-new-author').focus(); });
   $('#library-new-author').addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); $('#library-create-author').click(); } });
   $('#library-create-author').addEventListener('click', async () => {
+    if (!requireAccess()) return;
     const name = $('#library-new-author').value.trim(); if (!name) { $('#library-author-error').textContent = '请输入新模特名称。'; $('#library-author-error').hidden = false; $('#library-new-author').focus(); return; }
     const generation = libraryFormGeneration;
     const button = $('#library-create-author'); button.disabled = true; $('#library-save').disabled = true; $('#library-author-error').hidden = true;
@@ -1752,6 +2369,7 @@
   });
   $('#library-form').addEventListener('submit', async event => {
     event.preventDefault();
+    if (!requireAccess()) return;
     if ($('#library-author').value === '__new__') { $('#library-author-error').textContent = '请先新建模特，或从已有模特中选择一人。'; $('#library-author-error').hidden = false; $('#library-new-author').focus(); return; }
     const button = $('#library-save'); button.disabled = true; $('#library-form-error').hidden = true;
     const data = { name: $('#library-name').value.trim(), media_type: $('#library-type').value, paths: $$('.library-path-input', $('#library-paths')).map(input => input.value.trim()), reading_mode: $('#library-mode').value, reading_direction: $('#library-direction').disabled ? ($('#library-direction').dataset.pagedDirection || 'ltr') : $('#library-direction').value, hide_date_prefix: $('#library-hide-date').checked, apply_reading_defaults: Boolean(state.editingLibrary && $('#library-apply-reading').checked), exclude_rules: $('#library-excludes').value.split(/\r?\n/).map(value => value.trim()).filter(value => value && !value.startsWith('#')), default_author_id: $('#library-author').value || null };
@@ -1759,24 +2377,29 @@
       const result = await post('/api/libraries' + (state.editingLibrary ? '/' + encodeURIComponent(state.editingLibrary) : ''), data);
       if (state.refreshPromise) await state.refreshPromise;
       state.libraryId = String(result.library.id); state.query = ''; state.series = ''; $('#search').value = '';
-      try { localStorage.setItem('sumi-library', state.libraryId); } catch (_) { /* Optional device preference. */ }
+      storePreference('sumi-library', state.libraryId);
       $('#library-dialog').close();
-      resetSelection(); state.view = 'library'; state.sort = librarySort(state.libraryId); $('#sort').value = state.sort; state.loading = true; await refreshLibrary();
+      resetSelection(); state.view = 'library'; state.sort = librarySort(state.libraryId); $('#sort').value = state.sort; state.loading = true; syncViewRoute(); await refreshLibrary();
       toast(state.editingLibrary ? '写真库设置已保存，正在重新扫描。' : '写真库已创建，正在整理你的作品。');
     } catch (error) { $('#library-form-error').textContent = error.message; $('#library-form-error').hidden = false; }
     finally { button.disabled = false; }
   });
   $$('.scan-trigger').forEach(button => button.addEventListener('click', scanLibrary));
-  $('#search').addEventListener('input', event => { state.query = event.target.value; renderLibrary(); });
-  $('#series-filter').addEventListener('change', event => { state.series = event.target.value; renderLibrary(); });
-  $('#sort').addEventListener('change', event => { state.sort = End.normalizeSort(event.target.value); if (state.view === 'library') saveLibrarySort(state.libraryId, state.sort); renderLibrary(); });
+  $('#search').addEventListener('input', event => { state.query = event.target.value; renderLibrary(); syncViewRoute(true); });
+  $('#series-filter').addEventListener('change', event => { state.series = event.target.value; renderLibrary(); syncViewRoute(true); });
+  $('#sort').addEventListener('change', event => { state.sort = End.normalizeSort(event.target.value); if (state.view === 'library') saveLibrarySort(state.libraryId, state.sort); renderLibrary(); syncViewRoute(true); });
   Object.keys(defaultPrefs).forEach(key => $('#pref-' + key).addEventListener('change', event => savePref(key, event.target.value)));
   $('#detail-close').addEventListener('click', () => { state.detailBook = null; $('#book-detail').close(); });
-  $('#book-detail').addEventListener('close', () => { state.detailBook = null; });
+  $('#book-detail').addEventListener('close', () => {
+    if ($('#book-detail').open) return;
+    state.detailBook = null;
+    if (routing.current.view === 'book') returnFromOverlay();
+  });
   $('#metadata-close').addEventListener('click', () => $('#metadata-dialog').close());
   $('#metadata-dialog').addEventListener('close', () => { metadataFormGeneration += 1; clearMetadataCoverUpload(); state.editingBook = null; });
   $('#metadata-model-search').addEventListener('input', renderMetadataModels);
   $('#metadata-show-new-model').addEventListener('click', () => {
+    if (!requireAccess('manage_models')) return;
     const row = $('#metadata-new-model-row'); row.hidden = !row.hidden;
     $('#metadata-show-new-model').setAttribute('aria-expanded', String(!row.hidden));
     if (!row.hidden) { if (!$('#metadata-new-model').value) $('#metadata-new-model').value = $('#metadata-model-search').value.trim(); $('#metadata-new-model').focus(); }
@@ -1789,6 +2412,7 @@
   $('#metadata-cover').addEventListener('input', updateCoverPreview);
   $('#metadata-cover-upload').addEventListener('change', event => readMetadataCover(event.target.files[0]));
   $('#metadata-add-model').addEventListener('click', async () => {
+    if (!requireAccess('manage_models')) return;
     const name = $('#metadata-new-model').value.trim(); if (!name) { $('#metadata-new-model').focus(); return; }
     const generation = metadataFormGeneration;
     const button = $('#metadata-add-model'); button.disabled = true; $('#metadata-error').hidden = true;
@@ -1804,7 +2428,7 @@
     finally { button.disabled = false; }
   });
   $('#metadata-form').addEventListener('submit', async event => {
-    event.preventDefault(); const book = state.editingBook; if (!book) return;
+    event.preventDefault(); if (!requireAccess('edit_metadata')) return; const book = state.editingBook; if (!book) return;
     const generation = metadataFormGeneration;
     const button = $('#metadata-save'); button.disabled = true; $('#metadata-error').hidden = true;
     try {
@@ -1832,6 +2456,7 @@
   $('#model-close').addEventListener('click', () => { if (!modelMutationBusy) $('#model-dialog').close(); });
   $('#model-dialog').addEventListener('cancel', event => { if (modelMutationBusy) event.preventDefault(); });
   $('#model-remove').addEventListener('click', async () => {
+    if (!requireAccess('manage_models')) return;
     if (modelMutationBusy || !state.editingModel) return;
     const id = state.editingModel;
     const model = state.models.find(item => String(item.id) === String(id));
@@ -1853,7 +2478,7 @@
     }
   });
   $('#model-form').addEventListener('submit', async event => {
-    event.preventDefault(); if (modelMutationBusy) return; setModelMutationBusy(true); $('#model-error').hidden = true;
+    event.preventDefault(); if (!requireAccess('manage_models') || modelMutationBusy) return; setModelMutationBusy(true); $('#model-error').hidden = true;
     const edit = avatarEdits.model;
     try { await post('/api/models' + (state.editingModel ? '/' + encodeURIComponent(state.editingModel) : ''), { name: $('#model-name').value.trim(), ...avatarPayload('model') }); if (avatarEdits.model === edit) $('#model-dialog').close(); await refreshLibrary(); toast('模特资料已保存。'); }
     catch (error) { if (avatarEdits.model === edit) { $('#model-error').textContent = error.message; $('#model-error').hidden = false; } }
@@ -1875,7 +2500,7 @@
   });
 
   $('#reader-close').addEventListener('click', () => closeReader());
-  $('#reader').addEventListener('cancel', event => { event.preventDefault(); if (reader.endOverlay) hideReaderEnd(); else closeReader(); });
+  $('#reader').addEventListener('cancel', event => { event.preventDefault(); if (reader.choice?.active) closeReaderChoice(true); else if (reader.endOverlay) hideReaderEnd(); else closeReader(); });
   $('#reader-mode').addEventListener('change', event => changeReaderSetting('mode', event.target.value));
   $('#reader-direction').addEventListener('change', event => changeReaderSetting('direction', event.target.value));
   $('#reader-fit').addEventListener('change', event => {
@@ -2005,6 +2630,7 @@
   window.addEventListener('focus', refreshOnReturn);
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flushProgress(true); else refreshOnReturn(); });
   window.addEventListener('pagehide', () => flushProgress(true));
+  window.addEventListener('hashchange', restoreLocation);
 
   let performanceResizeTimer;
   window.addEventListener('resize', () => {
@@ -2025,12 +2651,14 @@
     } else reader.pageCache.setLimit(Performance.get().imageCacheLimit);
   });
 
+  setupReaderChoices();
   (async function init() {
     try {
       state.session = await api('/api/session');
       if (!state.session.authenticated) { showLogin(); return; }
       showLibrary();
       await refreshLibrary();
+      await restoreLocation();
     } catch (error) {
       if (error.status === 401) return;
       state.loading = false;

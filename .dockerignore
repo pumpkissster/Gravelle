@@ -1,6 +1,8 @@
 *
 !Dockerfile
 !server.py
+!accounts.py
+!password_reset.py
 !requirements.txt
 !release.json
 !LICENSE

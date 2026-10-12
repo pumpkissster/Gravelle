@@ -30,7 +30,8 @@ def serve(config: LauncherConfig, data_path: Path, instance: str = "") -> int:
     library = None
     server = None
     try:
-        library = Library(Path(config.library_path), data_path, "", 300)
+        roots = [Path(path) for path in config.library_paths]
+        library = Library(roots[0], data_path, "", 300, roots=roots)
         server = ReaderServer((config.host, config.port), library)
         # With PyInstaller --onedir the static directory is in _internal.
         server.static = resource_root() / "static"
@@ -81,7 +82,8 @@ class ServerController:
             prefix = [str(companion)]
         else:
             prefix = [sys.executable, str(Path(__file__).resolve().parent / "launcher.py")]
-        return [*prefix, "--serve", "--library", config.library_path, "--data", str(self.data_path),
+        libraries = [argument for path in config.library_paths for argument in ("--library", path)]
+        return [*prefix, "--serve", *libraries, "--data", str(self.data_path),
                 "--host", config.host, "--port", str(config.port), "--instance", instance]
 
     def start(self, config: LauncherConfig, timeout: float = 20) -> str:
@@ -182,3 +184,15 @@ class ServerController:
             if self.log_stream is not None:
                 self.log_stream.close()
                 self.log_stream = None
+
+    def reset_admin_password(self, password: str, confirmation: str) -> dict:
+        from password_reset import PasswordResetError, reset_admin_password, validate_confirmation
+        with self.lock:
+            # Validate before stopping a healthy server. stop() only touches the
+            # exact Popen handle owned by this controller, never external PIDs.
+            try:
+                validate_confirmation(password, confirmation)
+                self.stop()
+                return reset_admin_password(self.data_path, password, confirmation)
+            except PasswordResetError as error:
+                raise LauncherError(str(error)) from error

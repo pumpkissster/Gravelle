@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       release_version:
-        description: "版本号，必须与 server.py 的 VERSION 一致，例如 1.8.3"
+        description: "版本号，必须与 server.py 的 VERSION 一致，例如 0.8.4"
         required: true
         type: string
       publish:
@@ -18,7 +18,7 @@ on:
         required: true
         type: boolean
       source_tag:
-        description: "补发已有版本的 Docker 镜像时填写原标签（如 v1.8.3）；初次发布留空"
+        description: "补发已有版本的 Docker 镜像时填写原标签（如 v0.8.4）；初次发布留空"
         default: ""
         required: false
         type: string
@@ -75,6 +75,8 @@ jobs:
               output.write(f'version={version}\ntag=v{version}\nsource_sha={source_sha}\n')
           PY
       - run: python -m pip install -r requirements.txt
+      - name: Check Docker build context excludes private data
+        run: python packaging/check_docker_context.py
       - name: Backend regression tests
         run: python -m unittest discover -s tests -p 'test_*.py' -v
       - name: Frontend regression tests
@@ -276,6 +278,10 @@ jobs:
 
           更新前请备份服务端的数据目录。文件校验值见 SHA256SUMS.txt。
           EOF
+          if [ -f "docs/releases/$RELEASE_VERSION.md" ]; then
+            printf '\n' >> dist/release-notes.md
+            cat "docs/releases/$RELEASE_VERSION.md" >> dist/release-notes.md
+          fi
           if [ "$RELEASE_VERSION" = '1.8.3' ]; then
             cat >> dist/release-notes.md <<'EOF'
 

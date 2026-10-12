@@ -18,7 +18,7 @@ from unittest.mock import Mock, patch
 
 APP = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(APP))
-from server import (COOKIE_NAME, VERSION, ReaderServer, UpdateChecker, UpdateCheckError,
+from server import (COOKIE_NAME, VERSION, ReaderError, ReaderServer, UpdateChecker, UpdateCheckError,
                     latest_github_release, release_configuration, release_repository,
                     release_version)
 
@@ -205,7 +205,18 @@ class UpdateHttpTests(unittest.TestCase):
     def setUpClass(cls):
         # A fake auth store makes this an HTTP test without touching any database.
         library = Mock()
-        library.valid_session.side_effect = lambda token: token == "update-test-session"
+        library.request_condition = threading.Condition()
+        library.request_context = threading.local()
+        library.request_stopping = False
+        library.active_requests = 0
+        library.session.side_effect = lambda token: {
+            "authenticated": token in ("update-test-session", "child-test-session"),
+            "user": {"id": 1 if token == "update-test-session" else 2}
+            if token in ("update-test-session", "child-test-session") else None}
+        def require_admin():
+            if getattr(library.request_context, "user_id", None) != 1:
+                raise ReaderError("此操作需要管理员权限。", 403)
+        library.require_admin.side_effect = require_admin
         with patch("server.release_configuration", return_value=(None, "")):
             cls.server = ReaderServer(("127.0.0.1", 0), library)
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
@@ -217,8 +228,8 @@ class UpdateHttpTests(unittest.TestCase):
         cls.server.server_close()
         cls.thread.join(timeout=5)
 
-    def request(self, path="/api/updates", authenticated=True):
-        headers = {"Cookie": f"{COOKIE_NAME}=update-test-session"} if authenticated else {}
+    def request(self, path="/api/updates", authenticated=True, token="update-test-session"):
+        headers = {"Cookie": f"{COOKIE_NAME}={token}"} if authenticated else {}
         connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=5)
         try:
             connection.request("GET", path, headers=headers)
@@ -231,6 +242,13 @@ class UpdateHttpTests(unittest.TestCase):
         with patch.object(self.server.updates, "check") as check:
             status, _, result = self.request(authenticated=False)
         self.assertEqual(status, 401)
+        self.assertNotIn("latest", result)
+        check.assert_not_called()
+
+    def test_child_account_cannot_check_service_updates(self):
+        with patch.object(self.server.updates, "check") as check:
+            status, _, result = self.request(token="child-test-session")
+        self.assertEqual(status, 403)
         self.assertNotIn("latest", result)
         check.assert_not_called()
 

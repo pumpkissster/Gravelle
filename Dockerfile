@@ -32,11 +32,12 @@ RUN groupadd --gid 1000 sumi \
 COPY requirements.txt ./requirements.txt
 RUN python -m pip install --no-cache-dir -r requirements.txt
 
-COPY server.py ./server.py
+COPY server.py accounts.py password_reset.py ./
 COPY release.json LICENSE ./
 COPY static ./static
 
-RUN python -c "import ast, pathlib; tree=ast.parse(pathlib.Path('server.py').read_text(encoding='utf-8')); version=next(ast.literal_eval(n.value) for n in tree.body if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'VERSION' for t in n.targets)); assert '${GRAVELLE_VERSION}' in ('source', version), 'Image version differs from server.VERSION'"
+RUN python -c "import ast, pathlib; tree=ast.parse(pathlib.Path('server.py').read_text(encoding='utf-8')); version=next(ast.literal_eval(n.value) for n in tree.body if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'VERSION' for t in n.targets)); assert '${GRAVELLE_VERSION}' in ('source', version), 'Image version differs from server.VERSION'" \
+    && python password_reset.py --help > /dev/null
 
 USER 1000:1000
 EXPOSE 8080

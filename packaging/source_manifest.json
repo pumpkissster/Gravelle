@@ -1,11 +1,11 @@
 [
-  "server.py", "release.json", "requirements.txt", "README.md", "LICENSE",
+  "server.py", "accounts.py", "password_reset.py", "release.json", "requirements.txt", "README.md", "LICENSE",
   "Dockerfile", "compose.yaml", "compose.build.yaml", ".env.example", ".dockerignore", ".gitignore",
   ".github/workflows/release.yml",
   "start_windows.py", "start-windows.cmd", "restart-windows.cmd", "restart-windows.ps1",
   "start-windows-lan.cmd", "restart-windows-lan.cmd",
   "static/index.html", "static/app.js", "static/styles.css", "static/reader-model.js",
-  "static/performance-settings.js", "static/reader-end.js", "static/reader-end.css", "static/avatar-ui.js",
+  "static/performance-settings.js", "static/reader-end.js", "static/reader-end.css", "static/avatar-ui.js", "static/user-management.js", "static/batch-selection.js", "static/page-router.js",
   "static/gravelle-logo.png", "static/gravelle-wordmark.svg", "static/gravelle-icon.png", "static/default-avatar.png",
   "static/fonts/LibreCaslonText.ttf", "static/fonts/OFL.txt", "static/fonts/README.md",
   "desktop/__init__.py", "desktop/core.py", "desktop/runtime.py", "desktop/launcher.py",
@@ -14,9 +14,10 @@
   "desktop/assets/gravelle-wordmark.png", "desktop/languages/ChineseSimplified.isl",
   "desktop/gravelle.manifest",
   "desktop/languages/LICENSE-Inno-Setup.txt", "desktop/languages/README.md",
-  "docs/windows.md", "docs/docker-release.md",
+  "docs/windows.md", "docs/docker-release.md", "docs/users.md", "docs/next-version.md", "docs/routing.md", "docs/releases/0.8.4.md",
   "tests/test_integration.py", "tests/test_v15.py", "tests/test_v16_auth.py", "tests/test_v18.py",
-  "tests/test_v19_models.py", "tests/test_settings_access.py", "tests/test_updates.py", "tests/test_desktop_launcher.py",
-  "tests/test_reader_model.js", "tests/test_performance_settings.js", "tests/test_reader_end.js", "tests/test_avatar_ui.js",
-  "packaging/source_manifest.json", "packaging/package_source.py"
+  "tests/test_v19_models.py", "tests/test_settings_access.py", "tests/test_updates.py", "tests/test_desktop_launcher.py", "tests/test_desktop_multiroot_ui.py",
+  "tests/test_multiuser.py", "tests/test_multiuser_security.py", "tests/test_password_reset.py", "tests/test_multi_roots.py", "tests/test_batch_models.py",
+  "tests/test_reader_model.js", "tests/test_performance_settings.js", "tests/test_reader_end.js", "tests/test_avatar_ui.js", "tests/test_user_management.js", "tests/test_batch_selection.js", "tests/test_page_router.js",
+  "packaging/source_manifest.json", "packaging/package_source.py", "packaging/check_docker_context.py"
 ]

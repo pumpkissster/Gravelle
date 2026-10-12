@@ -71,7 +71,7 @@
     return api;
   }
   let settings = { ...defaults };
-  if (typeof localStorage !== 'undefined') { try { settings = normalize(JSON.parse(localStorage.getItem('sumi-performance') || '{}')); } catch (_) { /* Keep safe defaults. */ } }
+  let accountStorageKey = null;
   const covers = createQueue(settings.coverConcurrency); const coverRecords = new Map(); let observer; let detachObserver;
   function loadCover(image, url, lazy = true) {
     const record = { started: false, start() {
@@ -98,7 +98,23 @@
   }
   function update(values) {
     settings = normalize({ ...settings, ...values }); covers.setLimit(settings.coverConcurrency);
-    try { localStorage.setItem('sumi-performance', JSON.stringify(settings)); } catch (_) { /* Still applies to this visit. */ }
+    try { if (accountStorageKey) localStorage.setItem(accountStorageKey, JSON.stringify(settings)); } catch (_) { /* Still applies to this visit. */ }
+    if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('sumi-performance-change', { detail: { ...settings } }));
+    return { ...settings };
+  }
+  function setUser(user) {
+    accountStorageKey = user?.id !== undefined ? `gravelle-user-${encodeURIComponent(String(user.id))}-sumi-performance` : null;
+    let saved = null;
+    try {
+      if (accountStorageKey) saved = localStorage.getItem(accountStorageKey);
+      if (saved === null && user?.role === 'admin' && Number(user.id) === 1) {
+        saved = localStorage.getItem('sumi-performance');
+        if (saved !== null) localStorage.setItem(accountStorageKey, saved);
+      }
+    } catch (_) { /* Keep safe defaults. */ }
+    covers.cancel(); coverRecords.forEach((_, image) => observer?.unobserve(image)); coverRecords.clear();
+    settings = normalize((() => { try { return JSON.parse(saved || '{}'); } catch (_) { return {}; } })());
+    covers.setLimit(settings.coverConcurrency);
     if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('sumi-performance-change', { detail: { ...settings } }));
     return { ...settings };
   }
@@ -108,7 +124,7 @@
     if (panel.contains?.(document.activeElement)) return;
     panel.replaceChildren();
     const make = (tag, text, className) => { const element = document.createElement(tag); if (text) element.textContent = text; if (className) element.className = className; return element; };
-    panel.append(make('h2', '性能设置'), make('p', '仅保存在当前设备，可按设备性能和网络状况调整。', 'settings-intro'));
+    panel.append(make('h2', '性能设置'), make('p', '按当前账号保存在此设备。', 'settings-intro'));
     const rows = [
       ['webtoonStep', '条漫加载步进', '预加载当前页前后各几页', 1, 20],
       ['coverConcurrency', '封面加载并发数', '同时加载的列表封面数量', 1, 12],
@@ -132,5 +148,5 @@
     });
     panel.append(make('p', '图片缓存限制控制阅读器保留的原图数量，不清理浏览器自身的网络缓存。', 'performance-note'));
   }
-  return { defaults, normalize, paginate, catalogWindow, createQueue, createCache, get: () => ({ ...settings }), update, loadCover, render };
+  return { defaults, normalize, paginate, catalogWindow, createQueue, createCache, get: () => ({ ...settings }), update, setUser, loadCover, render };
 });

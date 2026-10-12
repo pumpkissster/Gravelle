@@ -280,7 +280,7 @@ class RunningApp:
             response = error
         with response:
             content = response.read()
-            if 'application/json' in response.headers.get('Content-Type', ''):
+            if content and 'application/json' in response.headers.get('Content-Type', ''):
                 content = json.loads(content)
             return response.status, content, response.headers
 
@@ -360,7 +360,11 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn(b'<html', content.lower())
         self.assertEqual(headers.get_content_type(), 'text/html')
+        self.assertIn(b'/batch-selection.js', content)
+        self.assertIn(b'/page-router.js', content)
         for path, mime in [('/app.js', 'text/javascript'), ('/reader-model.js', 'text/javascript'),
+                           ('/batch-selection.js', 'text/javascript'),
+                           ('/page-router.js', 'text/javascript'),
                            ('/performance-settings.js', 'text/javascript'), ('/reader-end.js', 'text/javascript'),
                            ('/styles.css', 'text/css'), ('/reader-end.css', 'text/css'), ('/gravelle-logo.png', 'image/png'),
                            ('/gravelle-wordmark.svg', 'image/svg+xml'), ('/gravelle-icon.png', 'image/png')]:
@@ -385,6 +389,16 @@ class PasswordTests(unittest.TestCase):
         self.assertIn('HttpOnly', headers['Set-Cookie'])
         self.assertIn('SameSite=Strict', headers['Set-Cookie'])
         self.assertTrue(self.app.request('/api/session')[1]['authenticated'])
+        # The legacy shared gate only permits first-account setup. Sensitive
+        # routes require an actual account rather than an owner fallback.
+        self.assertIsNone(self.app.request('/api/session')[1]['user'])
+        self.assertEqual(self.app.request('/api/library')[0], 401)
+        self.assertEqual(self.app.request('/api/libraries', {'name': 'forbidden'})[0], 401)
+        status, result, _ = self.app.request('/api/register', {
+            'username': 'test-reader', 'password': 'test-only-strong-passphrase',
+            'setup_password': 'test-only-passphrase'})
+        self.assertEqual(status, 201)
+        self.assertEqual(result['user']['role'], 'admin')
         self.app.create_library()
         catalog = self.app.books()
         book_id = catalog['books'][0]['id']

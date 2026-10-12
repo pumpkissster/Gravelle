@@ -12,6 +12,25 @@ test('device preferences accept bounded integers and reject invalid saved values
   [null, false, 7, 'invalid', []].forEach(value => assert.deepEqual(normalize(value), defaults));
 });
 
+test('performance settings migrate legacy preferences only for the original administrator and isolate login changes', () => {
+  const previousStorage = global.localStorage;
+  const records = new Map([['sumi-performance', JSON.stringify({ ...defaults, bookPageSize: 25, imageCacheLimit: 8 })]]);
+  global.localStorage = { getItem: key => records.get(key) ?? null, setItem: (key, value) => records.set(key, value) };
+  try {
+    Performance.setUser({ id: 2, role: 'user' }); assert.deepEqual(Performance.get(), defaults);
+    Performance.update({ bookPageSize: 12 });
+    assert.equal(JSON.parse(records.get('gravelle-user-2-sumi-performance')).bookPageSize, 12);
+    Performance.setUser({ id: 1, role: 'admin' }); assert.equal(Performance.get().bookPageSize, 25); assert.equal(Performance.get().imageCacheLimit, 8);
+    Performance.update({ bookPageSize: 30 });
+    Performance.setUser({ id: 2, role: 'user' }); assert.equal(Performance.get().bookPageSize, 12); assert.equal(Performance.get().imageCacheLimit, 0);
+    Performance.setUser(null); assert.deepEqual(Performance.get(), defaults);
+    Performance.update({ bookPageSize: 99 });
+    assert.equal(records.has('gravelle-user-signed-out-sumi-performance'), false);
+    Performance.setUser({ id: 1, role: 'admin' }); assert.equal(Performance.get().bookPageSize, 30);
+    records.set('gravelle-user-3-sumi-performance', '{broken'); Performance.setUser({ id: 3, role: 'user' }); assert.deepEqual(Performance.get(), defaults);
+  } finally { Performance.setUser(null); global.localStorage = previousStorage; }
+});
+
 test('valid number input saves immediately, keeps the same controls, and rejects empty or invalid edits', () => {
   const previousDocument = global.document; const controls = [];
   const makeElement = tag => ({ tag, children: [], handlers: {}, value: '', append(...items) { this.children.push(...items); }, replaceChildren(...items) { this.children = items; }, setAttribute() {}, addEventListener(event, handler) { this.handlers[event] = handler; }, checkValidity() { const value = Number(this.value); return String(this.value).trim() !== '' && value >= this.min && value <= this.max; }, reportValidity() { this.reported = true; } });

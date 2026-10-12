@@ -9,7 +9,7 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from desktop.core import (LauncherConfig, LauncherError, ReleaseConfig, SingleInstanceLock,
@@ -41,6 +41,70 @@ class WindowSizingTests(unittest.TestCase):
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_legacy_config_migrates_without_changing_first_root(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            path = root / "launcher.json"
+            path.write_text(json.dumps({"library_path": str(root), "port": 18080, "lan_enabled": True}))
+            config = load_config(path)
+            self.assertEqual(config.library_paths, (str(root.resolve()),))
+            self.assertEqual(config.library_path, config.library_paths[0])
+            save_config(path, config)
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["library_paths"], [str(root.resolve())])
+            self.assertEqual(saved["library_path"], str(root.resolve()))
+
+    def test_multiple_roots_roundtrip_and_array_takes_precedence(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            paths = [root / "写真 一", root / "写真 二"]
+            for path in paths:
+                path.mkdir()
+            config = LauncherConfig(library_path="legacy-does-not-exist", port=18080,
+                                    library_paths=[str(path) for path in paths])
+            self.assertEqual(config.library_path, str(paths[0].resolve()))
+            save_config(root / "launcher.json", config)
+            self.assertEqual(load_config(root / "launcher.json"), config)
+            self.assertEqual(len(config.library_paths), 2)
+
+    def test_duplicates_are_removed_without_losing_root_order(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            second = root / "second"
+            second.mkdir()
+            paths = (str(root), str(second), str(root / "second" / ".."), str(second))
+            config = LauncherConfig(library_paths=paths).validate()
+            self.assertEqual(config.library_paths, (str(root.resolve()), str(second.resolve())))
+
+    def test_every_root_must_be_valid_and_error_identifies_the_path(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            missing = root / "missing-second"
+            with self.assertRaisesRegex(LauncherError, "missing-second"):
+                LauncherConfig(library_paths=[str(root), str(missing)]).validate()
+            file = root / "not-a-folder.jpg"
+            file.touch()
+            with self.assertRaisesRegex(LauncherError, "not-a-folder"):
+                LauncherConfig(library_paths=[str(root), str(file)]).validate()
+            second = root / "denied-second"
+            second.mkdir()
+            import os
+            scandir = os.scandir
+            def deny_second(path):
+                if Path(path) == second:
+                    raise PermissionError("denied")
+                return scandir(path)
+            with patch("desktop.core.os.scandir", side_effect=deny_second):
+                with self.assertRaisesRegex(LauncherError, "denied-second"):
+                    LauncherConfig(library_paths=[str(root), str(second)]).validate()
+
+    def test_malformed_root_arrays_are_rejected(self):
+        for paths in ([], "C:/photos", ["relative"], [None], [""], [123]):
+            with self.subTest(paths=paths), self.assertRaises(LauncherError):
+                LauncherConfig(library_paths=paths)
+        with self.assertRaisesRegex(LauncherError, "20"):
+            LauncherConfig(library_paths=[str(Path.cwd() / str(index)) for index in range(21)])
+
     def test_atomic_roundtrip_unicode_directory_and_port(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -176,6 +240,21 @@ class UpdateTests(unittest.TestCase):
 
 
 class NetworkTests(unittest.TestCase):
+    def test_diagnostics_report_each_configured_root_and_validate_while_running(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            second = root / "second"
+            second.mkdir()
+            config = LauncherConfig(library_paths=[str(root), str(second)])
+            with patch("desktop.core.socket.create_connection"):
+                result = network_diagnostics(config, running=True)
+            self.assertEqual(result["directories"], [{"path": str(path), "readable": True}
+                                                    for path in (root, second)])
+            self.assertIn("2 个写真根文件夹", result["message"])
+            second.rmdir()
+            with self.assertRaisesRegex(LauncherError, "second"):
+                network_diagnostics(config, running=True)
+
     def test_port_probe_uses_posix_reuse_and_windows_exclusive_binding(self):
         from types import SimpleNamespace
         from unittest.mock import MagicMock
@@ -221,6 +300,58 @@ class NetworkTests(unittest.TestCase):
 
 
 class LifecycleTests(unittest.TestCase):
+    def test_real_private_child_exposes_both_roots_to_directory_browser(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            paths = [root / "写真 一", root / "写真 二"]
+            for path in paths:
+                path.mkdir()
+            with socket.socket() as candidate:
+                candidate.bind(("127.0.0.1", 0))
+                port = candidate.getsockname()[1]
+            controller = ServerController(root / "data", root / "server.log")
+            try:
+                url = controller.start(LauncherConfig(port=port, library_paths=[str(path) for path in paths]))
+                request = Request(url + "api/register", json.dumps({"username": "multi-root-test", "password": "test-password-123"}).encode(),
+                                  {"Content-Type": "application/json", "Origin": url.rstrip("/")})
+                with urlopen(request, timeout=4) as response:
+                    cookie = response.headers["Set-Cookie"].split(";", 1)[0]
+                with urlopen(Request(url + "api/directories", headers={"Cookie": cookie}), timeout=3) as response:
+                    listing = json.loads(response.read())
+                self.assertEqual(listing["root_paths"], [str(path) for path in paths])
+                from urllib.parse import urlencode
+                with urlopen(Request(url + "api/directories?" + urlencode({"path": str(paths[1])}),
+                                     headers={"Cookie": cookie}), timeout=3) as response:
+                    second = json.loads(response.read())
+                self.assertEqual(second["path"], str(paths[1]))
+                self.assertEqual(second["root_path"], str(paths[1]))
+                self.assertTrue(controller.running)
+            finally:
+                controller.stop()
+
+    def test_private_child_command_repeats_library_argument_in_order(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            paths = (str(root / "first root"), str(root / "写真二"))
+            controller = ServerController(root / "data", root / "server.log", ["server"])
+            command = controller.command(LauncherConfig(library_paths=paths), "instance-token")
+            self.assertEqual([command[index + 1] for index, value in enumerate(command) if value == "--library"], list(paths))
+            self.assertEqual(command[0], "server")
+
+    def test_cli_single_and_repeated_roots_reach_private_server(self):
+        from desktop.launcher import main
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for paths in ([str(root)], [str(root), str(root / "second")]):
+                arguments = ["--serve", "--data", str(root / "data"), "--port", "18080"]
+                for path in paths:
+                    arguments.extend(("--library", path))
+                with self.subTest(paths=paths), patch("desktop.launcher.serve", return_value=0) as serve:
+                    self.assertEqual(main(arguments), 0)
+                config = serve.call_args.args[0]
+                self.assertEqual(config.library_paths, tuple(paths))
+                self.assertEqual(config.library_path, paths[0])
+
     def test_local_health_ignores_environment_http_proxy(self):
         from desktop.runtime import ProxyHandler
         with tempfile.TemporaryDirectory() as folder:

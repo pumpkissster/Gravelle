@@ -10,7 +10,7 @@ from __future__ import annotations
 import base64
 import binascii
 from collections import deque
-from contextlib import closing
+from contextlib import closing, contextmanager
 from datetime import date
 import fnmatch
 import hashlib
@@ -41,8 +41,11 @@ from urllib.parse import parse_qs, urlsplit
 import zipfile
 
 from PIL import Image, ImageOps, UnidentifiedImageError
+from accounts import (PERMISSION_KEYS, PERMISSION_OPTIONS, check_password, hash_password,
+                      migrate_accounts, prepare_account_migration, validate_password)
+from password_reset import DataDirectoryLock
 
-VERSION = "1.8.3"
+VERSION = "0.8.4"
 MEDIA_TYPES = {"manga_jp", "manga_kr", "comic_us", "photo"}
 IMAGE_TYPES = {
     ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
@@ -76,6 +79,9 @@ STATIC_FILES = {
     "/gravelle-icon.png": "gravelle-icon.png",
     "/default-avatar.png": "default-avatar.png",
     "/avatar-ui.js": "avatar-ui.js",
+    "/user-management.js": "user-management.js",
+    "/batch-selection.js": "batch-selection.js",
+    "/page-router.js": "page-router.js",
     "/fonts/LibreCaslonText.ttf": "fonts/LibreCaslonText.ttf",
 }
 LOG = logging.getLogger("sumi")
@@ -414,12 +420,34 @@ def validate_archive_image(info):
 
 
 class Library:
-    def __init__(self, root: Path, data: Path, password: str, scan_interval: float):
-        # LIBRARY_PATH is the administrator-controlled browsing boundary. Keep
-        # its lexical path so symlinks/junctions can be rejected explicitly.
-        self.root = Path(os.path.abspath(root))
+    def __init__(self, root: Path, data: Path, password: str, scan_interval: float, *, roots=None):
+        # Preserve the primary boundary for existing callers/configuration. Each
+        # additional boundary keeps its lexical path so links can be rejected.
+        if roots is not None and not isinstance(roots, (list, tuple)):
+            raise ValueError("根文件夹需要是路径数组。")
+        configured = [root, *(roots or [])]
+        self.roots = []
+        for value in configured:
+            if not isinstance(value, (str, os.PathLike)) or not str(value) or "\0" in str(value):
+                raise ValueError("根文件夹路径无效。")
+            candidate = Path(os.path.abspath(value))
+            if candidate not in self.roots:
+                self.roots.append(candidate)
+        if len(self.roots) > 20:
+            raise ValueError("最多可以配置 20 个根文件夹。")
+        self.root = self.roots[0]
         self.data = data.resolve()
         self.data.mkdir(parents=True, exist_ok=True)
+        self.service_lock = DataDirectoryLock(self.data)
+        if not self.service_lock.acquire():
+            raise RuntimeError("此资料目录正在使用，请先停止正在运行的阅读器。")
+        try:
+            self._initialize_runtime(password, scan_interval)
+        except BaseException:
+            self.service_lock.release()
+            raise
+
+    def _initialize_runtime(self, password, scan_interval):
         self.database = self.data / "library.sqlite3"
         self.password = password
         self.scan_interval = scan_interval
@@ -440,7 +468,13 @@ class Library:
         self.avatar_lock = threading.RLock()
         self.avatars = self.data / "avatars"
         self.avatars.mkdir(exist_ok=True)
+        self.request_context = threading.local()
+        self.request_condition = threading.Condition()
+        self.active_requests = 0
+        self.request_stopping = False
+        self.migration_backup = prepare_account_migration(self.database)
         self._initialize_database()
+        migrate_accounts(self.database)
         self.signing_key = self._load_secret()
 
     def connect(self):
@@ -605,22 +639,34 @@ class Library:
                     self.errors = json.loads(row["value"])
             connection.commit()
 
+    def _allowed_root(self, candidate):
+        # Path.is_relative_to returns False across Windows drives as well as
+        # siblings; string-prefix checks would admit e.g. C:\\Photos-private.
+        matches = [root for root in self.roots if candidate.is_relative_to(root)]
+        if not matches:
+            raise ReaderError("只能选择已配置根文件夹范围内的目录。", 403)
+        # Overlapping configured roots are harmless. Use the closest boundary
+        # so browsing never climbs from one selected root into another.
+        return max(matches, key=lambda root: len(root.parts))
+
     def _directory_path(self, value):
         if not isinstance(value, str) or not value or len(value) > 4096 or "\0" in value:
             raise ReaderError("请选择有效的写真目录。")
         candidate = Path(value)
         if not candidate.is_absolute() or ".." in candidate.parts:
-            raise ReaderError("目录需要使用挂载范围内的绝对路径，不能包含 ..。")
-        try:
-            relative = candidate.relative_to(self.root)
-        except ValueError as error:
-            raise ReaderError("只能选择 LIBRARY_PATH 挂载范围内的目录。", 403) from error
+            raise ReaderError("目录需要使用已配置根文件夹范围内的绝对路径，不能包含 ..。")
+        boundary = self._allowed_root(candidate)
+        relative = candidate.relative_to(boundary)
         if candidate == self.data or candidate.is_relative_to(self.data):
             raise ReaderError("不能将阅读器的数据目录设为写真库。", 403)
-        current = self.root
+        current = boundary
         try:
+            # A nested configured root must not conceal an escaping link in an
+            # ancestor (including a Windows junction above the selected root).
+            if any(is_link_node(ancestor.lstat()) for ancestor in boundary.parents):
+                raise ReaderError("根文件夹路径不能包含符号链接或联接。", 403)
             if is_link_node(current.lstat()) or not current.is_dir():
-                raise ReaderError("写真挂载根目录无效，请检查 LIBRARY_PATH。", 422)
+                raise ReaderError("根文件夹无效，请检查已配置的目录路径和访问权限。", 422)
             for part in relative.parts:
                 if is_hidden(part):
                     raise ReaderError("不能选择隐藏目录。", 403)
@@ -636,6 +682,7 @@ class Library:
         return candidate
 
     def directories(self, value=None):
+        self.require_admin()
         path = self._directory_path(str(self.root) if value is None else value)
         directories = []
         try:
@@ -651,8 +698,9 @@ class Library:
         except OSError as error:
             raise ReaderError("无法列出此目录，请检查目录访问权限。", 422) from error
         directories.sort(key=lambda item: natural_key(item["name"]))
-        return {"root_path": str(self.root), "path": str(path),
-                "parent": None if path == self.root else str(path.parent),
+        boundary = self._allowed_root(path)
+        return {"root_path": str(boundary), "root_paths": [str(root) for root in self.roots], "path": str(path),
+                "parent": None if path == boundary else str(path.parent),
                 "directories": directories}
 
     @staticmethod
@@ -668,7 +716,7 @@ class Library:
         result["scanning"] = scanning
         return result
 
-    def libraries(self):
+    def libraries(self, include_hidden=False):
         with self.state_lock, closing(self.connect()) as connection:
             rows = connection.execute("""SELECT l.*, author.name AS default_author_name, COUNT(b.id) AS book_count
                 FROM media_libraries l LEFT JOIN books b ON b.library_id=l.id AND b.active=1
@@ -676,7 +724,49 @@ class Library:
                 GROUP BY l.id ORDER BY l.created_at,l.id""").fetchall()
             libraries = [self._library_export(row, row["id"] == self.current_scan or
                           row["id"] in self.pending_scans) for row in rows]
-        return {"libraries": libraries, "root_path": str(self.root)}
+            actor = self._actor(connection)
+            hidden = set() if include_hidden else {row[0] for row in connection.execute(
+                "SELECT library_id FROM user_hidden_libraries WHERE user_id=?", (actor["id"],))}
+            if actor["role"] != "admin":
+                allowed = {row[0] for row in connection.execute(
+                    "SELECT library_id FROM user_libraries WHERE user_id=?", (actor["id"],))}
+                libraries = [item for item in libraries if item["id"] in allowed]
+            libraries = [item for item in libraries if item["id"] not in hidden]
+        return {"libraries": libraries, "root_path": str(self.root) if actor["role"] == "admin" else None,
+                "root_paths": [str(root) for root in self.roots] if actor["role"] == "admin" else []}
+
+    def my_libraries(self):
+        with closing(self.connect()) as connection:
+            actor = self._actor(connection)
+            if actor["role"] == "admin":
+                rows = connection.execute("""SELECT l.id,l.name,h.library_id IS NULL AS visible
+                    FROM media_libraries l LEFT JOIN user_hidden_libraries h ON h.library_id=l.id AND h.user_id=?
+                    ORDER BY l.name,l.id""", (actor["id"],))
+            else:
+                rows = connection.execute("""SELECT l.id,l.name, h.library_id IS NULL AS visible
+                    FROM user_libraries ul JOIN media_libraries l ON l.id=ul.library_id
+                    LEFT JOIN user_hidden_libraries h ON h.user_id=ul.user_id AND h.library_id=ul.library_id
+                    WHERE ul.user_id=? ORDER BY l.name,l.id""", (actor["id"],))
+            return {"libraries": [{"id": row["id"], "name": row["name"], "visible": bool(row["visible"])} for row in rows]}
+
+    def save_my_libraries(self, body):
+        values = body.get("visible_library_ids")
+        if set(body) != {"visible_library_ids"} or not isinstance(values, list) or len(values) > 500 or any(
+                not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{24}", value) for value in values):
+            raise ReaderError("请选择要显示的已授权写真库。")
+        with self.auth_lock, closing(self.connect()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            actor = self._actor(connection)
+            allowed = {row[0] for row in connection.execute(
+                "SELECT id FROM media_libraries" if actor["role"] == "admin" else
+                "SELECT library_id FROM user_libraries WHERE user_id=?",
+                () if actor["role"] == "admin" else (actor["id"],))}
+            if not set(values).issubset(allowed):
+                raise ReaderError("写真库不存在或未被授权。", 404)
+            connection.execute("DELETE FROM user_hidden_libraries WHERE user_id=?", (actor["id"],))
+            connection.executemany("INSERT INTO user_hidden_libraries(user_id,library_id) VALUES(?,?)",
+                                   [(actor["id"], item) for item in sorted(allowed - set(values))])
+        return self.my_libraries()
 
     def _library_config(self, library_id, connection=None):
         if not isinstance(library_id, str):
@@ -688,6 +778,11 @@ class Library:
             FROM media_libraries l LEFT JOIN models author ON author.id=l.default_author_id
             WHERE l.id=?""", (library_id,)).fetchone()
         if row is None:
+            raise ReaderError("写真库不存在，请刷新后重试。", 404)
+        actor = self._actor(connection)
+        if actor["role"] != "admin" and not connection.execute(
+                "SELECT 1 FROM user_libraries WHERE user_id=? AND library_id=?",
+                (actor["id"], library_id)).fetchone():
             raise ReaderError("写真库不存在，请刷新后重试。", 404)
         result = dict(row)
         result["default_author"] = row["default_author_name"] or row["default_author"]
@@ -704,6 +799,7 @@ class Library:
         return [str(root) for root in roots]
 
     def save_library(self, body, library_id=None):
+        self.require_admin()
         with self.state_lock, closing(self.connect()) as connection, connection:
             previous = self._library_config(library_id, connection) if library_id else {}
             name = body.get("name", previous.get("name", ""))
@@ -778,7 +874,7 @@ class Library:
             # a listing must not observe removed roots before polling is active.
             connection.commit()
             self.start_scan(library_id)
-        return {"library": next(item for item in self.libraries()["libraries"] if item["id"] == library_id)}
+        return {"library": next(item for item in self.libraries(include_hidden=True)["libraries"] if item["id"] == library_id)}
 
     @staticmethod
     def _batch_ids(value):
@@ -802,10 +898,11 @@ class Library:
         for offset in range(0, len(ids), 500):
             batch = ids[offset:offset + 500]
             marks = ",".join("?" for _ in batch)
-            for table in ("progress", "favorites", "bookmarks", "book_models", "book_metadata"):
+            for table in ("progress", "favorites", "bookmarks", "reading_preferences", "book_models", "book_metadata"):
                 connection.execute(f"DELETE FROM {table} WHERE book_id IN ({marks})", batch)
 
     def batch_libraries(self, body):
+        self.require_admin()
         ids = self._batch_ids(body.get("ids"))
         action = body.get("action")
         if action not in ("remove", "scan"):
@@ -836,18 +933,36 @@ class Library:
     def batch_books(self, body):
         ids = self._batch_ids(body.get("ids"))
         action = body.get("action")
-        if action not in ("remove", "favorite"):
-            raise ReaderError("作品批量操作需要是 remove 或 favorite。")
+        if action not in ("remove", "favorite", "models"):
+            raise ReaderError("作品批量操作需要是 remove、favorite 或 models。")
+        if action == "models":
+            self.require_permission("edit_metadata")
+        for book_id in ids:
+            self.book(book_id, internal=True)
+        if action == "remove":
+            self.require_permission("remove_books")
         favorite = body.get("favorite", True)
         if action == "favorite" and type(favorite) is not bool:
             raise ReaderError("收藏状态需要 true 或 false。")
         with self.state_lock, self.cover_lock, closing(self.connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             self._validate_targets(connection, "books", ids)
+            # Recheck the complete ACL after reserving the write transaction.
+            # A grant may have been revoked after the preliminary validation.
+            if any(self._select(connection, book_id) is None for book_id in ids):
+                raise ReaderError("部分所选作品不存在或未被授权，请刷新后重试。", 404)
+            if action == "models":
+                self.require_permission("edit_metadata", connection)
+                model_ids = self._model_ids(connection, body.get("model_ids"))
+                connection.executemany("""INSERT INTO book_metadata(book_id,models_manual) VALUES(?,1)
+                    ON CONFLICT(book_id) DO UPDATE SET models_manual=1""", [(book_id,) for book_id in ids])
+                for book_id in ids:
+                    self._replace_book_models(connection, book_id, model_ids)
+                return {"updated": ids, "model_ids": model_ids}
             if action == "favorite":
-                connection.executemany("""INSERT INTO favorites(book_id,favorite) VALUES(?,?)
-                    ON CONFLICT(book_id) DO UPDATE SET favorite=excluded.favorite""",
-                    [(book_id, int(favorite)) for book_id in ids])
+                connection.executemany("""INSERT INTO favorites(user_id,book_id,favorite) VALUES(?,?,?)
+                    ON CONFLICT(user_id,book_id) DO UPDATE SET favorite=excluded.favorite""",
+                    [(self._actor(connection)["id"], book_id, int(favorite)) for book_id in ids])
                 return {"updated": ids, "favorite": favorite}
             self._clear_book_records(connection, ids)
             marks = ",".join("?" for _ in ids)
@@ -873,9 +988,14 @@ class Library:
                 return True
         return False
 
-    def _media_path(self, library_root, relative):
-        prefix = library_root.relative_to(self.root)
-        return (prefix / Path(*safe_relative(relative))).as_posix()
+    def _open_media_file(self, library_root, relative):
+        # Revalidate every read even for cached book manifests. Removing an
+        # allowed root never redirects its old paths into a remaining root.
+        library_root = self._directory_path(str(library_root))
+        boundary = self._allowed_root(library_root)
+        prefix = library_root.relative_to(boundary)
+        path = (prefix / Path(*safe_relative(relative))).as_posix()
+        return open_library_file(boundary, path)
 
     def _load_secret(self):
         path = self.data / "session.secret"
@@ -894,20 +1014,96 @@ class Library:
         # A password change invalidates sessions issued under the old password.
         return hmac.new(secret, self.password.encode("utf-8"), hashlib.sha256).digest()
 
-    @staticmethod
-    def _public_user(row):
+    def _public_user(self, row, connection=None):
         if row is None:
             return None
-        result = {key: row[key] for key in ("id", "username", "display_name", "avatar_color", "avatar_revision")}
-        result["avatar_url"] = (f"/api/avatars/user/1?v={row['avatar_revision']}" if row["avatar_file"]
-                                else "/default-avatar.png?v=1.8")
+        if connection is None:
+            with closing(self.connect()) as own:
+                return self._public_user(row, own)
+        result = {key: row[key] for key in ('id', 'username', 'display_name', 'avatar_color', 'avatar_revision', 'role')}
+        result['enabled'] = bool(row['enabled'])
+        result['permissions'] = dict.fromkeys(PERMISSION_KEYS, row['role'] == 'admin')
+        result['library_ids'] = [item[0] for item in connection.execute(
+            'SELECT id FROM media_libraries ORDER BY id' if row['role'] == 'admin' else
+            'SELECT library_id FROM user_libraries WHERE user_id=? ORDER BY library_id',
+            () if row['role'] == 'admin' else (row['id'],))]
+        result['avatar_url'] = (f"/api/avatars/user/{row['id']}?v={row['avatar_revision']}" if row['avatar_file']
+                                else '/default-avatar.png?v=1.8')
         return result
 
     def owner(self, connection=None):
         if connection is not None:
-            return connection.execute("SELECT * FROM owner_account WHERE id=1").fetchone()
+            return connection.execute('SELECT * FROM users WHERE id=1').fetchone()
         with closing(self.connect()) as connection:
             return self.owner(connection)
+
+    @contextmanager
+    def acting_as(self, user_id):
+        old = getattr(self.request_context, 'user_id', 1)
+        self.request_context.user_id = user_id
+        try:
+            yield self
+        finally:
+            self.request_context.user_id = old
+
+    def _actor(self, connection=None):
+        user_id = getattr(self.request_context, 'user_id', 1)
+        if connection is None:
+            with closing(self.connect()) as own:
+                return self._actor(own)
+        row = connection.execute('SELECT * FROM users WHERE id=?', (user_id,)).fetchone()
+        # Internal catalogue/scan calls retain the historical administrator default.
+        # HTTP handlers explicitly initialize user_id=None, never this fallback.
+        if row is None and user_id == 1 and not connection.execute('SELECT 1 FROM users LIMIT 1').fetchone():
+            return {'id': 1, 'role': 'admin', 'enabled': 1, 'permissions': '{}'}
+        if row is None or not row['enabled']:
+            raise ReaderError('请重新登录个人账户。', 401)
+        return dict(row)
+
+    def require_admin(self, connection=None):
+        if self._actor(connection)['role'] != 'admin':
+            raise ReaderError('此操作需要管理员权限。', 403)
+
+    def require_permission(self, permission, connection=None):
+        self.require_admin(connection)
+
+    def _access_sql(self, connection, alias='b', visible=False):
+        actor = self._actor(connection)
+        if actor['role'] == 'admin':
+            clause, arguments = '1=1', []
+        else:
+            clause = f'{alias}.library_id IN (SELECT library_id FROM user_libraries WHERE user_id=?)'
+            arguments = [actor['id']]
+        if visible:
+            clause += f' AND {alias}.library_id NOT IN (SELECT library_id FROM user_hidden_libraries WHERE user_id=?)'
+            arguments.append(actor['id'])
+        return clause, arguments
+
+    def _model_access(self, connection, model_id, *, editing=False):
+        actor = self._actor(connection)
+        model = connection.execute('SELECT * FROM models WHERE id=?', (model_id,)).fetchone()
+        if model is None:
+            raise ReaderError('模特不存在。', 404)
+        if actor['role'] == 'admin':
+            return model
+        access, arguments = self._access_sql(connection)
+        visible = model['created_by'] == actor['id'] or connection.execute(
+            f'SELECT 1 FROM book_models bm JOIN books b ON b.id=bm.book_id WHERE bm.model_id=? AND b.active=1 AND {access} LIMIT 1',
+            [model_id, *arguments]).fetchone()
+        if not visible:
+            raise ReaderError('模特不存在。', 404)
+        if editing:
+            hidden = connection.execute(f'''SELECT 1 FROM books b WHERE
+                (EXISTS(SELECT 1 FROM book_models bm WHERE bm.book_id=b.id AND bm.model_id=?)
+                 OR EXISTS(SELECT 1 FROM book_metadata md WHERE md.book_id=b.id AND md.folder_model_id=?))
+                AND NOT ({access}) LIMIT 1''', [model_id, model_id, *arguments]).fetchone()
+            hidden_default = connection.execute('''SELECT 1 FROM media_libraries l WHERE default_author_id=?
+                AND l.id NOT IN (SELECT library_id FROM user_libraries WHERE user_id=?) LIMIT 1''',
+                (model_id, actor['id'])).fetchone()
+            if hidden or hidden_default:
+                raise ReaderError('此模特关联了未授权写真库，请由管理员修改。', 403)
+        return model
+
 
     @staticmethod
     def _username(value):
@@ -928,10 +1124,10 @@ class Library:
 
     @staticmethod
     def _password(value):
-        if not isinstance(value, str) or not 8 <= len(value) <= 256 or any(
-                unicodedata.category(character) == "Cs" for character in value):
-            raise ReaderError("密码需要为 8 至 256 个字符。")
-        return value
+        try:
+            return validate_password(value)
+        except ValueError as error:
+            raise ReaderError(str(error)) from error
 
     @staticmethod
     def _same_secret(value, expected):
@@ -944,26 +1140,11 @@ class Library:
 
     @staticmethod
     def _hash_password(value):
-        salt = secrets.token_bytes(24)
-        digest = hashlib.pbkdf2_hmac("sha256", value.encode("utf-8"), salt, PASSWORD_ITERATIONS)
-        return f"pbkdf2_sha256${PASSWORD_ITERATIONS}${salt.hex()}${digest.hex()}"
+        return hash_password(value)
 
     @staticmethod
     def _check_password(value, encoded):
-        if not isinstance(value, str) or len(value) > 256:
-            return False
-        try:
-            algorithm, iterations, salt, digest = encoded.split("$")
-            if algorithm != "pbkdf2_sha256" or int(iterations) != PASSWORD_ITERATIONS:
-                return False
-            expected = bytes.fromhex(digest)
-            salt_bytes = bytes.fromhex(salt)
-            if len(salt_bytes) != 24 or len(expected) != 32:
-                return False
-            actual = hashlib.pbkdf2_hmac("sha256", value.encode("utf-8"), salt_bytes, int(iterations))
-            return hmac.compare_digest(actual, expected)
-        except (ValueError, TypeError, UnicodeError):
-            return False
+        return check_password(value, encoded)
 
     def _session_hash(self, value):
         if not isinstance(value, str) or not 20 <= len(value) <= 256:
@@ -991,42 +1172,41 @@ class Library:
     def session(self, value):
         with closing(self.connect()) as connection:
             owner = self.owner(connection)
-            session = connection.execute("SELECT user_id FROM auth_sessions WHERE token_hash=? AND expires_at>?",
+            session = connection.execute('SELECT user_id FROM auth_sessions WHERE token_hash=? AND expires_at>?',
                                          (self._session_hash(value), time.time())).fetchone()
-            valid = bool(session and ((owner and session["user_id"] == owner["id"]) or
-                                     (not owner and self.password and session["user_id"] is None)))
-            return {"authenticated": valid, "registration_required": owner is None,
-                    "password_required": owner is None and bool(self.password), "version": VERSION,
-                    "user": self._public_user(owner) if valid else None}
+            user = connection.execute('SELECT * FROM users WHERE id=? AND enabled=1',
+                                      (session['user_id'],)).fetchone() if session and session['user_id'] else None
+            legacy_gate = bool(not owner and self.password and session and session['user_id'] is None)
+            return {'authenticated': bool(user or legacy_gate), 'registration_required': owner is None,
+                    'password_required': owner is None and bool(self.password), 'version': VERSION,
+                    'user': self._public_user(user, connection)}
 
     def valid_session(self, value):
         return self.session(value)["authenticated"]
 
     def register(self, body, address):
-        # Serialize the rate-limit check and expensive hash work. The singleton
-        # database constraint also protects simultaneous registration processes.
         with self.auth_lock:
             if self.owner() is not None:
-                raise ReaderError("已创建个人账户，请使用已有账户登录。", 409)
+                raise ReaderError('已创建管理员账户，请联系管理员创建子账户。', 409)
             self._begin_auth_attempt(address)
-            if self.password:
-                supplied = body.get("setup_password", "")
-                if not self._same_secret(supplied, self.password):
-                    raise ReaderError("原访问密码不正确，无法创建账户。", 401)
-            username, normalized = self._username(body.get("username"))
-            password = self._password(body.get("password"))
-            display_name = self._display_name(body.get("display_name", username))
-            encoded = self._hash_password(password)
+            if self.password and not self._same_secret(body.get('setup_password', ''), self.password):
+                raise ReaderError('原访问密码不正确，无法创建账户。', 401)
+            username, normalized = self._username(body.get('username'))
+            encoded = self._hash_password(self._password(body.get('password')))
+            display_name = self._display_name(body.get('display_name', username))
             now = time.time()
-            with closing(self.connect()) as connection:
-                connection.execute("BEGIN IMMEDIATE")
+            with closing(self.connect()) as connection, connection:
+                connection.execute('BEGIN IMMEDIATE')
                 if self.owner(connection) is not None:
-                    raise ReaderError("已创建个人账户，请使用已有账户登录。", 409)
-                connection.execute("""INSERT INTO owner_account
+                    raise ReaderError('已创建管理员账户，请联系管理员创建子账户。', 409)
+                connection.execute('''INSERT INTO users
+                    (id,username,normalized_username,display_name,avatar_color,password_hash,created_at,updated_at,role,permissions)
+                    VALUES(1,?,?,?,'#ea5098',?,?,?,'admin',?)''',
+                    (username, normalized, display_name, encoded, now, now, json.dumps(dict.fromkeys(PERMISSION_KEYS, True))))
+                connection.execute('''INSERT OR REPLACE INTO owner_account
                     (id,username,normalized_username,display_name,avatar_color,password_hash,created_at,updated_at)
-                    VALUES(1,?,?,?,'#ea5098',?,?,?)""", (username, normalized, display_name, encoded, now, now))
-                connection.execute("DELETE FROM auth_sessions")
-                connection.commit()
+                    VALUES(1,?,?,?,'#ea5098',?,?,?)''', (username, normalized, display_name, encoded, now, now))
+                connection.execute('DELETE FROM auth_sessions')
             self.record_login(address, True)
             return 1
 
@@ -1041,61 +1221,150 @@ class Library:
     def login(self, body, address):
         with self.auth_lock:
             self._begin_auth_attempt(address)
-            owner = self.owner()
-            password = body.get("password", "")
-            if owner is None:
-                if not self.password:
-                    raise ReaderError("请先注册个人账户。", 401)
-                success = self._same_secret(password, self.password)
-            else:
-                try:
-                    _, normalized = self._username(body.get("username"))
-                except ReaderError:
-                    normalized = ""
-                # Verify the hash even for an unknown username to avoid exposing
-                # which username was registered through the cost of the response.
-                password_matches = self._check_password(password, owner["password_hash"])
-                success = password_matches and hmac.compare_digest(
-                    normalized.encode("utf-8"), owner["normalized_username"].encode("utf-8"))
-            if not success:
-                raise ReaderError("用户名或密码不正确。" if owner else "访问密码不正确。", 401)
+            with closing(self.connect()) as connection:
+                owner = self.owner(connection)
+                if owner is None:
+                    success = bool(self.password and self._same_secret(body.get('password', ''), self.password))
+                    user = None
+                else:
+                    try:
+                        _, normalized = self._username(body.get('username'))
+                    except ReaderError:
+                        normalized = ''
+                    user = connection.execute('SELECT * FROM users WHERE normalized_username=?', (normalized,)).fetchone()
+                    # Always pay the password-hash cost, including unknown names.
+                    valid = self._check_password(body.get('password', ''), (user or owner)['password_hash'])
+                    success = bool(user and user['enabled'] and valid)
+                if not success:
+                    raise ReaderError('用户名或密码不正确。' if owner else '请先注册管理员账户。', 401)
             self.record_login(address, True)
-            return owner["id"] if owner is not None else None
+            return user['id'] if user else None
 
     def save_profile(self, body, address):
+        if any(key in body for key in ('role', 'enabled', 'permissions', 'library_ids', 'id')):
+            raise ReaderError('个人资料不能修改账户角色或权限。', 403)
         with self.auth_lock, self.avatar_lock, closing(self.connect()) as connection:
-            owner = self.owner(connection)
-            if owner is None:
-                raise ReaderError("请先注册个人账户后编辑用户信息。", 409)
-            username, normalized = self._username(body.get("username", owner["username"]))
-            display_name = self._display_name(body.get("display_name", owner["display_name"]))
-            color = body.get("avatar_color", owner["avatar_color"])
-            if not isinstance(color, str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
-                raise ReaderError("请选择有效的头像颜色。")
-            password_changed = "password" in body
-            encoded = owner["password_hash"]
+            actor = self._actor(connection)
+            user = connection.execute('SELECT * FROM users WHERE id=?', (actor['id'],)).fetchone()
+            if user is None:
+                raise ReaderError('请先注册个人账户后编辑用户信息。', 409)
+            username, normalized = self._username(body.get('username', user['username']))
+            display_name = self._display_name(body.get('display_name', user['display_name']))
+            color = body.get('avatar_color', user['avatar_color'])
+            if not isinstance(color, str) or not re.fullmatch(r'#[0-9a-fA-F]{6}', color):
+                raise ReaderError('请选择有效的头像颜色。')
+            password_changed = 'password' in body
+            encoded = user['password_hash']
             if password_changed:
-                password = self._password(body["password"])
+                password = self._password(body['password'])
                 self._begin_auth_attempt(address)
-                if not self._check_password(body.get("current_password", ""), owner["password_hash"]):
-                    raise ReaderError("当前密码不正确。", 401)
+                if not self._check_password(body.get('current_password', ''), user['password_hash']):
+                    raise ReaderError('当前密码不正确。', 401)
                 encoded = self._hash_password(password)
                 self.record_login(address, True)
-            avatar = self._avatar_change(body, "user-1", owner)
+            avatar = self._avatar_change(body, 'user-' + str(user['id']), user)
+            now = time.time()
+            values = (username, normalized, display_name, color.lower(), encoded, now, avatar[0], avatar[1], user['id'])
             try:
-                connection.execute("""UPDATE owner_account SET username=?,normalized_username=?,display_name=?,
-                    avatar_color=?,password_hash=?,updated_at=?,avatar_file=?,avatar_revision=? WHERE id=1""",
-                    (username, normalized, display_name, color.lower(), encoded, time.time(),
-                     avatar[0], avatar[1]))
+                connection.execute('''UPDATE users SET username=?,normalized_username=?,display_name=?,
+                    avatar_color=?,password_hash=?,updated_at=?,avatar_file=?,avatar_revision=? WHERE id=?''', values)
+                if user['id'] == 1:
+                    connection.execute('''UPDATE owner_account SET username=?,normalized_username=?,display_name=?,
+                        avatar_color=?,password_hash=?,updated_at=?,avatar_file=?,avatar_revision=? WHERE id=?''', values)
                 if password_changed:
-                    connection.execute("DELETE FROM auth_sessions")
+                    connection.execute('DELETE FROM auth_sessions WHERE user_id=?', (user['id'],))
                 connection.commit()
+            except sqlite3.IntegrityError as error:
+                self._discard_avatar(avatar[2])
+                raise ReaderError('用户名已被使用。', 409) from error
             except BaseException:
                 self._discard_avatar(avatar[2])
                 raise
-            if avatar[0] != owner["avatar_file"]:
-                self._discard_avatar(owner["avatar_file"])
+            if avatar[0] != user['avatar_file']:
+                self._discard_avatar(user['avatar_file'])
             return password_changed
+
+    def users(self):
+        with closing(self.connect()) as connection:
+            self.require_admin(connection)
+            return {'users': [self._public_user(row, connection) for row in connection.execute('SELECT * FROM users ORDER BY id')],
+                'permission_options': [],
+                    'libraries': [dict(row) for row in connection.execute('SELECT id,name FROM media_libraries ORDER BY name,id')]}
+
+    def save_user(self, body, user_id=None):
+        with self.auth_lock, closing(self.connect()) as connection, connection:
+            self.require_admin(connection)
+            connection.execute('BEGIN IMMEDIATE')
+            previous = connection.execute('SELECT * FROM users WHERE id=?', (user_id,)).fetchone() if user_id is not None else None
+            if user_id is not None and previous is None:
+                raise ReaderError('账户不存在。', 404)
+            if previous and previous['role'] == 'admin':
+                raise ReaderError('主管理员资料请在个人资料中修改，不能禁用或降权。', 403)
+            if 'role' in body or 'id' in body:
+                raise ReaderError('子账户不能修改角色。', 403)
+            username, normalized = self._username(body.get('username', previous['username'] if previous else None))
+            display_name = self._display_name(body.get('display_name', previous['display_name'] if previous else username))
+            enabled = body.get('enabled', bool(previous['enabled']) if previous else True)
+            if type(enabled) is not bool:
+                raise ReaderError('账户启用状态需要 true 或 false。')
+            permissions = json.loads(previous['permissions']) if previous else dict.fromkeys(PERMISSION_KEYS, False)
+            supplied = body.get('permissions', {})
+            if not isinstance(supplied, dict) or any(key not in PERMISSION_KEYS or type(value) is not bool for key, value in supplied.items()):
+                raise ReaderError('功能权限需要使用已支持的权限名称及布尔值。')
+            if any(supplied.values()):
+                raise ReaderError('子账户只能阅读已授权写真库，不能授予共享管理权限。', 403)
+            new_permissions = dict.fromkeys(PERMISSION_KEYS, False)
+            old_ids = {row[0] for row in connection.execute('SELECT library_id FROM user_libraries WHERE user_id=?', (user_id,))} if previous else set()
+            libraries = body.get('library_ids', sorted(old_ids))
+            if not isinstance(libraries, list) or len(libraries) > 500 or any(not isinstance(item, str) or not re.fullmatch(r'[a-f0-9]{24}', item) for item in libraries):
+                raise ReaderError('写真库权限需要有效的写真库 ID 数组。')
+            libraries = set(libraries)
+            if any(not connection.execute('SELECT 1 FROM media_libraries WHERE id=?', (item,)).fetchone() for item in libraries):
+                raise ReaderError('写真库不存在，请刷新后重试。', 404)
+            password_changed = previous is None or body.get('password', '') != ''
+            encoded = self._hash_password(self._password(body.get('password'))) if password_changed else previous['password_hash']
+            now = time.time()
+            try:
+                if previous is None:
+                    cursor = connection.execute('''INSERT INTO users
+                        (username,normalized_username,display_name,password_hash,created_at,updated_at,role,enabled,permissions)
+                        VALUES(?,?,?,?,?,?,'user',?,?)''',
+                        (username, normalized, display_name, encoded, now, now, int(enabled), json.dumps(new_permissions)))
+                    user_id = cursor.lastrowid
+                else:
+                    connection.execute('''UPDATE users SET username=?,normalized_username=?,display_name=?,
+                        password_hash=?,updated_at=?,enabled=?,permissions=? WHERE id=?''',
+                        (username, normalized, display_name, encoded, now, int(enabled), json.dumps(new_permissions), user_id))
+                connection.executemany('DELETE FROM user_libraries WHERE user_id=? AND library_id=?',
+                                       [(user_id, item) for item in old_ids - libraries])
+                connection.executemany('DELETE FROM user_hidden_libraries WHERE user_id=? AND library_id=?',
+                                       [(user_id, item) for item in old_ids - libraries])
+                connection.executemany('INSERT INTO user_libraries(user_id,library_id) VALUES(?,?)',
+                                       [(user_id, item) for item in sorted(libraries - old_ids)])
+                if password_changed or not enabled or old_ids != libraries or permissions != new_permissions:
+                    connection.execute('DELETE FROM auth_sessions WHERE user_id=?', (user_id,))
+            except sqlite3.IntegrityError as error:
+                raise ReaderError('用户名已被使用。', 409) from error
+            user = connection.execute('SELECT * FROM users WHERE id=?', (user_id,)).fetchone()
+            return {'user': self._public_user(user, connection)}
+
+    def delete_user(self, user_id):
+        with self.auth_lock, self.avatar_lock, closing(self.connect()) as connection, connection:
+            self.require_admin(connection)
+            connection.execute('BEGIN IMMEDIATE')
+            user = connection.execute('SELECT * FROM users WHERE id=?', (user_id,)).fetchone()
+            if user is None:
+                raise ReaderError('账户不存在。', 404)
+            if user['role'] == 'admin':
+                raise ReaderError('主管理员不能被删除。', 403)
+            for table in ('auth_sessions', 'user_hidden_libraries', 'user_libraries', 'progress', 'favorites', 'bookmarks', 'reading_preferences'):
+                connection.execute(f'DELETE FROM {table} WHERE user_id=?', (user_id,))
+            # Keep shared models; deleting their creator must not remove library data.
+            connection.execute('UPDATE models SET created_by=1 WHERE created_by=?', (user_id,))
+            connection.execute('DELETE FROM users WHERE id=?', (user_id,))
+            connection.commit()
+            self._discard_avatar(user['avatar_file'])
+            return {'removed': [user_id]}
 
     def login_retry(self, address):
         now = time.monotonic()
@@ -1118,6 +1387,9 @@ class Library:
                 self.attempts.setdefault(address, deque(maxlen=16)).append(time.monotonic())
 
     def start_scan(self, library_id=None):
+        if library_id is not None:
+            self._library_config(library_id)
+        self.require_permission("scan_libraries")
         with self.state_lock, closing(self.connect()) as connection:
             if self.stop_event.is_set():
                 return False
@@ -1125,7 +1397,11 @@ class Library:
                 self._library_config(library_id, connection)
                 targets = [library_id]
             else:
-                targets = [row["id"] for row in connection.execute("SELECT id FROM media_libraries")]
+                actor = self._actor(connection)
+                targets = [row["id"] for row in connection.execute(
+                    "SELECT id FROM media_libraries" if actor["role"] == "admin" else
+                    "SELECT library_id AS id FROM user_libraries WHERE user_id=?",
+                    () if actor["role"] == "admin" else (actor["id"],))]
             self.pending_scans.update(targets)
             if not targets:
                 return False
@@ -1148,8 +1424,15 @@ class Library:
 
     def close(self):
         self.stop_event.set()
+        with self.request_condition:
+            self.request_stopping = True
+            deadline = time.monotonic() + 30
+            while self.active_requests and time.monotonic() < deadline:
+                self.request_condition.wait(max(0.01, deadline - time.monotonic()))
         if self.scan_thread:
-            self.scan_thread.join(timeout=10)
+            self.scan_thread.join(timeout=30)
+        if not self.active_requests and (not self.scan_thread or not self.scan_thread.is_alive()):
+            self.service_lock.release()
 
     def _scan(self):
         try:
@@ -1247,14 +1530,14 @@ class Library:
                                 else:
                                     report(relative, "图片为空或超过 64 MiB，已跳过。")
                             else:
-                                book_id = previous_ids.get((self._source_identity(root, relative), "archive")) or self._book_id("source\0" + self._media_path(root, relative), "archive", library_id)
+                                book_id = previous_ids.get((self._source_identity(root, relative), "archive")) or self._book_id("source\0" + self._source_identity(root, relative), "archive", library_id)
                                 signature = f"{info.st_size}:{info.st_mtime_ns}"
                                 previous = cached.get(book_id)
                                 if (previous and previous["signature"] == signature
                                         and previous["scan_revision"] == revision):
                                     pages = json.loads(previous["pages"])
                                 else:
-                                    with open_library_file(self.root, self._media_path(root, relative)) as handle:
+                                    with self._open_media_file(root, relative) as handle:
                                         pages = archive_pages(handle)
                                 pages = [page for page in pages if not entry_excluded(page)]
                                 if pages:
@@ -1276,7 +1559,7 @@ class Library:
                         signature = hashlib.sha256(json.dumps(
                             [(name, info.st_size, info.st_mtime_ns) for name, info in image_files],
                             ensure_ascii=False).encode()).hexdigest()
-                        book_id = previous_ids.get((self._source_identity(root, relative), "folder")) or self._book_id("source\0" + self._media_path(root, relative), "folder", library_id)
+                        book_id = previous_ids.get((self._source_identity(root, relative), "folder")) or self._book_id("source\0" + self._source_identity(root, relative), "folder", library_id)
                         found.append(self._book(config, root, book_id, folder.name,
                                                 folder.parent, relative, "folder", pages,
                                                 sum(entry[1].st_size for entry in image_files),
@@ -1437,35 +1720,64 @@ class Library:
         book["cover_version"] = Library._cover_version(row)
         if book["reading_mode"] == "webtoon":
             book["reading_direction"] = "ttb"
+        elif book["reading_direction"] == "ttb":
+            book["reading_direction"] = "ltr"
+        book["reading_preferences"] = {"reading_mode": row["personal_reading_mode"],
+                                       "reading_direction": row["personal_reading_direction"]}
         book["models"] = models or []
         book["favorite"] = bool(row["favorite"])
         book["progress"] = None if row["page"] is None else {
             "page": row["page"], "completed": bool(row["completed"]), "updated_at": row["updated_at"]}
         return book
 
-    def _select(self, connection, book_id=None, library_id=None):
-        sql = """SELECT b.*, p.page, p.completed, p.updated_at, COALESCE(f.favorite,0) AS favorite,
-                 l.name AS library_name, l.path AS library_path,
-                 CASE WHEN l.media_type='photo' THEN COALESCE(library_author.name,folder_model.name,l.default_author)
-                      ELSE COALESCE(library_author.name,l.default_author) END AS author,
-                 l.media_type, COALESCE(m.reading_mode_override,l.reading_mode) AS reading_mode,
-                 COALESCE(m.reading_direction_override,l.reading_direction) AS reading_direction,
-                 m.title AS title_override, COALESCE(m.release_date,'') AS release_date,
-                 COALESCE(m.cover_page,0) AS cover_page, m.reading_direction_override,
-                 m.reading_mode_override, l.hide_date_prefix,
-                 COALESCE(m.cover_source,'page') AS cover_source,
-                 COALESCE(m.cover_file,'') AS cover_file, COALESCE(m.cover_revision,0) AS cover_revision
-                 FROM books b LEFT JOIN progress p ON p.book_id=b.id
-                 LEFT JOIN favorites f ON f.book_id=b.id
-                 LEFT JOIN book_metadata m ON m.book_id=b.id
-                 LEFT JOIN models folder_model ON folder_model.id=m.folder_model_id
-                 JOIN media_libraries l ON l.id=b.library_id
-                 LEFT JOIN models library_author ON library_author.id=l.default_author_id WHERE b.active=1"""
+    def _select(self, connection, book_id=None, library_id=None, visible=False):
+        actor = self._actor(connection)
+        access, arguments = self._access_sql(connection, visible=visible)
+        sql = '''SELECT b.*, p.page, p.completed, p.updated_at, COALESCE(f.favorite,0) AS favorite,
+            l.name AS library_name, l.path AS library_path,
+            CASE WHEN l.media_type='photo' THEN COALESCE(library_author.name,folder_model.name,l.default_author)
+                 ELSE COALESCE(library_author.name,l.default_author) END AS author,
+            l.media_type, COALESCE(rp.reading_mode,m.reading_mode_override,l.reading_mode) AS reading_mode,
+            COALESCE(rp.reading_direction,m.reading_direction_override,l.reading_direction) AS reading_direction,
+            rp.reading_mode AS personal_reading_mode, rp.reading_direction AS personal_reading_direction,
+            m.title AS title_override, COALESCE(m.release_date,'') AS release_date,
+            COALESCE(m.cover_page,0) AS cover_page, m.reading_direction_override,
+            m.reading_mode_override, l.hide_date_prefix,
+            COALESCE(m.cover_source,'page') AS cover_source,
+            COALESCE(m.cover_file,'') AS cover_file, COALESCE(m.cover_revision,0) AS cover_revision
+            FROM books b LEFT JOIN progress p ON p.book_id=b.id AND p.user_id=?
+            LEFT JOIN favorites f ON f.book_id=b.id AND f.user_id=?
+            LEFT JOIN reading_preferences rp ON rp.book_id=b.id AND rp.user_id=?
+            LEFT JOIN book_metadata m ON m.book_id=b.id
+            LEFT JOIN models folder_model ON folder_model.id=m.folder_model_id
+            JOIN media_libraries l ON l.id=b.library_id
+            LEFT JOIN models library_author ON library_author.id=l.default_author_id WHERE b.active=1 AND ''' + access
+        parameters = [actor['id']] * 3 + arguments
         if book_id is not None:
-            return connection.execute(sql + " AND b.id=?", (book_id,)).fetchone()
+            return connection.execute(sql + ' AND b.id=?', [*parameters, book_id]).fetchone()
         if library_id is not None:
-            return connection.execute(sql + " AND b.library_id=?", (library_id,)).fetchall()
-        return connection.execute(sql).fetchall()
+            return connection.execute(sql + ' AND b.library_id=?', [*parameters, library_id]).fetchall()
+        return connection.execute(sql, parameters).fetchall()
+
+    def save_reading_preferences(self, book_id, body):
+        if any(key not in ('reading_mode', 'reading_direction') for key in body):
+            raise ReaderError('个人阅读偏好只接受阅读方式和方向。')
+        with closing(self.connect()) as connection, connection:
+            connection.execute('BEGIN IMMEDIATE')
+            book = self._select(connection, book_id)
+            if book is None:
+                raise ReaderError('作品不存在。', 404)
+            mode = body.get('reading_mode', book['personal_reading_mode'])
+            direction = body.get('reading_direction', book['personal_reading_direction'])
+            if mode is not None and (not isinstance(mode, str) or mode not in ('single','double','webtoon')):
+                raise ReaderError('阅读方式需要是 single、double、webtoon 或 null。')
+            if direction is not None and (not isinstance(direction, str) or direction not in ('ltr','rtl')):
+                raise ReaderError('阅读方向需要是 ltr、rtl 或 null。')
+            connection.execute('''INSERT INTO reading_preferences(user_id,book_id,reading_mode,reading_direction)
+                VALUES(?,?,?,?) ON CONFLICT(user_id,book_id) DO UPDATE SET
+                reading_mode=excluded.reading_mode,reading_direction=excluded.reading_direction''',
+                (self._actor(connection)['id'], book_id, mode, direction))
+        return {'book': self.book(book_id)}
 
     def book(self, book_id, internal=False):
         with closing(self.connect()) as connection:
@@ -1478,23 +1790,21 @@ class Library:
             book["bookmarks"] = self._bookmarks(connection, book_id)
             return book
 
-    @staticmethod
-    def _models_for_books(connection, book_ids):
+    def _models_for_books(self, connection, book_ids):
         result = {}
-        # Keep statement parameters below SQLite builds with a 999-variable
-        # limit, including installations with a large personal collection.
+        access, arguments = self._access_sql(connection, 'other', visible=True)
         for offset in range(0, len(book_ids), 500):
             batch = book_ids[offset:offset + 500]
-            marks = ",".join("?" for _ in batch)
-            rows = connection.execute(f"""SELECT bm.book_id,m.id,m.name,m.avatar_file,m.avatar_revision,
+            marks = ','.join('?' for _ in batch)
+            rows = connection.execute(f'''SELECT bm.book_id,m.id,m.name,m.avatar_file,m.avatar_revision,
                 (SELECT MIN(other.id) FROM books other JOIN book_models obm ON obm.book_id=other.id
-                 WHERE obm.model_id=m.id AND other.active=1) AS cover_book_id FROM book_models bm
+                 WHERE obm.model_id=m.id AND other.active=1 AND {access}) AS cover_book_id FROM book_models bm
                 JOIN models m ON m.id=bm.model_id WHERE bm.book_id IN ({marks})
-                ORDER BY bm.book_id,bm.position,m.id""", batch)
+                ORDER BY bm.book_id,bm.position,m.id''', [*arguments, *batch])
             for row in rows:
-                model = {key: row[key] for key in ("id", "name", "avatar_revision")}
-                model["avatar_url"] = Library._model_avatar_url(row)
-                result.setdefault(row["book_id"], []).append(model)
+                model = {key: row[key] for key in ('id', 'name', 'avatar_revision')}
+                model['avatar_url'] = self._model_avatar_url(row)
+                result.setdefault(row['book_id'], []).append(model)
         return result
 
     def listing(self, library_id=None):
@@ -1504,7 +1814,7 @@ class Library:
         with self.state_lock, closing(self.connect()) as connection:
             if library_id is not None:
                 self._library_config(library_id, connection)
-            rows = self._select(connection, library_id=library_id)
+            rows = self._select(connection, library_id=library_id, visible=True)
             models = self._models_for_books(connection, [row["id"] for row in rows])
             books = [self._export(row, models.get(row["id"])) for row in rows]
             libraries = self.libraries()["libraries"]
@@ -1657,7 +1967,7 @@ class Library:
         return name, revision, name
 
     def _discard_avatar(self, name):
-        if name and re.fullmatch(r"(?:user-1|model-[a-f0-9]{24})-[a-f0-9]{24}\.jpg", name):
+        if name and re.fullmatch(r"(?:user-[1-9][0-9]*|model-[a-f0-9]{24})-[a-f0-9]{24}\.jpg", name):
             try:
                 (self.avatars / name).unlink(missing_ok=True)
             except OSError:
@@ -1665,11 +1975,14 @@ class Library:
 
     def avatar(self, kind, identifier):
         with self.avatar_lock, closing(self.connect()) as connection:
-            if kind == "user" and identifier == "1":
-                row = self.owner(connection)
-                prefix = "user-1"
+            if kind == "user" and identifier.isdecimal() and len(identifier) <= 10:
+                actor = self._actor(connection)
+                if actor["role"] != "admin" and int(identifier) != actor["id"]:
+                    raise ReaderError("头像不存在。", 404)
+                row = connection.execute("SELECT * FROM users WHERE id=?", (int(identifier),)).fetchone()
+                prefix = "user-" + identifier
             elif kind == "models":
-                row = connection.execute("SELECT * FROM models WHERE id=?", (identifier,)).fetchone()
+                row = self._model_access(connection, identifier)
                 prefix = "model-" + identifier
             else:
                 row = None
@@ -1709,11 +2022,31 @@ class Library:
                 except OSError:
                     LOG.warning("Could not remove obsolete cover %s", candidate.name)
 
+    @staticmethod
+    def _model_ids(connection, value):
+        if (not isinstance(value, list) or len(value) > 100
+                or any(not isinstance(item, str) or not re.fullmatch(r"[a-f0-9]{24}", item) for item in value)):
+            raise ReaderError("模特需要是最多 100 个有效模特 ID 组成的数组。")
+        model_ids = list(dict.fromkeys(value))
+        if model_ids:
+            marks = ",".join("?" for _ in model_ids)
+            count = connection.execute(f"SELECT COUNT(*) FROM models WHERE id IN ({marks})", model_ids).fetchone()[0]
+            if count != len(model_ids):
+                raise ReaderError("所选模特不存在，请刷新模特列表。")
+        return model_ids
+
+    @staticmethod
+    def _replace_book_models(connection, book_id, model_ids):
+        connection.execute("DELETE FROM book_models WHERE book_id=?", (book_id,))
+        connection.executemany("INSERT INTO book_models(book_id,model_id,position) VALUES(?,?,?)",
+            [(book_id, model_id, index) for index, model_id in enumerate(model_ids)])
+
     def save_book_metadata(self, book_id, body):
         with self.cover_lock, closing(self.connect()) as connection, connection:
             book = self._select(connection, book_id)
             if book is None:
                 raise ReaderError("作品不存在，请重新扫描写真库。", 404)
+            self.require_permission("edit_metadata", connection)
             updates = {}
             if "title" in body:
                 value = body["title"]
@@ -1755,16 +2088,7 @@ class Library:
                 updates["reading_mode_override"] = value or None
             model_ids = None
             if "model_ids" in body:
-                value = body["model_ids"]
-                if (not isinstance(value, list) or len(value) > 100
-                        or any(not isinstance(item, str) or not re.fullmatch(r"[a-f0-9]{24}", item) for item in value)):
-                    raise ReaderError("模特需要是最多 100 个有效模特 ID 组成的数组。")
-                model_ids = list(dict.fromkeys(value))
-                if model_ids:
-                    marks = ",".join("?" for _ in model_ids)
-                    count = connection.execute(f"SELECT COUNT(*) FROM models WHERE id IN ({marks})", model_ids).fetchone()[0]
-                    if count != len(model_ids):
-                        raise ReaderError("所选模特不存在，请刷新模特列表。")
+                model_ids = self._model_ids(connection, body["model_ids"])
                 updates["models_manual"] = 1
             upload_name = None
             if "cover_upload" in body:
@@ -1784,9 +2108,7 @@ class Library:
                     fields = ",".join(key + "=?" for key in updates)
                     connection.execute(f"UPDATE book_metadata SET {fields} WHERE book_id=?", [*updates.values(), book_id])
                     if model_ids is not None:
-                        connection.execute("DELETE FROM book_models WHERE book_id=?", (book_id,))
-                        connection.executemany("INSERT INTO book_models(book_id,model_id,position) VALUES(?,?,?)",
-                            [(book_id, model_id, index) for index, model_id in enumerate(model_ids)])
+                        self._replace_book_models(connection, book_id, model_ids)
                     connection.commit()
                 except BaseException:
                     if upload_name:
@@ -1804,17 +2126,30 @@ class Library:
             return f"/api/books/{row['cover_book_id']}/cover"
         return None
 
-    @staticmethod
-    def _models(connection, model_id=None):
-        sql = """SELECT m.id,m.name,m.avatar_file,m.avatar_revision,COUNT(b.id) AS book_count,MIN(b.id) AS cover_book_id
-                 FROM models m LEFT JOIN book_models bm ON bm.model_id=m.id
-                 LEFT JOIN books b ON b.id=bm.book_id AND b.active=1"""
-        rows = connection.execute(sql + (" WHERE m.id=?" if model_id is not None else "")
-                                  + " GROUP BY m.id", (model_id,) if model_id is not None else ()).fetchall()
+    def _models(self, connection, model_id=None):
+        actor = self._actor(connection)
+        access, arguments = self._access_sql(connection, visible=model_id is None)
+        sql = f'''SELECT m.id,m.name,m.avatar_file,m.avatar_revision,COUNT(b.id) AS book_count,MIN(b.id) AS cover_book_id
+            FROM models m LEFT JOIN book_models bm ON bm.model_id=m.id
+            LEFT JOIN books b ON b.id=bm.book_id AND b.active=1 AND {access}'''
+        parameters = list(arguments)
+        if model_id is not None:
+            sql += ' WHERE m.id=?'
+            parameters.append(model_id)
+        sql += ' GROUP BY m.id'
+        if actor['role'] != 'admin':
+            sql += ' HAVING COUNT(b.id)>0 OR MAX(m.created_by)=?'
+            parameters.append(actor['id'])
+        elif model_id is None:
+            # Keep unused registry entries manageable while hiding models whose
+            # active works all belong to personally hidden libraries.
+            sql += ''' HAVING COUNT(b.id)>0 OR NOT EXISTS(SELECT 1 FROM book_models all_bm
+                JOIN books all_b ON all_b.id=all_bm.book_id AND all_b.active=1 WHERE all_bm.model_id=m.id)'''
+        rows = connection.execute(sql, parameters).fetchall()
         result = []
         for row in rows:
-            model = {key: row[key] for key in ("id", "name", "book_count", "cover_book_id", "avatar_revision")}
-            model["avatar_url"] = Library._model_avatar_url(row)
+            model = {key: row[key] for key in ('id','name','book_count','cover_book_id','avatar_revision')}
+            model['avatar_url'] = self._model_avatar_url(row)
             result.append(model)
         return result
 
@@ -1826,6 +2161,9 @@ class Library:
 
     def save_model(self, body, model_id=None):
         with self.avatar_lock, closing(self.connect()) as connection, connection:
+            if model_id is not None:
+                self._model_access(connection, model_id, editing=True)
+            self.require_permission("manage_models", connection)
             previous = connection.execute("SELECT * FROM models WHERE id=?", (model_id,)).fetchone() if model_id is not None else None
             if model_id is not None and previous is None:
                 raise ReaderError("模特不存在，请刷新后重试。", 404)
@@ -1840,6 +2178,7 @@ class Library:
                 raise ReaderError("上传头像和恢复默认头像不能同时提交。")
             existing = connection.execute("SELECT id FROM models WHERE normalized_name=?", (normalized,)).fetchone()
             if existing and existing["id"] != model_id:
+                self._model_access(connection, existing["id"])
                 if model_id is not None:
                     raise ReaderError("已有同名模特，请使用不同名称。", 409)
                 connection.execute("DELETE FROM suppressed_model_names WHERE normalized_name=?", (normalized,))
@@ -1847,7 +2186,8 @@ class Library:
             if model_id is None:
                 model_id = secrets.token_hex(12)
                 try:
-                    connection.execute("INSERT INTO models(id,name,normalized_name) VALUES(?,?,?)", (model_id, name, normalized))
+                    connection.execute("INSERT INTO models(id,name,normalized_name,created_by) VALUES(?,?,?,?)",
+                                       (model_id, name, normalized, self._actor(connection)["id"]))
                 except sqlite3.IntegrityError:
                     # Concurrent creation of the same name reuses the winning
                     # model rather than introducing duplicate relationships.
@@ -1882,6 +2222,8 @@ class Library:
 
     def remove_model(self, model_id):
         with self.state_lock, self.avatar_lock, closing(self.connect()) as connection, connection:
+            self._model_access(connection, model_id, editing=True)
+            self.require_permission("manage_models", connection)
             model = connection.execute("SELECT * FROM models WHERE id=?", (model_id,)).fetchone()
             if model is None:
                 raise ReaderError("模特不存在，请刷新后重试。", 404)
@@ -1915,20 +2257,23 @@ class Library:
                 self._discard_avatar(candidate.name)
         return {"removed": [model_id]}
 
-    @staticmethod
-    def _bookmarks(connection, book_id=None):
-        rows = connection.execute("""SELECT k.*, b.page_count FROM bookmarks k
-            JOIN books b ON b.id=k.book_id WHERE b.active=1"""
-            + (" AND k.book_id=?" if book_id is not None else "")
-            + " ORDER BY k.created_at DESC,k.id", (book_id,) if book_id is not None else ()).fetchall()
-        return [{"id": row["id"], "book_id": row["book_id"],
-                 "page": min(row["page"], max(0, row["page_count"] - 1)),
-                 "note": row["note"], "created_at": row["created_at"]} for row in rows]
+    def _bookmarks(self, connection, book_id=None):
+        access, arguments = self._access_sql(connection, visible=book_id is None)
+        sql = f'''SELECT k.*,b.page_count FROM bookmarks k JOIN books b ON b.id=k.book_id
+            WHERE k.user_id=? AND b.active=1 AND {access}'''
+        parameters = [self._actor(connection)['id'], *arguments]
+        if book_id is not None:
+            sql += ' AND k.book_id=?'
+            parameters.append(book_id)
+        rows = connection.execute(sql + ' ORDER BY k.created_at DESC,k.id', parameters).fetchall()
+        return [{'id': row['id'], 'book_id': row['book_id'],
+                 'page': min(row['page'], max(0,row['page_count']-1)),
+                 'note': row['note'], 'created_at': row['created_at']} for row in rows]
 
     def bookmarks(self):
         with closing(self.connect()) as connection:
             bookmarks = self._bookmarks(connection)
-            rows = self._select(connection)
+            rows = self._select(connection, visible=True)
             models = self._models_for_books(connection, [row["id"] for row in rows])
             books = {row["id"]: self._export(row, models.get(row["id"])) for row in rows}
             for bookmark in bookmarks:
@@ -1936,59 +2281,64 @@ class Library:
         return {"bookmarks": bookmarks}
 
     def save_bookmark(self, book_id, body):
-        page = body.get("page")
-        note = self._text(body.get("note", ""), "书签备注", 1000, blank=True, multiline=True)
+        page = body.get('page')
+        note = self._text(body.get('note',''), '书签备注', 1000, blank=True, multiline=True)
         with closing(self.connect()) as connection, connection:
-            connection.execute("BEGIN IMMEDIATE")
+            connection.execute('BEGIN IMMEDIATE')
             book = self._select(connection, book_id)
             if book is None:
-                raise ReaderError("作品不存在，请重新扫描写真库。", 404)
-            if type(page) is not int or not 0 <= page < book["page_count"]:
-                raise ReaderError("书签页码需要在作品的页码范围内。")
-            existing = connection.execute("SELECT id FROM bookmarks WHERE book_id=? AND page=?", (book_id, page)).fetchone()
-            bookmark_id = existing["id"] if existing else secrets.token_hex(12)
-            connection.execute("""INSERT INTO bookmarks(id,book_id,page,note,created_at) VALUES(?,?,?,?,?)
-                ON CONFLICT(book_id,page) DO UPDATE SET note=excluded.note""", (bookmark_id, book_id, page, note, time.time()))
-            bookmark = next(item for item in self._bookmarks(connection, book_id) if item["id"] == bookmark_id)
-        return {"bookmark": bookmark}, 200 if existing else 201
+                raise ReaderError('作品不存在。', 404)
+            if type(page) is not int or not 0 <= page < book['page_count']:
+                raise ReaderError('书签页码需要在作品的页码范围内。')
+            user_id = self._actor(connection)['id']
+            existing = connection.execute('SELECT id FROM bookmarks WHERE user_id=? AND book_id=? AND page=?',
+                                          (user_id,book_id,page)).fetchone()
+            bookmark_id = existing['id'] if existing else secrets.token_hex(12)
+            connection.execute('''INSERT INTO bookmarks(id,user_id,book_id,page,note,created_at) VALUES(?,?,?,?,?,?)
+                ON CONFLICT(user_id,book_id,page) DO UPDATE SET note=excluded.note''',
+                (bookmark_id,user_id,book_id,page,note,time.time()))
+            bookmark = next(item for item in self._bookmarks(connection,book_id) if item['id']==bookmark_id)
+        return {'bookmark':bookmark}, 200 if existing else 201
 
     def delete_bookmark(self, bookmark_id):
         with closing(self.connect()) as connection, connection:
-            cursor = connection.execute("DELETE FROM bookmarks WHERE id=?", (bookmark_id,))
-            if not cursor.rowcount:
-                raise ReaderError("书签不存在，请刷新后重试。", 404)
-        return {"ok": True}
+            user_id = self._actor(connection)['id']
+            row = connection.execute('SELECT book_id FROM bookmarks WHERE id=? AND user_id=?', (bookmark_id,user_id)).fetchone()
+            if row is None or self._select(connection,row['book_id']) is None:
+                raise ReaderError('书签不存在。',404)
+            connection.execute('DELETE FROM bookmarks WHERE id=? AND user_id=?',(bookmark_id,user_id))
+        return {'ok':True}
 
     def set_progress(self, book_id, body):
-        page, completed = body.get("page"), body.get("completed")
+        page, completed = body.get('page'), body.get('completed')
         if type(page) is not int or type(completed) is not bool:
-            raise ReaderError("阅读进度需要整数页码和完成状态。")
+            raise ReaderError('阅读进度需要整数页码和完成状态。')
         with closing(self.connect()) as connection, connection:
-            connection.execute("BEGIN IMMEDIATE")
-            row = self._select(connection, book_id)
-            if row is None:
-                raise ReaderError("写真不存在，请重新扫描写真库。", 404)
-            if not 0 <= page < row["page_count"]:
-                raise ReaderError("页码超出写真范围。")
+            connection.execute('BEGIN IMMEDIATE')
+            book = self._select(connection,book_id)
+            if book is None:
+                raise ReaderError('作品不存在。',404)
+            if not 0 <= page < book['page_count']:
+                raise ReaderError('页码超出作品范围。')
             updated_at = time.time()
-            connection.execute("""INSERT INTO progress(book_id,page,completed,updated_at) VALUES(?,?,?,?)
-                                  ON CONFLICT(book_id) DO UPDATE SET page=excluded.page,
-                                  completed=excluded.completed,updated_at=excluded.updated_at""",
-                               (book_id, page, int(completed), updated_at))
-        return {"progress": {"page": page, "completed": completed, "updated_at": updated_at}}
+            connection.execute('''INSERT INTO progress(user_id,book_id,page,completed,updated_at) VALUES(?,?,?,?,?)
+                ON CONFLICT(user_id,book_id) DO UPDATE SET page=excluded.page,
+                completed=excluded.completed,updated_at=excluded.updated_at''',
+                (self._actor(connection)['id'],book_id,page,int(completed),updated_at))
+        return {'progress':{'page':page,'completed':completed,'updated_at':updated_at}}
 
     def set_favorite(self, book_id, body):
-        favorite = body.get("favorite")
+        favorite = body.get('favorite')
         if type(favorite) is not bool:
-            raise ReaderError("收藏状态需要 true 或 false。")
+            raise ReaderError('收藏状态需要 true 或 false。')
         with closing(self.connect()) as connection, connection:
-            connection.execute("BEGIN IMMEDIATE")
-            if self._select(connection, book_id) is None:
-                raise ReaderError("写真不存在，请重新扫描写真库。", 404)
-            connection.execute("""INSERT INTO favorites(book_id,favorite) VALUES(?,?)
-                                  ON CONFLICT(book_id) DO UPDATE SET favorite=excluded.favorite""",
-                               (book_id, int(favorite)))
-        return {"favorite": favorite}
+            connection.execute('BEGIN IMMEDIATE')
+            if self._select(connection,book_id) is None:
+                raise ReaderError('作品不存在。',404)
+            connection.execute('''INSERT INTO favorites(user_id,book_id,favorite) VALUES(?,?,?)
+                ON CONFLICT(user_id,book_id) DO UPDATE SET favorite=excluded.favorite''',
+                (self._actor(connection)['id'],book_id,int(favorite)))
+        return {'favorite':favorite}
 
     def image(self, book_id, index):
         book = self.book(book_id, internal=True)
@@ -2000,12 +2350,12 @@ class Library:
         try:
             root = self._directory_path(book["source_root"])
             if book["format"] == "folder":
-                with open_library_file(self.root, self._media_path(root, page)) as handle:
+                with self._open_media_file(root, page) as handle:
                     if os.fstat(handle.fileno()).st_size > MAX_PAGE_BYTES:
                         raise ReaderError("图片超过 64 MiB，请调整图片后重新扫描。", 422)
                     data = handle.read(MAX_PAGE_BYTES + 1)
             else:
-                with open_library_file(self.root, self._media_path(root, book["path"])) as handle:
+                with self._open_media_file(root, book["path"]) as handle:
                     check_zip_directory(handle)
                     with zipfile.ZipFile(handle) as archive:
                         if len(archive.infolist()) > MAX_ZIP_ENTRIES:
@@ -2028,6 +2378,7 @@ class Library:
     def cover(self, book_id):
         with self.cover_lock:
             book = self.book(book_id, internal=True)
+            self._directory_path(book["source_root"])
             if book["cover_source"] == "upload":
                 name = book["cover_file"]
                 if not re.fullmatch(re.escape(book_id) + r"-upload-[a-f0-9]{24}\.jpg", name):
@@ -2042,7 +2393,7 @@ class Library:
                 root = self._directory_path(book["source_root"])
                 relative = page if book["format"] == "folder" else book["path"]
                 try:
-                    with open_library_file(self.root, self._media_path(root, relative)) as handle:
+                    with self._open_media_file(root, relative) as handle:
                         info = os.fstat(handle.fileno())
                         stamp = f"{info.st_size}:{info.st_mtime_ns}"
                 except OSError as error:
@@ -2250,8 +2601,10 @@ class ReaderHandler(BaseHTTPRequestHandler):
         return self.library.valid_session(self.session_token())
 
     def require_auth(self):
-        if not self.authenticated():
+        session = self.library.session(self.session_token())
+        if not session["authenticated"] or session["user"] is None:
             raise ReaderError("请先登录个人账户。", 401)
+        self.library.request_context.user_id = session["user"]["id"]
 
     def read_body(self, maximum=MAX_BODY_BYTES):
         if self.headers.get_content_type() != "application/json":
@@ -2315,6 +2668,15 @@ class ReaderHandler(BaseHTTPRequestHandler):
         self.respond({"error": "不允许跨站请求。"}, 405, {"Allow": "GET, HEAD, POST"})
 
     def _handle(self, callback):
+        with self.library.request_condition:
+            if self.library.request_stopping:
+                self.close_connection = True
+                self.respond({"error": "阅读器正在停止，请稍后重试。"}, 503)
+                return
+            self.library.active_requests += 1
+        # A new HTTP request must never inherit the internal administrator
+        # default, including a second request on a keep-alive connection.
+        self.library.request_context.user_id = None
         try:
             callback()
         except ReaderError as error:
@@ -2332,6 +2694,12 @@ class ReaderHandler(BaseHTTPRequestHandler):
                 self.respond({"error": "服务器处理失败，请稍后重试。"}, 500)
             except (BrokenPipeError, ConnectionResetError):
                 pass
+        finally:
+            if hasattr(self.library.request_context, "user_id"):
+                del self.library.request_context.user_id
+            with self.library.request_condition:
+                self.library.active_requests -= 1
+                self.library.request_condition.notify_all()
 
     def get_route(self):
         request = urlsplit(self.path)
@@ -2346,16 +2714,24 @@ class ReaderHandler(BaseHTTPRequestHandler):
         if path.startswith("/api/"):
             self.require_auth()
             if path == "/api/updates":
+                self.library.require_admin()
                 if request.query:
                     raise ReaderError("版本检查不接受外部地址或查询参数。")
                 self.respond(self.server.updates.check())
                 return
             if path == "/api/access":
+                self.library.require_admin()
                 secure = self.headers.get("X-Forwarded-Proto", "").lower() == "https"
                 self.respond(access_urls(self.headers.get("Host", ""), secure, self.server.server_address))
                 return
             if path == "/api/libraries":
                 self.respond(self.library.libraries())
+                return
+            if path == "/api/my-libraries":
+                self.respond(self.library.my_libraries())
+                return
+            if path == "/api/users":
+                self.respond(self.library.users())
                 return
             if path == "/api/directories":
                 self.respond(self.library.directories(query.get("path", [None])[0]))
@@ -2369,7 +2745,7 @@ class ReaderHandler(BaseHTTPRequestHandler):
             if path == "/api/bookmarks":
                 self.respond(self.library.bookmarks())
                 return
-            match = re.fullmatch(r"/api/avatars/(user|models)/(1|[a-f0-9]{24})", path)
+            match = re.fullmatch(r"/api/avatars/(user|models)/([1-9][0-9]{0,9}|[a-f0-9]{24})", path)
             if match:
                 self.respond_image(*self.library.avatar(*match.groups()))
                 return
@@ -2447,10 +2823,14 @@ class ReaderHandler(BaseHTTPRequestHandler):
                           or re.fullmatch(r"/api/models(?:/[a-f0-9]{24})?", path) or path == "/api/profile")
         body = self.read_body(MAX_COVER_BODY_BYTES if upload_request else MAX_BODY_BYTES)
         if path in ("/api/register", "/api/login"):
-            user_id = (self.library.register(body, self.client_address[0]) if path == "/api/register" else
-                       self.library.login(body, self.client_address[0]))
-            token = self.library.make_session(user_id)
-            self.respond(self.library.session(token), 201 if path == "/api/register" else 200,
+            # Password validation and token creation must be atomic with an
+            # administrator resetting/disabling/deleting that account.
+            with self.library.auth_lock:
+                user_id = (self.library.register(body, self.client_address[0]) if path == "/api/register" else
+                           self.library.login(body, self.client_address[0]))
+                token = self.library.make_session(user_id)
+                session = self.library.session(token)
+            self.respond(session, 201 if path == "/api/register" else 200,
                          headers={"Set-Cookie": self.cookie_header(token)})
             return
         if path == "/api/logout":
@@ -2459,9 +2839,27 @@ class ReaderHandler(BaseHTTPRequestHandler):
                          headers={"Set-Cookie": self.cookie_header("", clear=True)})
             return
         if path == "/api/profile":
-            password_changed = self.library.save_profile(body, self.client_address[0])
-            token = self.library.make_session(1) if password_changed else self.session_token()
-            self.respond(self.library.session(token), headers={"Set-Cookie": self.cookie_header(token)} if password_changed else None)
+            with self.library.auth_lock:
+                user_id = self.library._actor()["id"]
+                password_changed = self.library.save_profile(body, self.client_address[0])
+                token = self.library.make_session(user_id) if password_changed else self.session_token()
+                session = self.library.session(token)
+            self.respond(session, headers={"Set-Cookie": self.cookie_header(token)} if password_changed else None)
+            return
+        if path == "/api/users":
+            self.respond(self.library.save_user(body), 201)
+            return
+        match = re.fullmatch(r"/api/users/([1-9][0-9]{0,9})(/delete)?", path)
+        if match:
+            user_id, delete = match.groups()
+            self.respond(self.library.delete_user(int(user_id)) if delete else self.library.save_user(body, int(user_id)))
+            return
+        if path == "/api/my-libraries":
+            self.respond(self.library.save_my_libraries(body))
+            return
+        match = re.fullmatch(r"/api/books/([a-f0-9]{24})/reading-preferences", path)
+        if match:
+            self.respond(self.library.save_reading_preferences(match[1], body))
             return
         if path == "/api/scan":
             scanning = self.library.start_scan(body.get("library_id"))

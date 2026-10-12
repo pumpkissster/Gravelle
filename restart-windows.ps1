@@ -23,6 +23,18 @@ if (-not $pythonPath) { throw 'Python 3.12 or newer is required.' }
 & $pythonPath -c 'from PIL import Image' 2>$null
 if ($LASTEXITCODE -ne 0) { throw 'Install requirements.txt with the same Python before restarting.' }
 
+$versionCode = @'
+from pathlib import Path
+import ast, sys
+tree = ast.parse((Path(sys.argv[1]) / 'server.py').read_text(encoding='utf-8'))
+print(next(ast.literal_eval(node.value) for node in tree.body if isinstance(node, ast.Assign)
+           and any(isinstance(target, ast.Name) and target.id == 'VERSION' for target in node.targets)))
+'@
+$expectedVersion = (& $pythonPath -c $versionCode $projectRoot | Select-Object -Last 1).Trim()
+if ($LASTEXITCODE -ne 0 -or $expectedVersion -notmatch '^\d+\.\d+\.\d+$') {
+    throw 'Unable to read the project version. The existing reader was left running.'
+}
+
 $listeners = @(Get-NetTCPConnection -LocalPort 8080 -State Listen -ErrorAction SilentlyContinue)
 $managedProcess = $null
 if ($listeners.Count) {
@@ -48,15 +60,23 @@ if ($listeners.Count) {
 $backupCode = @'
 from pathlib import Path
 from contextlib import closing
-import sqlite3, sys
+from datetime import datetime, timezone
+import os, secrets, sqlite3, sys
 data = Path(sys.argv[1]) / 'data-windows'
 source = data / 'library.sqlite3'
-backup = data / 'before-v1.8.2.sqlite3'
-if source.exists() and not backup.exists():
+backups = data / 'backups'
+if source.exists():
+    if backups.is_symlink() or not backups.resolve().is_relative_to(data.resolve()):
+        raise RuntimeError('Backup directory must stay inside the data directory.')
+    backups.mkdir(mode=0o700, exist_ok=True)
+    backup = backups / ('before-restart-' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')
+                        + '-' + secrets.token_hex(4) + '.sqlite3')
+    descriptor = os.open(backup, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    os.close(descriptor)
     with closing(sqlite3.connect(source.as_uri() + '?mode=ro', uri=True)) as db:
         with closing(sqlite3.connect(backup)) as target:
             db.backup(target)
-    print('Saved data-windows/before-v1.8.2.sqlite3')
+    print('Saved ' + str(backup.relative_to(data)))
 '@
 & $pythonPath -c $backupCode $projectRoot
 if ($LASTEXITCODE -ne 0) { throw 'Backup failed. The existing reader was left running.' }
@@ -81,8 +101,8 @@ Set-Content -LiteralPath $pidPath -Value $startedProcess.Id -Encoding ascii
 for ($attempt = 0; $attempt -lt 40; $attempt++) {
     try {
         $health = Invoke-RestMethod -Uri 'http://127.0.0.1:8080/api/health' -TimeoutSec 1
-        if ($health.version -eq '1.8.2') {
-            Write-Host 'Gravelle 1.8.2 is ready: http://127.0.0.1:8080'
+        if ($health.version -eq $expectedVersion) {
+            Write-Host "Gravelle $expectedVersion is ready: http://127.0.0.1:8080"
             if ($Lan) { Write-Host 'LAN access is enabled. Use this computer''s IPv4 address with port 8080.' }
             exit 0
         }

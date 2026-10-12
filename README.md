@@ -1,8 +1,12 @@
 # Gravelle
 
-Gravelle 是支持 Windows、Docker 和 NAS 的个人写真阅读器，也能读取图片漫画。电脑、手机和平板通过浏览器连接同一个服务，共用进度、书签、收藏和作品资料。使用 SQLite 保存资料，无需额外数据库服务。
+> 当前版本为 **0.8.4**，支持 Windows 安装包、便携版和 Docker 双架构镜像。[查看更新说明](docs/releases/0.8.4.md)。已安装 1.8.x 的用户需手动覆盖安装一次；升级前停止服务并备份数据目录，沿用原数据目录。
+
+Gravelle 是支持 Windows、Docker 和 NAS 的个人写真阅读器，也能读取图片漫画。电脑、手机和平板通过浏览器连接同一个服务，同一账号共用进度、书签和收藏；作品资料由服务统一保存。使用 SQLite 保存资料，无需额外数据库服务。
 
 [下载与发行说明](https://github.com/pumpkissster/Gravelle/releases) · [Windows 使用说明](docs/windows.md) · [Docker 部署说明](docs/docker-release.md)
+
+支持[独立页面地址](docs/routing.md)，可复制写真库、作品或阅读页码链接，刷新及浏览器前进／后退会恢复对应内容。
 
 ## 能做什么
 
@@ -10,7 +14,7 @@ Gravelle 是支持 Windows、Docker 和 NAS 的个人写真阅读器，也能读
 - 创建多个写真库，每个库可选择多个目录，分别设置默认阅读方式、方向、排除规则和默认模特。
 - 单页、双页、条漫阅读，支持全屏、页码跳转、图片适配和页码书签。双页支持封面独页、跨页图独页与配对调整。
 - 编辑名称、日期、封面、阅读设置和模特关联；支持排序、搜索、收藏和连续阅读下一本。
-- 个人账户支持用户名、头像和密码。所有设备登录同一账户，共享资料；没有多用户隔离。
+- 支持管理员和子账号、写真库访问授权与个人显隐；各账号的进度、收藏和书签独立，同一账号跨设备同步。管理员可在模特作品列表及搜索结果中批量替换模特、移除作品。详见[用户与权限](docs/users.md)。
 
 新建写真库按单本作品浏览，已有漫画类型继续兼容。扫描、编辑资料和移除作品都不会删除或改写原图。
 
@@ -18,10 +22,12 @@ Gravelle 是支持 Windows、Docker 和 NAS 的个人写真阅读器，也能读
 
 支持 Windows 10（1809 或更新）／Windows 11 x64，无需安装 Python 或 Docker。
 
-1.8.3 起，安装程序按系统界面语言选择简体中文或 English，启动器采用项目 SVG 字标生成的品牌图。
+安装程序按系统界面语言选择简体中文或 English，启动器采用项目 SVG 字标生成的品牌图，支持高 DPI 和圆角操作按钮。
 
-1. 在 [GitHub Releases](https://github.com/pumpkissster/Gravelle/releases) 下载 `Gravelle-Setup-版本号-x64.exe` 并安装。
-2. 打开 Gravelle，选择写真根文件夹，设置端口（默认 `8080`）。需要手机、平板访问时勾选「允许局域网访问」。
+安装步骤：
+
+1. 在 [GitHub Releases](https://github.com/pumpkissster/Gravelle/releases/latest) 下载 `Gravelle-Setup-0.8.4-x64.exe` 并安装。
+2. 打开 Gravelle，选择写真根文件夹，可添加多个，设置端口（默认 `8080`）。需要手机、平板访问时勾选「允许局域网访问」。
 3. 点击「检查目录与网络」，再点击「启动阅读器」。浏览器会自动打开，启动器最小化到任务栏。
 4. 首次访问注册账户，在网页创建写真库，选择根文件夹内的目录，保存后自动扫描。
 
@@ -29,12 +35,12 @@ Gravelle 是支持 Windows、Docker 和 NAS 的个人写真阅读器，也能读
 
 ## Docker / NAS 部署
 
-Docker Hub 镜像为 [`pumpkissster/gravelle`](https://hub.docker.com/r/pumpkissster/gravelle)，固定版本使用 `pumpkissster/gravelle:1.8.3`，支持 `linux/amd64`、`linux/arm64`。
+Docker Hub 仓库为 [`pumpkissster/gravelle`](https://hub.docker.com/r/pumpkissster/gravelle)，镜像支持 `linux/amd64`、`linux/arm64`，可使用固定版本 `0.8.4` 或 `latest`。
 
-下载 [Release](https://github.com/pumpkissster/Gravelle/releases/tag/v1.8.3) 中的 Docker 配置包，解压后复制 `.env.example` 为 `.env`，确认镜像地址并填写宿主机路径和运行用户：
+将仓库中的 [compose.yaml](compose.yaml) 和 [.env.example](.env.example) 保存到同一项目目录，或下载发行页中的 Docker 配置包；复制 `.env.example` 为 `.env`，填写宿主机路径和运行用户：
 
 ```dotenv
-GRAVELLE_IMAGE=pumpkissster/gravelle:1.8.3
+GRAVELLE_IMAGE=pumpkissster/gravelle:0.8.4
 COMICS_PATH=/volume1/photosets
 DATA_PATH=/volume1/docker/sumi-reader/data
 PUID=1000
@@ -100,7 +106,7 @@ docker compose up -d
 
 Windows 在启动器勾选「允许局域网访问」后启动，其他设备打开显示的 `http://电脑局域网IP:端口`。Docker 使用宿主机 IP 和 `WEB_PORT`。设备需能互相访问，防火墙应允许相应端口；Windows 启动器不会自动修改防火墙，具体放行方式见 [Windows 文档](docs/windows.md#局域网访问)。
 
-网页「设置 → 服务与数据 → 检查新版本」检查 GitHub 正式发行版并提供发行页链接，不会自动升级服务。Windows 启动器还可下载新版，经 SHA-256 校验后，由你确认停止服务并打开安装器。网络失败不影响现有阅读服务。Docker 用户备份后手动构建或替换镜像。
+网页「设置 → 服务与数据 → 检查新版本」检查 GitHub 正式发行版并提供发行页链接，不会自动升级服务。Windows 启动器顶部版本号右侧可检查、下载新版，经 SHA-256 校验后，由你确认停止服务并打开安装器。网络失败不影响现有阅读服务。Docker 用户备份后手动替换镜像。版本系列已改为 0.8.x，旧 1.8.x 的版本比较不会将 0.8.4 识别为升级，需要手动下载覆盖安装一次。
 
 如使用 HTTPS 反向代理，请转发域名根路径，保留原始 `Host`（含非默认端口），设置 `X-Forwarded-Proto: https`。暂不支持部署在 `/manga/` 等子路径。
 
@@ -111,7 +117,7 @@ Windows 在启动器勾选「允许局域网访问」后启动，其他设备打
 ```sh
 python -m pip install -r requirements.txt
 python -m unittest discover -s tests -v
-node --test tests/test_reader_model.js tests/test_performance_settings.js tests/test_reader_end.js tests/test_avatar_ui.js
+node --test tests/test_reader_model.js tests/test_performance_settings.js tests/test_reader_end.js tests/test_avatar_ui.js tests/test_user_management.js tests/test_batch_selection.js
 ```
 
 测试使用临时图片和独立资料目录，可用 `SUMI_TEST_TEMP` 指定临时父目录。安装包构建见 [Windows 文档](docs/windows.md#从源码构建安装包)，发布流程见 [Docker 文档](docs/docker-release.md#发布者配置-github-actions)。
