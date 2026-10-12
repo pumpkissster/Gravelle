@@ -46,11 +46,11 @@ docker compose -f compose.build.yaml up -d --build
 
 此方式不需要 Docker Hub 账号，也不需要设置 `GRAVELLE_IMAGE`。`GRAVELLE_RELEASE_REPOSITORY` 仅在源码构建时指定更新检查仓库，默认为 `pumpkissster/Gravelle`。正式镜像内已内置发布仓库；如需要自行维护分支，在 Compose 的 `environment` 中明确添加非空的 `GRAVELLE_RELEASE_REPOSITORY: 你的账号/仓库`。
 
-## 更新和旧版迁移
+## 更新与数据保留
 
 先停止容器并备份完整的 `DATA_PATH` 目录，然后将 `.env` 中的 `GRAVELLE_IMAGE` 换成新版本，再执行 `docker compose pull` 和 `docker compose up -d`。原始作品、账户、书签与阅读记录保存在挂载目录中，不随容器替换而删除。设置页的“检查新版本”会提示新版，容器更新由宿主机完成。
 
-0.8.4 开始使用 0.8.x 版本系列，已有 1.8.x 容器应手动将镜像标签改为 `pumpkissster/gravelle:0.8.4`，保留原数据挂载，再拉取和重建容器。旧版按版本数值比较，可能不会提示此次编号调整；实际数据升级按数据库结构执行，已有主账号迁移为管理员并保留个人记录。
+数据升级按数据库结构执行，已有主账号迁移为管理员并保留个人记录。更新时保留原数据挂载。
 
 旧版的 Compose 服务名 `sumi-reader`、`COMICS_PATH` 变量和已有 `/data` 布局继续保留。升级时使用原来的项目目录或项目名称，保留原 `DATA_PATH`、`COMICS_PATH` 与运行用户配置，再替换 Compose 文件；不要创建第二个项目同时使用同一资料目录。历史资料目录名含 `sumi-reader` 无需改名。
 
@@ -84,7 +84,7 @@ Docker 支持使用 GitHub 账户注册或登录，但仍需确认自己的 Dock
 
 源码包按 `packaging/source_manifest.json` 中审核过的文件清单生成，排除本地写真、账户资料和测试记录。`packaging/package_source.py` 同时生成 Docker 配置包，并对同一发行目录内的 Windows 与 ZIP 资产生成统一的 `SHA256SUMS.txt`。
 
-发行说明从 `docs/releases/版本号.md` 追加对应更新内容，并保留按本次发布选项生成的 Docker 镜像说明。GitHub Release 显式标记为最新版本，避免版本系列调整后仍选中旧的 1.8.x。
+发行说明从 `docs/releases/版本号.md` 追加对应更新内容，并保留按本次发布选项生成的 Docker 镜像说明。GitHub Release 显式标记为最新版本。
 
 Docker 验证 Artifacts 为 OCI 归档，仅用于构建核查，正常安装使用 Docker Hub 镜像。Windows 安装包支持 Windows x64；Windows ARM64 与 macOS 安装包不在本次发布范围。
 
