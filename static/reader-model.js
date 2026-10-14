@@ -36,5 +36,39 @@
     if (mode !== 'double') return mode === 'webtoon' ? 'webtoon' : 'single';
     return Number(width) >= 780 && Number(width) / Math.max(1, Number(height)) >= 1.15 ? 'double' : 'single';
   }
-  return { buildSpreads, spreadForPage, visualPages, effectiveMode };
+  function effectiveDirection(mode, direction) {
+    if (mode === 'webtoon') return 'ttb';
+    if (direction === 'ttb') return mode === 'single' ? 'ttb' : 'ltr';
+    return direction === 'rtl' ? 'rtl' : 'ltr';
+  }
+  function canScrollPage(delta, viewport = {}) {
+    const top = Math.max(0, Number(viewport.scrollTop) || 0);
+    const end = Math.max(0, (Number(viewport.scrollHeight) || 0) - (Number(viewport.clientHeight) || 0));
+    return delta > 0 ? top < end - 2 : delta < 0 && top > 2;
+  }
+  // Trackpad momentum belongs to the gesture that started it. A gesture used to
+  // scroll inside a tall page cannot also advance to the following page.
+  function createWheelPager({ idleMs = 180, threshold = 40 } = {}) {
+    let lastAt = null; let consumed = false; let distance = 0;
+    return {
+      reset() { lastAt = null; consumed = false; distance = 0; },
+      next(delta, now, { scrolling = false, blocked = false } = {}) {
+        if (lastAt === null || now - lastAt > idleMs) { consumed = false; distance = 0; }
+        lastAt = now;
+        if (scrolling || blocked) { consumed = true; return 0; }
+        if (consumed || !Number.isFinite(delta)) return 0;
+        distance += delta;
+        if (Math.abs(distance) < threshold) return 0;
+        consumed = true;
+        return Math.sign(distance);
+      }
+    };
+  }
+  function swipePageDelta({ dx, dy, vertical = false, direction = 'ltr', blocked = false } = {}) {
+    if (blocked) return 0;
+    const primary = vertical ? dy : dx; const cross = vertical ? dx : dy;
+    if (!Number.isFinite(primary) || !Number.isFinite(cross) || Math.abs(primary) <= 55 || Math.abs(primary) <= Math.abs(cross) * 1.5) return 0;
+    return -Math.sign(primary) * (!vertical && direction === 'rtl' ? -1 : 1);
+  }
+  return { buildSpreads, spreadForPage, visualPages, effectiveMode, effectiveDirection, canScrollPage, createWheelPager, swipePageDelta };
 }));

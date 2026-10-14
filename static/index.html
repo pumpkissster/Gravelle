@@ -16,6 +16,8 @@
   <script src="/avatar-ui.js" defer></script>
   <script src="/batch-selection.js" defer></script>
   <script src="/page-router.js" defer></script>
+  <script src="/transcoding-ui.js" defer></script>
+  <script src="/image-search-ui.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
@@ -32,6 +34,8 @@
     <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M4 12h16m-6-6 6 6-6 6"/></symbol>
     <symbol id="i-left" viewBox="0 0 24 24"><path d="m15 5-7 7 7 7"/></symbol>
     <symbol id="i-right" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+    <symbol id="i-up" viewBox="0 0 24 24"><path d="m5 15 7-7 7 7"/></symbol>
+    <symbol id="i-down" viewBox="0 0 24 24"><path d="m5 9 7 7 7-7"/></symbol>
     <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
     <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/></symbol>
     <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/></symbol>
@@ -53,7 +57,7 @@
         <button class="nav-item" data-view="search"><svg><use href="#i-search"/></svg><span>搜索</span></button>
         <button class="nav-item" data-view="models"><svg><use href="#i-person"/></svg><span>模特</span><small data-count="models">0</small></button>
       </nav>
-      <div class="sidebar-bottom account-area"><div class="account-menu" id="account-menu" aria-label="个人账户菜单" hidden><button id="account-settings" type="button"><svg><use href="#i-settings"/></svg>设置</button><button id="logout" type="button"><svg><use href="#i-logout"/></svg>注销退出</button></div><button id="account-toggle" class="account-toggle" type="button" aria-expanded="false" aria-controls="account-menu" aria-label="打开个人账户菜单"><span id="account-avatar" class="account-avatar">我</span><span class="account-label"><strong id="account-name">个人账户</strong></span></button><button id="sidebar-settings" class="icon-button sidebar-settings" type="button" aria-label="设置"><svg><use href="#i-settings"/></svg></button></div>
+      <div class="sidebar-user-area"><button id="optimization-pending" class="optimization-pending" type="button" hidden><svg><use href="#i-refresh"/></svg><span><strong id="optimization-pending-count"></strong><small>图片优化</small></span><svg><use href="#i-right"/></svg></button><div class="sidebar-bottom account-area"><div class="account-menu" id="account-menu" aria-label="个人账户菜单" hidden><button id="account-settings" type="button"><svg><use href="#i-settings"/></svg>设置</button><button id="logout" type="button"><svg><use href="#i-logout"/></svg>注销退出</button></div><button id="account-toggle" class="account-toggle" type="button" aria-expanded="false" aria-controls="account-menu" aria-label="打开个人账户菜单"><span id="account-avatar" class="account-avatar">我</span><span class="account-label"><strong id="account-name">个人账户</strong></span></button><button id="sidebar-settings" class="icon-button sidebar-settings" type="button" aria-label="设置"><svg><use href="#i-settings"/></svg></button></div></div>
     </aside>
     <button id="nav-backdrop" class="nav-backdrop" aria-label="关闭主菜单" hidden></button>
     <main class="main-content" id="main-content">
@@ -63,6 +67,8 @@
       <section id="selection-toolbar" class="selection-toolbar" aria-label="批量操作" hidden><button id="selection-toggle" class="button button-secondary" type="button" aria-pressed="false">完成管理</button><span id="selection-count" class="selection-count" role="status" aria-live="polite" hidden>已选择 0 项</span><button id="selection-all" class="button button-secondary" type="button" hidden>全选</button><div class="selection-actions"><button id="selection-models" class="button button-secondary" type="button" hidden>修改模特</button><button id="selection-remove" class="button button-danger" type="button" hidden>移除</button><button id="selection-scan" class="button button-secondary" type="button" hidden><svg><use href="#i-refresh"/></svg>立即扫描</button><button id="selection-favorite" class="button button-secondary" type="button" hidden><svg><use href="#i-heart"/></svg>收藏</button><button id="selection-random" class="button button-primary" type="button" hidden>随机阅读</button></div></section>
       <section id="library-home" class="library-home" aria-label="我的写真库"><div id="home-library-heading" class="section-label home-library-heading"><h2>写真库</h2><button id="home-all-libraries" class="icon-button" type="button" aria-label="查看全部写真库" title="查看全部写真库"><svg><use href="#i-right"/></svg></button></div><div id="library-tiles" class="library-tiles"></div></section>
       <section id="continue-section" class="continue-section" aria-labelledby="continue-heading" hidden><div class="section-label"><h2 id="continue-heading">继续阅读</h2></div><div id="continue-card"></div></section>
+      <div id="search-tabs" class="search-mode-tabs" role="tablist" aria-label="搜索方式" hidden><button id="search-tab-text" type="button" role="tab" aria-selected="true" aria-controls="catalog-section">文字搜索</button><button id="search-tab-image" type="button" role="tab" aria-selected="false" aria-controls="image-search-panel" tabindex="-1">以图搜图</button></div>
+      <section id="image-search-panel" role="tabpanel" aria-labelledby="search-tab-image" hidden></section>
       <section id="catalog-section" class="shelf" aria-label="作品列表"><div class="shelf-tools"><h2 id="shelf-heading">最近加入</h2><label class="search-box"><svg><use href="#i-search"/></svg><input id="search" type="search" placeholder="搜索作品、模特、写真库…" aria-label="搜索作品、模特、写真库或路径" autocomplete="off"><kbd>/</kbd></label><div class="select-tools"><label><span class="sr-only">筛选系列</span><select id="series-filter"><option value="">所有系列</option></select></label><label><span class="sr-only">排列方式</span><select id="sort"><option value="added">加入时间（新到旧）</option><option value="added_asc">加入时间（旧到新）</option><option value="title">按名称排序</option><option value="updated">最近阅读</option><option value="release">发布日期</option><option value="modified">最近修改</option></select></label></div></div><div class="shelf-meta"><span id="results-label">正在打开藏馆…</span></div><div id="loading-state" class="loading-state" role="status"><span class="spinner"></span>正在读取写真库</div><div id="book-grid" class="book-grid"></div></section>
       <section id="bookmark-section" hidden><div id="bookmark-list" class="bookmark-list"></div></section>
       <section id="models-section" hidden><div id="models-grid" class="models-grid"></div></section>
@@ -183,6 +189,7 @@
   </dialog>
   <dialog id="remove-dialog" class="settings-dialog library-dialog compact-dialog" aria-labelledby="remove-title" aria-describedby="remove-description"><header class="dialog-header"><h2 id="remove-title">确认移除</h2></header><div class="dialog-body"><p id="remove-description" class="settings-intro" style="white-space:pre-line"></p></div><footer class="dialog-footer"><button id="remove-cancel" class="button button-secondary" type="button">取消</button><button id="remove-confirm" class="button button-danger" type="button">确认移除</button></footer></dialog>
   <div id="toast" class="toast" role="status" popover="manual" hidden></div>
+  <dialog id="optimization-notice-dialog" class="settings-dialog library-dialog compact-dialog" aria-labelledby="optimization-notice-title"><header class="dialog-header"><h2 id="optimization-notice-title">作品需要处理</h2><button id="optimization-notice-close" class="icon-button" type="button" aria-label="稍后处理">×</button></header><div class="dialog-body"><p id="optimization-notice-description" class="settings-intro"></p></div><footer class="dialog-footer"><button id="optimization-notice-later" class="button button-secondary" type="button">稍后处理</button><button id="optimization-notice-view" class="button button-primary" type="button">查看图片优化</button></footer></dialog>
 </body>
 </html>
 

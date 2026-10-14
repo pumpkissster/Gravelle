@@ -126,6 +126,36 @@ class MultiuserSecurityTests(unittest.TestCase):
         self.assertEqual(child_book['reading_mode'], 'double')
         self.assertEqual(child_book['reading_direction'], 'rtl')
 
+    def test_vertical_single_page_preferences_are_private_and_do_not_grant_management(self):
+        route = '/api/books/' + self.visible_book['id']
+        preferences = route + '/reading-preferences'
+        status, result, _ = self.child_request(preferences, {'reading_mode': 'single', 'reading_direction': 'ttb'})
+        self.assertEqual(status, 200, result)
+        self.assertEqual((result['book']['reading_mode'], result['book']['reading_direction']), ('single', 'ttb'))
+        self.assertIsNone(result['book']['reading_direction_override'])
+        self.assertEqual(self.app.request(route)[1]['reading_direction'], 'ltr')
+        second = self.create_user('second-reader', [self.visible['id']])
+        with self.as_client(self.new_client()):
+            self.assertEqual(self.app.request('/api/login', {'username': second['username'], 'password': self.password})[0], 200)
+            book = self.app.request(route)[1]
+            self.assertEqual(book['reading_direction'], 'ltr')
+            self.assertEqual(book['reading_preferences'], {'reading_mode': None, 'reading_direction': None})
+        for mode, effective in (('double', 'ltr'), ('webtoon', 'ttb'), ('single', 'ttb')):
+            status, result, _ = self.child_request(preferences, {'reading_mode': mode})
+            self.assertEqual(status, 200, result)
+            self.assertEqual(result['book']['reading_direction'], effective)
+            self.assertEqual(result['book']['reading_preferences']['reading_direction'], 'ttb')
+        self.app.stop()
+        self.app.start()
+        self.assertEqual(self.child_request(route)[1]['reading_direction'], 'ttb')
+        self.assertEqual(self.child_request('/api/books/' + self.hidden_book['id'] + '/reading-preferences',
+                                            {'reading_mode': 'single', 'reading_direction': 'ttb'})[0], 404)
+        self.assertEqual(self.child_request(route + '/metadata', {'reading_direction': 'ttb'})[0], 403)
+        self.assertEqual(self.child_request('/api/libraries/' + self.visible['id'], {'reading_direction': 'ttb'})[0], 403)
+        status, result, _ = self.child_request(preferences, {'reading_mode': None, 'reading_direction': None})
+        self.assertEqual(status, 200, result)
+        self.assertEqual(result['book']['reading_direction'], 'ltr')
+
     def test_read_only_account_cannot_gain_management_permissions_or_submit_batches(self):
         self.assertIn(self.app.request('/api/users/' + str(self.child['id']), {
             'permissions': {'edit_metadata': True, 'remove_books': True, 'scan_libraries': True}})[0], (400, 403))
@@ -155,6 +185,32 @@ class MultiuserSecurityTests(unittest.TestCase):
         self.assertFalse(self.child_request('/api/my-libraries')[1]['libraries'][0]['visible'])
         self.assertEqual(self.child_request('/api/my-libraries', {'visible_library_ids': [self.visible['id']]})[0], 200)
         self.assertEqual(len(self.child_request('/api/library')[1]['books']), 1)
+
+    def test_hidden_authorized_library_exposes_raw_direction_and_library_mode_for_direct_reading(self):
+        route = '/api/books/' + self.visible_book['id']
+        preferences = route + '/reading-preferences'
+        self.assertEqual(self.app.request('/api/libraries/' + self.visible['id'], {
+            'reading_mode': 'single', 'reading_direction': 'ttb'})[0], 200)
+        self.assertEqual(self.child_request('/api/my-libraries', {'visible_library_ids': []})[0], 200)
+        self.assertEqual(self.child_request('/api/libraries')[1]['libraries'], [])
+        status, result, _ = self.child_request(preferences, {'reading_mode': 'double', 'reading_direction': None})
+        self.assertEqual(status, 200, result)
+        book = self.child_request(route)[1]
+        self.assertEqual(book['reading_direction'], 'ltr')
+        self.assertEqual(book['reading_direction_stored'], 'ttb')
+        self.assertEqual(book['reading_preferences'], {'reading_mode': 'double', 'reading_direction': None})
+        self.assertEqual(book['library_reading_mode'], 'single')
+        status, result, _ = self.child_request(preferences, {'reading_mode': 'single'})
+        self.assertEqual(status, 200, result)
+        self.assertEqual(result['book']['reading_direction'], 'ttb')
+        self.assertEqual(result['book']['reading_direction_stored'], 'ttb')
+        status, result, _ = self.child_request(preferences, {'reading_mode': 'webtoon', 'reading_direction': 'rtl'})
+        self.assertEqual(status, 200, result)
+        self.assertEqual(result['book']['reading_mode'], 'webtoon')
+        self.assertEqual(result['book']['library_reading_mode'], 'single')
+        self.assertEqual(result['book']['reading_direction'], 'ttb')
+        self.assertEqual(result['book']['reading_direction_stored'], 'rtl')
+        self.assertEqual(self.child_request('/api/books/' + self.hidden_book['id'])[0], 404)
 
     def test_personal_visibility_rejects_unauthorized_ids_without_partial_changes(self):
         status, _, _ = self.child_request('/api/my-libraries', {

@@ -9,11 +9,17 @@
   const views = { home: 'home', libraries: 'libraries', recent: 'recent', bookmarks: 'bookmarks', favorites: 'favorite', search: 'search', models: 'models', settings: 'settings' };
   const sorts = ['added', 'added_asc', 'title', 'updated', 'release', 'modified'];
   const listViews = ['library', 'recent', 'favorite', 'search', 'model'];
+  const settingsSections = ['service', 'users', 'interface', 'performance', 'reading', 'transcoding', 'image-search'];
   const home = () => ({ view: 'home' });
   function id(value) { return typeof value === 'string' && value.length > 0 && value.length <= 200 && !/[\x00-\x1f\x7f/\\]/.test(value) ? value : ''; }
   function normalize(input, depth = 0) {
     if (!input || !Object.hasOwn(paths, input.view)) return home();
     const route = { view: input.view };
+    // Older service/user links now point to the two panels on the settings home.
+    if (route.view === 'settings' && settingsSections.includes(input.section) && !['service', 'users'].includes(input.section)) {
+      route.section = input.section;
+      if (route.section === 'transcoding' && input.tab === 'rules') route.tab = 'rules';
+    }
     if (['library', 'model', 'book', 'reader'].includes(route.view)) {
       route.id = id(String(input.id ?? '')); if (!route.id) return home();
     }
@@ -22,6 +28,7 @@
       if (sorts.includes(input.sort)) route.sort = input.sort;
       if (typeof input.series === 'string' && input.series) route.series = input.series.slice(0, 500);
     }
+    if (route.view === 'search' && input.image === true) route.image = true;
     if (route.view === 'reader' && Number.isSafeInteger(Number(input.page)) && Number(input.page) > 0 && Number(input.page) <= 1000000) route.page = Number(input.page);
     if (['book', 'reader'].includes(route.view) && input.from && depth < 2) {
       const from = normalize(input.from, depth + 1);
@@ -39,10 +46,11 @@
     let decoded;
     try { decoded = pieces.map(decodeURIComponent); } catch (_) { return home(); }
     let view = decoded.length === 1 ? views[decoded[0]] : undefined;
-    if (decoded.length === 2) view = { libraries: 'library', models: 'model', books: 'book', read: 'reader' }[decoded[0]];
+    if (decoded.length === 2) view = { libraries: 'library', models: 'model', books: 'book', read: 'reader', settings: 'settings' }[decoded[0]];
     if (!view) return home();
     const params = new URLSearchParams(query);
-    return normalize({ view, id: decoded[1], query: params.get('q'), sort: params.get('sort'), series: params.get('series'), page: params.get('page'), from: params.has('from') ? parse(params.get('from'), depth + 1) : undefined }, depth);
+    if (decoded[0] === 'settings' && decoded.length === 2 && !settingsSections.includes(decoded[1])) return home();
+    return normalize({ view, id: decoded[1], section: decoded[0] === 'settings' ? decoded[1] : undefined, tab: params.get('tab'), image: params.get('type') === 'image', query: params.get('q'), sort: params.get('sort'), series: params.get('series'), page: params.get('page'), from: params.has('from') ? parse(params.get('from'), depth + 1) : undefined }, depth);
   }
   function path(input, depth = 0) {
     const route = normalize(input, depth);
@@ -52,7 +60,9 @@
     if (route.series) params.set('series', route.series);
     if (route.page) params.set('page', route.page);
     if (route.from) params.set('from', path(route.from, depth + 1));
-    return '/' + paths[route.view] + (route.id ? '/' + encodeURIComponent(route.id) : '') + (params.size ? '?' + params : '');
+    if (route.tab) params.set('tab', route.tab);
+    if (route.image) params.set('type', 'image');
+    return '/' + paths[route.view] + (route.section ? '/' + route.section : route.id ? '/' + encodeURIComponent(route.id) : '') + (params.size ? '?' + params : '');
   }
   const hash = route => '#' + path(route);
   function base(route) {

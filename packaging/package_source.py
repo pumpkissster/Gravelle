@@ -8,6 +8,7 @@ import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
+PRIVATE_DOCUMENTS = {'docs/next-version.md'}
 
 
 def source_files():
@@ -18,7 +19,8 @@ def source_files():
     for name in names:
         relative = PurePosixPath(name)
         path = (ROOT / name).resolve(strict=True)
-        if relative.is_absolute() or '..' in relative.parts or relative.parts[0] in excluded:
+        if (relative.is_absolute() or '..' in relative.parts or relative.parts[0] in excluded
+                or relative.as_posix() in PRIVATE_DOCUMENTS):
             raise ValueError('Private or invalid release path: ' + name)
         if not path.is_relative_to(ROOT) or not path.is_file():
             raise ValueError('Release file escaped the project: ' + name)
@@ -52,7 +54,7 @@ def main():
     names = source_files()
     archive(args.output_dir / f'Gravelle-Source-{version}.zip', names, 'gravelle-reader/')
     archive(args.output_dir / f'Gravelle-Docker-{version}.zip',
-            ['compose.yaml', '.env.example', 'docs/docker-release.md'])
+            ['compose.yaml', 'compose.optimization.yaml', '.env.example', 'docs/docker-release.md'])
     artifacts = sorted(args.output_dir.glob('Gravelle-*.exe')) + sorted(args.output_dir.glob('Gravelle-*.zip'))
     checksums = '\n'.join(hashlib.sha256(path.read_bytes()).hexdigest() + '  ' + path.name for path in artifacts)
     (args.output_dir / 'SHA256SUMS.txt').write_text(checksums + '\n', encoding='utf-8')

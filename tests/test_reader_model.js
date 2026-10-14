@@ -3,7 +3,7 @@
 // Run with: node --test tests/test_reader_model.js
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { buildSpreads, spreadForPage, visualPages, effectiveMode } = require('../static/reader-model.js');
+const { buildSpreads, spreadForPage, visualPages, effectiveMode, effectiveDirection, canScrollPage, createWheelPager, swipePageDelta } = require('../static/reader-model.js');
 
 test('default spreads preserve a standalone cover and logical page order', () => {
   assert.deepEqual(buildSpreads(0), []);
@@ -90,4 +90,59 @@ test('single and webtoon choices survive viewport changes', () => {
     assert.equal(effectiveMode('single', ...dimensions), 'single');
     assert.equal(effectiveMode('webtoon', ...dimensions), 'webtoon');
   }
+});
+
+test('vertical page direction belongs to single mode and preserves the stored choice across modes', () => {
+  for (const stored of ['ltr', 'rtl', 'ttb']) assert.equal(effectiveDirection('webtoon', stored), 'ttb');
+  assert.equal(effectiveDirection('single', 'ttb'), 'ttb');
+  assert.equal(effectiveDirection('double', 'ttb'), 'ltr');
+  assert.equal(effectiveDirection('double', 'rtl'), 'rtl');
+  assert.equal(effectiveDirection('single', 'invalid'), 'ltr');
+  // The selected mode, rather than a narrow viewport's single-page fallback,
+  // controls direction: double remains horizontal on phones.
+  assert.equal(effectiveMode('double', 390, 844), 'single');
+  assert.equal(effectiveDirection('double', 'ttb'), 'ltr');
+  assert.deepEqual(visualPages([2], 'ttb'), [2]);
+});
+
+test('tall pages can pan within their boundaries before a fresh gesture turns', () => {
+  const viewport = { scrollTop: 0, scrollHeight: 1800, clientHeight: 600 };
+  assert.equal(canScrollPage(1, viewport), true);
+  assert.equal(canScrollPage(-1, viewport), false);
+  viewport.scrollTop = 1199;
+  assert.equal(canScrollPage(1, viewport), false);
+  assert.equal(canScrollPage(-1, viewport), true);
+  assert.equal(canScrollPage(1, { scrollTop: -2, scrollHeight: 600, clientHeight: 600 }), false);
+});
+
+test('wheel momentum turns at most one page until a new gesture', () => {
+  const wheel = createWheelPager();
+  assert.equal(wheel.next(15, 0), 0);
+  assert.equal(wheel.next(30, 12), 1);
+  for (const time of [28, 70, 120, 270]) assert.equal(wheel.next(80, time), 0);
+  assert.equal(wheel.next(-60, 500), -1);
+  wheel.reset();
+  assert.equal(wheel.next(60, 510), 1);
+});
+
+test('scrolling or loading consumes the current wheel gesture without an edge jump', () => {
+  const wheel = createWheelPager();
+  assert.equal(wheel.next(120, 0, { scrolling: true }), 0);
+  assert.equal(wheel.next(120, 40), 0);
+  assert.equal(wheel.next(120, 90), 0);
+  assert.equal(wheel.next(120, 300), 1);
+  assert.equal(wheel.next(120, 600, { blocked: true }), 0);
+  assert.equal(wheel.next(120, 680), 0);
+  assert.equal(wheel.next(120, 900), 1);
+});
+
+test('vertical swipes distinguish a page turn from horizontal movement, panning and pinch', () => {
+  assert.equal(swipePageDelta({ dx: 5, dy: -100, vertical: true }), 1);
+  assert.equal(swipePageDelta({ dx: 5, dy: 100, vertical: true }), -1);
+  assert.equal(swipePageDelta({ dx: -100, dy: 5, vertical: true }), 0);
+  assert.equal(swipePageDelta({ dx: 70, dy: -80, vertical: true }), 0);
+  assert.equal(swipePageDelta({ dx: 0, dy: -50, vertical: true }), 0);
+  assert.equal(swipePageDelta({ dx: 0, dy: -100, vertical: true, blocked: true }), 0);
+  assert.equal(swipePageDelta({ dx: -100, dy: 5, direction: 'rtl' }), -1);
+  assert.equal(swipePageDelta({ dx: -100, dy: 5, direction: 'ltr' }), 1);
 });

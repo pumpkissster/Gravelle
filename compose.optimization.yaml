@@ -1,0 +1,12 @@
+# 可选覆盖配置：把图片优化副本保存到独立磁盘／文件夹。
+# 与 compose.yaml 或 compose.build.yaml 同时使用；原有 /data 挂载保持不变。
+# 启用前创建 OPTIMIZED_PATH，并按 docs/docker-release.md 迁移已有副本。
+services:
+  sumi-reader:
+    volumes:
+      - type: bind
+        source: "${OPTIMIZED_PATH:?请在 .env 中设置已创建且可读写的 OPTIMIZED_PATH 优化图片目录}"
+        target: /data/transcoded
+        read_only: false
+        bind:
+          create_host_path: false

@@ -1,6 +1,6 @@
 # Gravelle
 
-> 当前版本为 **0.8.4**，支持 Windows 安装包、便携版和 Docker 双架构镜像。[查看更新说明](docs/releases/0.8.4.md)。升级前停止服务并备份数据目录，沿用原数据目录。
+> 当前版本为 **0.8.5**，支持 Windows 安装包、便携版和 Docker 双架构镜像。[查看更新说明](docs/releases/0.8.5.md)。升级前停止服务并备份数据目录，沿用原数据目录。
 
 Gravelle 是支持 Windows、Docker 和 NAS 的个人写真阅读器，也能读取图片漫画。电脑、手机和平板通过浏览器连接同一个服务，同一账号共用进度、书签和收藏；作品资料由服务统一保存。使用 SQLite 保存资料，无需额外数据库服务。
 
@@ -12,9 +12,11 @@ Gravelle 是支持 Windows、Docker 和 NAS 的个人写真阅读器，也能读
 
 - 读取 JPG/JPEG、PNG、WebP、GIF、AVIF 散装图片，以及 CBZ/ZIP 图片作品。压缩包无需预先解压；不支持 CBR/RAR、PDF。图片能否显示也取决于浏览器支持。
 - 创建多个写真库，每个库可选择多个目录，分别设置默认阅读方式、方向、排除规则和默认模特。
-- 单页、双页、条漫阅读，支持全屏、页码跳转、图片适配和页码书签。双页支持封面独页、跨页图独页与配对调整。
+- 单页、双页、条漫阅读，支持全屏、页码跳转、图片适配和页码书签。单页支持左右及[上下翻页](docs/users.md#单页上下翻页)，双页支持封面独页、跨页图独页与配对调整。
 - 编辑名称、日期、封面、阅读设置和模特关联；支持排序、搜索、收藏和连续阅读下一本。
 - 支持管理员和子账号、写真库访问授权与个人显隐；各账号的进度、收藏和书签独立，同一账号跨设备同步。管理员可在模特作品列表及搜索结果中批量替换模特、移除作品。详见[用户与权限](docs/users.md)。
+- 管理员可按文件大小、像素或最长边设置[图片优化](docs/transcoding.md)，仅处理命中规则的页面，各设备共用副本，原图保持不变。
+- [以图搜图](docs/image-search.md)可通过原图、完整截图及轻中度裁剪找到写真库内的作品和页码；索引在自己的服务端建立，无需 GPU 或下载模型。图片优化和图片索引默认关闭。
 
 新建写真库按单本作品浏览，已有漫画类型继续兼容。扫描、编辑资料和移除作品都不会删除或改写原图。
 
@@ -26,21 +28,23 @@ Gravelle 是支持 Windows、Docker 和 NAS 的个人写真阅读器，也能读
 
 安装步骤：
 
-1. 在 [GitHub Releases](https://github.com/pumpkissster/Gravelle/releases/latest) 下载 `Gravelle-Setup-0.8.4-x64.exe` 并安装。
+1. 在 [GitHub Releases](https://github.com/pumpkissster/Gravelle/releases/latest) 下载 `Gravelle-Setup-0.8.5-x64.exe` 并安装。
 2. 打开 Gravelle，选择写真根文件夹，可添加多个，设置端口（默认 `8080`）。需要手机、平板访问时勾选「允许局域网访问」。
 3. 点击「检查目录与网络」，再点击「启动阅读器」。浏览器会自动打开，启动器最小化到任务栏。
 4. 首次访问注册账户，在网页创建写真库，选择根文件夹内的目录，保存后自动扫描。
 
 启动器可查看地址、打开网页和停止服务。关闭浏览器不会停止服务；关闭启动器会提示停止服务。便携 ZIP 解压后运行 `Gravelle/Gravelle.exe`，整个文件夹需一起保留。
 
+安装程序尚未做代码签名，Windows 可能提示“未知发布者”。请从项目的 GitHub Releases 获取安装包，并核对发行页提供的 SHA-256 校验值。
+
 ## Docker / NAS 部署
 
-Docker Hub 仓库为 [`pumpkissster/gravelle`](https://hub.docker.com/r/pumpkissster/gravelle)，镜像支持 `linux/amd64`、`linux/arm64`，可使用固定版本 `0.8.4` 或 `latest`。
+Docker Hub 仓库为 [`pumpkissster/gravelle`](https://hub.docker.com/r/pumpkissster/gravelle)，镜像支持 `linux/amd64`、`linux/arm64`，可使用固定版本 `0.8.5` 或 `latest`。
 
 将仓库中的 [compose.yaml](compose.yaml) 和 [.env.example](.env.example) 保存到同一项目目录，或下载发行页中的 Docker 配置包；复制 `.env.example` 为 `.env`，填写宿主机路径和运行用户：
 
 ```dotenv
-GRAVELLE_IMAGE=pumpkissster/gravelle:0.8.4
+GRAVELLE_IMAGE=pumpkissster/gravelle:0.8.5
 COMICS_PATH=/volume1/photosets
 DATA_PATH=/volume1/docker/sumi-reader/data
 PUID=1000
@@ -60,6 +64,8 @@ docker compose up -d
 宿主机 `COMICS_PATH` 只读挂载到 **`/library`**，网页目录请选择 `/library` 或其子目录；`DATA_PATH` 挂载到 **`/data`**。其他磁盘需先挂载到 `/library/子目录` 才能在网页选择。已有安装保留原数据路径、运行用户与项目名称。
 
 也可下载完整源码，执行 `docker compose -f compose.build.yaml up -d --build` 自行构建。详细权限、更新与排查见 [Docker 部署说明](docs/docker-release.md)。
+
+图片优化副本默认保存于 Docker 容器 `/data/transcoded`，即宿主机 `DATA_PATH/transcoded`，无需单独映射。也可选用 [compose.optimization.yaml](compose.optimization.yaml) 将同一个容器路径单独映射到其他文件夹或磁盘；仅填写 `OPTIMIZED_PATH` 不会生效，还需加载覆盖文件或手动添加挂载。使用方法及已有副本的迁移步骤见 [独立优化目录](docs/docker-release.md#图片优化目录单独映射)。
 
 ## 整理文件夹与自动资料
 
@@ -98,9 +104,11 @@ docker compose up -d
 
 资料包含账户、库、元数据、模特、封面、头像、进度、书签和收藏。Windows 配置与日志也在 `%LOCALAPPDATA%\Gravelle`，升级、卸载保留此目录；原图单独备份。
 
-**升级前停止服务，备份整个资料目录。** SQLite 可能有 WAL/SHM 文件，不要运行时只复制数据库。Docker 同时备份 `.env`，沿用原挂载和项目名称。避免两个服务共用资料目录；迁移时保留服务内绝对路径与作品相对路径。
+**升级前停止服务，备份整个资料目录。** SQLite 可能有 WAL/SHM 文件，不要运行时只复制数据库。Docker 同时备份 `.env`；若单独映射优化目录，一并保存 `OPTIMIZED_PATH`，沿用原挂载和项目名称。避免两个服务共用资料目录；迁移时保留服务内绝对路径与作品相对路径。
 
-另一设备刷新并打开同一本即可续读，并发阅读以服务端最后保存为准。作品阅读方式和方向同步；主题、图片适配与性能偏好保存在当前浏览器。同步需要连接服务。
+另一设备刷新并打开同一本即可续读，并发阅读以服务端最后保存为准。作品阅读方式和方向同步；主题、图片适配与加载、缓存、列表偏好保存在当前浏览器。同步需要连接服务。
+
+[性能设置](docs/performance.md) 提供管理员可调整的后台任务并发数，默认 1，使图片优化与图片索引按单张图片排队；可设 1～8，提高后允许不同作品并行优化，或与索引同时进行。它保存在服务端，和当前浏览器的封面加载并发数等偏好分别生效。
 
 ## 局域网访问与更新
 
@@ -112,12 +120,12 @@ Windows 在启动器勾选「允许局域网访问」后启动，其他设备打
 
 ## 开发与验证
 
-源码运行需要 Python 3.12+；Pillow 是图片处理依赖，Node.js 只用于前端测试。
+源码运行需要 Python 3.12+；Pillow、NumPy 和 OpenCV headless 用于本地图像处理，Node.js 只用于前端测试。
 
 ```sh
 python -m pip install -r requirements.txt
 python -m unittest discover -s tests -v
-node --test tests/test_reader_model.js tests/test_performance_settings.js tests/test_reader_end.js tests/test_avatar_ui.js tests/test_user_management.js tests/test_batch_selection.js
+node --test tests/test_*.js
 ```
 
 测试使用临时图片和独立资料目录，可用 `SUMI_TEST_TEMP` 指定临时父目录。安装包构建见 [Windows 文档](docs/windows.md#从源码构建安装包)，发布流程见 [Docker 文档](docs/docker-release.md#发布者配置-github-actions)。

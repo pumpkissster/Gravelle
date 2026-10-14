@@ -91,12 +91,16 @@ target=Path(sys.argv[1])/'licenses'
 target.mkdir(exist_ok=True)
 python_license=Path(sys.base_prefix)/'LICENSE.txt'
 if python_license.exists(): shutil.copyfile(python_license,target/'Python-LICENSE.txt')
-for name in ('Pillow','PyInstaller'):
+for name in ('Pillow','PyInstaller','numpy','opencv-python-headless'):
     dist=importlib.metadata.distribution(name)
     for entry in dist.files or []:
-        if any(word in entry.name.lower() for word in ('license','copying')) and entry.suffix.lower() in ('.txt','.md',''):
+        if any(word in entry.name.lower() for word in ('license','copying','notice')) and entry.suffix.lower() in ('.txt','.md','.rst',''):
             source=Path(dist.locate_file(entry))
-            if source.is_file(): shutil.copyfile(source,target/(name+'-'+entry.name))
+            relative=Path(entry)
+            if source.is_file() and not relative.is_absolute() and '..' not in relative.parts:
+                destination=target/name/relative
+                destination.parent.mkdir(parents=True,exist_ok=True)
+                shutil.copyfile(source,destination)
 '@
     & $Python -c $licenseCode $bundleDirectory
     if ($LASTEXITCODE -ne 0) { throw 'Unable to collect license notices.' }

@@ -1059,6 +1059,91 @@ class ReadingPreferenceTests(unittest.TestCase):
         self.route = '/api/books/' + self.book['id']
         self.library_route = '/api/libraries/' + self.library['id']
 
+    def test_vertical_library_default_creates_and_persists_across_mode_changes(self):
+        library = self.app.create_library(name='纵向单页', media_type='photo', reading_mode='single',
+                                          reading_direction='ttb')
+        route = '/api/libraries/' + library['id']
+        for mode, effective in (('single', 'ttb'), ('double', 'ltr'), ('webtoon', 'ttb'), ('single', 'ttb')):
+            with self.subTest(mode=mode):
+                status, result, _ = self.app.request(route, {'reading_mode': mode})
+                self.assertEqual(status, 200, result)
+                self.assertEqual(result['library']['reading_direction'], 'ttb')
+                books = self.app.books(library['id'])['books']
+                self.assertTrue(books)
+                self.assertTrue(all((book['reading_mode'], book['reading_direction']) == (mode, effective) for book in books))
+                self.assertTrue(all(book['reading_direction_stored'] == 'ttb' for book in books))
+                self.assertTrue(all(book['reading_direction_override'] is None for book in books))
+        self.app.stop()
+        self.app.start()
+        self.assertTrue(all(book['reading_direction'] == 'ttb' for book in self.app.books(library['id'])['books']))
+
+    def test_vertical_book_override_survives_double_fallback_and_returns_to_inheritance(self):
+        for index, (mode, effective) in enumerate((('single', 'ttb'), ('double', 'ltr'), ('webtoon', 'ttb'), ('single', 'ttb'))):
+            with self.subTest(mode=mode):
+                body = {'reading_mode': mode}
+                if index == 0:
+                    body['reading_direction'] = 'ttb'
+                status, result, _ = self.app.request(self.route + '/metadata', body)
+                self.assertEqual(status, 200, result)
+                book = result['book']
+                self.assertEqual((book['reading_mode'], book['reading_direction']), (mode, effective))
+                self.assertEqual(book['reading_direction_stored'], 'ttb')
+                self.assertEqual(book['reading_direction_override'], 'ttb')
+        self.app.stop()
+        self.app.start()
+        self.assertEqual(self.app.request(self.route)[1]['reading_direction'], 'ttb')
+        self.assertEqual(self.app.request(self.library_route, {'reading_direction': 'rtl'})[0], 200)
+        status, result, _ = self.app.request(self.route + '/metadata', {'reading_mode': None, 'reading_direction': None})
+        self.assertEqual(status, 200, result)
+        self.assertEqual((result['book']['reading_mode'], result['book']['reading_direction']), ('single', 'rtl'))
+        self.assertEqual(result['book']['reading_direction_stored'], 'rtl')
+        self.assertIsNone(result['book']['reading_direction_override'])
+
+    def test_vertical_personal_preference_has_priority_without_rewriting_shared_metadata(self):
+        self.assertEqual(self.app.request(self.library_route, {'reading_direction': 'ttb'})[0], 200)
+        self.assertEqual(self.app.request(self.route + '/metadata', {'reading_direction': 'rtl'})[0], 200)
+        preferences = self.route + '/reading-preferences'
+        status, result, _ = self.app.request(preferences, {'reading_mode': 'single', 'reading_direction': 'ttb'})
+        self.assertEqual(status, 200, result)
+        self.assertEqual(result['book']['reading_direction'], 'ttb')
+        self.assertEqual(result['book']['reading_direction_stored'], 'ttb')
+        self.assertEqual(result['book']['reading_direction_override'], 'rtl')
+        for mode, effective in (('double', 'ltr'), ('webtoon', 'ttb'), ('single', 'ttb')):
+            status, result, _ = self.app.request(preferences, {'reading_mode': mode})
+            self.assertEqual(status, 200, result)
+            self.assertEqual(result['book']['reading_direction'], effective)
+            self.assertEqual(result['book']['reading_direction_stored'], 'ttb')
+            self.assertEqual(result['book']['reading_preferences']['reading_direction'], 'ttb')
+        self.app.stop()
+        self.app.start()
+        self.assertEqual(self.app.request(self.route)[1]['reading_direction'], 'ttb')
+        status, result, _ = self.app.request(preferences, {'reading_mode': None, 'reading_direction': None})
+        self.assertEqual(status, 200, result)
+        self.assertEqual(result['book']['reading_direction'], 'rtl')
+        self.assertEqual(result['book']['reading_direction_stored'], 'rtl')
+        self.assertEqual(self.app.request(self.route + '/metadata', {'reading_direction': None})[1]['book']['reading_direction'], 'ttb')
+        # Continuous scrolling always proceeds downwards, preserving the raw
+        # horizontal preference for a later switch back to paged reading.
+        book = self.app.request(preferences, {'reading_mode': 'webtoon', 'reading_direction': 'rtl'})[1]['book']
+        self.assertEqual(book['reading_direction'], 'ttb')
+        self.assertEqual(book['reading_direction_stored'], 'rtl')
+        self.assertEqual(self.app.request(preferences, {'reading_mode': 'single'})[1]['book']['reading_direction'], 'rtl')
+
+    def test_invalid_vertical_direction_values_do_not_partially_save_any_layer(self):
+        for invalid in ('up', 'btt', 'vertical', '', 0, True, [], {}):
+            with self.subTest(invalid=invalid):
+                status, _, _ = self.app.request(self.library_route, {'name': '不能保存', 'reading_direction': invalid})
+                self.assertEqual(status, 400)
+                library = next(item for item in self.app.request('/api/libraries')[1]['libraries'] if item['id'] == self.library['id'])
+                self.assertEqual((library['name'], library['reading_direction']), (self.library['name'], 'ltr'))
+                self.assertEqual(self.app.request(self.route + '/metadata', {'title': '不能保存', 'reading_direction': invalid})[0], 400)
+                self.assertEqual(self.app.request(self.route + '/reading-preferences', {'reading_mode': 'double', 'reading_direction': invalid})[0], 400)
+                book = self.app.request(self.route)[1]
+                self.assertEqual(book['title'], self.book['title'])
+                self.assertEqual(book['reading_direction'], 'ltr')
+                self.assertIsNone(book['reading_direction_override'])
+                self.assertEqual(book['reading_preferences'], {'reading_mode': None, 'reading_direction': None})
+
     def test_book_mode_and_direction_override_inherit_and_persist_independently(self):
         self.assertIsNone(self.book['reading_mode_override'])
         self.assertIsNone(self.book['reading_direction_override'])

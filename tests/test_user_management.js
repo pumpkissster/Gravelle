@@ -79,7 +79,16 @@ test('reader direction honors the current user preference and effective book dir
   assert.equal(Users.readingDirection({ reading_preferences: { reading_direction: 'rtl' }, reading_direction: 'ltr' }, { reading_direction: 'ltr' }), 'rtl');
   assert.equal(Users.readingDirection({ reading_preferences: { reading_direction: null }, reading_direction: 'rtl' }, { reading_direction: 'ltr' }), 'rtl');
   assert.equal(Users.readingDirection({ reading_direction: 'ltr' }, { reading_direction: 'rtl' }), 'ltr');
-  assert.equal(Users.readingDirection({ reading_direction: 'ttb' }, { reading_direction: 'rtl' }), 'rtl');
+  assert.equal(Users.readingDirection({ reading_direction: 'ttb' }, { reading_direction: 'rtl' }), 'ttb');
+});
+
+test('reader recovers the stored direction when a hidden library is absent from the catalog', () => {
+  const book = { reading_mode: 'double', reading_direction: 'ltr', reading_direction_stored: 'ttb', reading_direction_override: null };
+  assert.equal(Users.readingDirection(book, undefined), 'ttb');
+  assert.equal(Users.readingDirection({ ...book, reading_preferences: { reading_direction: 'rtl' } }), 'rtl');
+  assert.equal(Users.readingDirection({ reading_direction_override: 'ttb', reading_direction: 'ltr' }, { reading_direction: 'rtl' }), 'ttb');
+  assert.equal(Users.readingDirection({ reading_direction_override: null, reading_direction: 'ltr' }, { reading_direction: 'ttb' }), 'ttb');
+  assert.equal(Users.readingDirection({ reading_mode: 'webtoon', reading_direction: 'ttb' }, { reading_direction: 'rtl' }), 'rtl');
 });
 
 test('personal profile validation ignores empty password fields and returns focusable fields for hidden-tab errors', () => {

@@ -32,7 +32,7 @@ RUN groupadd --gid 1000 sumi \
 COPY requirements.txt ./requirements.txt
 RUN python -m pip install --no-cache-dir -r requirements.txt
 
-COPY server.py accounts.py password_reset.py ./
+COPY server.py accounts.py password_reset.py transcoding.py image_search.py image_search_features.py task_scheduler.py ./
 COPY release.json LICENSE ./
 COPY static ./static
 

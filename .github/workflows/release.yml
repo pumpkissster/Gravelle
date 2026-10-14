@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       release_version:
-        description: "版本号，必须与 server.py 的 VERSION 一致，例如 0.8.4"
+        description: "版本号，必须与 server.py 的 VERSION 一致，例如 0.8.5"
         required: true
         type: string
       publish:
@@ -18,7 +18,7 @@ on:
         required: true
         type: boolean
       source_tag:
-        description: "补发已有版本的 Docker 镜像时填写原标签（如 v0.8.4）；初次发布留空"
+        description: "补发已有版本的 Docker 镜像时填写原标签（如 v0.8.5）；初次发布留空"
         default: ""
         required: false
         type: string
@@ -71,6 +71,8 @@ jobs:
           source_sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
           if os.environ['PUBLISH'] == 'true':
               assert os.environ['GITHUB_REF'] == 'refs/heads/' + os.environ['DEFAULT_BRANCH'], 'Publish from the default branch only'
+              internal_plan = subprocess.check_output(['git', 'ls-files', '--', 'docs/next-version.md'], text=True).strip()
+              assert not internal_plan, 'Internal development plans must not be tracked in the published source commit'
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
               output.write(f'version={version}\ntag=v{version}\nsource_sha={source_sha}\n')
           PY
@@ -202,6 +204,7 @@ jobs:
           assert health == {'status': 'ok', 'version': os.environ['RELEASE_VERSION']}, health
           PY
           docker exec "$container" python -c "from pathlib import Path; p=Path('/data/ci-check'); p.write_text('ok'); p.unlink(); assert Path('/library').is_dir()"
+          docker exec -i "$container" python - < packaging/smoke_image_workers.py
       - name: Export validation image for testing without Docker Hub
         uses: docker/build-push-action@v7
         with:
@@ -324,7 +327,7 @@ jobs:
             fi
           else
             gh release create "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" --target "$SOURCE_SHA" \
-              --draft --title "Gravelle $RELEASE_VERSION" --notes-file dist/release-notes.md --generate-notes
+              --draft --title "Gravelle $RELEASE_VERSION" --notes-file dist/release-notes.md
           fi
           if [ "$upload_assets" = true ]; then
             gh release upload "$RELEASE_TAG" dist/release/* --repo "$RELEASE_REPOSITORY" --clobber

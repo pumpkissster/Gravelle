@@ -364,6 +364,7 @@ class LauncherResetTests(unittest.TestCase):
 
 class ResetDialogGeometryTests(unittest.TestCase):
     def test_fields_footer_actions_and_close_are_reachable_on_small_and_4k_displays(self):
+        import gc
         try:
             import tkinter as tk
         except ImportError:
@@ -418,6 +419,11 @@ class ResetDialogGeometryTests(unittest.TestCase):
                     for callback in root.tk.call("after", "info"):
                         root.after_cancel(callback)
                     root.destroy()
+                    # Release the synthetic Tk graph on its creating thread,
+                    # before later server tests allocate in background threads.
+                    entries = actions = []
+                    window = dialog = widget = root = None
+                    gc.collect()
 
 
 if __name__ == "__main__":

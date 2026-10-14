@@ -27,8 +27,16 @@
     return { visible_library_ids: [...new Set((selected || []).map(String))].filter(id => knownIds.has(id)).map(id => knownIds.get(id)) };
   }
   function readingDirection(book, library) {
-    const value = book?.reading_preferences?.reading_direction || book?.reading_direction;
-    return value === 'rtl' ? 'rtl' : value === 'ltr' ? 'ltr' : library?.reading_direction === 'rtl' ? 'rtl' : 'ltr';
+    const valid = value => ['ltr', 'rtl', 'ttb'].includes(value);
+    const preference = book?.reading_preferences?.reading_direction;
+    if (valid(preference)) return preference;
+    if (valid(book?.reading_direction_stored)) return book.reading_direction_stored;
+    const override = book?.reading_direction_override;
+    if (valid(override)) return override;
+    // Complete API records expose the override separately. Use the underlying
+    // default so double-page's temporary LTR fallback does not lose stored TTB.
+    if ((Object.hasOwn(book || {}, 'reading_direction_override') || book?.reading_mode === 'webtoon') && valid(library?.reading_direction)) return library.reading_direction;
+    return valid(book?.reading_direction) ? book.reading_direction : valid(library?.reading_direction) ? library.reading_direction : 'ltr';
   }
   function profilePayload(values, avatar = {}) {
     const fail = (message, field) => { const error = new Error(message); error.field = field; throw error; };

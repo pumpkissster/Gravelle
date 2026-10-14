@@ -3,6 +3,10 @@
 !server.py
 !accounts.py
 !password_reset.py
+!transcoding.py
+!image_search.py
+!image_search_features.py
+!task_scheduler.py
 !requirements.txt
 !release.json
 !LICENSE

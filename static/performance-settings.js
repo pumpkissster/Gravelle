@@ -1,4 +1,4 @@
-/* Device-specific loading and pagination preferences. No build step required. */
+/* Device preferences and administrator-controlled background task limits. */
 ((root, factory) => {
   const api = factory();
   if (typeof module === 'object' && module.exports) module.exports = api;
@@ -72,6 +72,88 @@
   }
   let settings = { ...defaults };
   let accountStorageKey = null;
+  let currentUser = null;
+  let serverAPI = null;
+  let serverEpoch = 0;
+  let serverState = { value: 1, loaded: false, loading: false, saving: false, error: '', message: '', request: null };
+  let renderedPanel = null;
+  let serverControls = null;
+  function resetServer() {
+    serverEpoch += 1;
+    serverState = { value: 1, loaded: false, loading: false, saving: false, error: '', message: '', request: null };
+    renderedPanel?.replaceChildren();
+    renderedPanel = null; serverControls = null;
+  }
+  function configureServer(options) {
+    resetServer();
+    serverAPI = options || null;
+  }
+  function isServerAdmin() {
+    return currentUser?.role === 'admin' && typeof serverAPI?.api === 'function' && typeof serverAPI?.post === 'function' && (!serverAPI.isAdmin || serverAPI.isAdmin());
+  }
+  function serverValue(payload) {
+    if (!Number.isInteger(payload?.taskConcurrency) || payload.taskConcurrency < 1 || payload.taskConcurrency > 8 || payload?.maxTaskConcurrency !== 8) throw new Error('服务端返回的任务设置无效。');
+    return payload.taskConcurrency;
+  }
+  function renderServerState() {
+    if (!serverControls) return;
+    const allowed = isServerAdmin();
+    serverControls.group.hidden = !allowed;
+    serverControls.input.disabled = !allowed || !serverState.loaded || serverState.loading || serverState.saving;
+    serverControls.save.disabled = serverControls.input.disabled;
+    serverControls.save.textContent = serverState.saving ? '保存中…' : '保存';
+    serverControls.status.textContent = serverState.loading ? '正在读取…' : serverState.error || serverState.message;
+    serverControls.status.className = serverState.error ? 'performance-server-status form-error' : 'performance-server-status';
+    serverControls.status.hidden = !serverControls.status.textContent;
+    serverControls.retry.hidden = !allowed || serverState.loaded || !serverState.error;
+    serverControls.retry.disabled = serverState.loading || serverState.saving;
+  }
+  function loadServer() {
+    if (!isServerAdmin() || serverState.loaded) return Promise.resolve();
+    if (serverState.request) return serverState.request;
+    const epoch = serverEpoch;
+    serverState.loading = true; serverState.error = ''; serverState.message = ''; renderServerState();
+    const read = serverAPI.api;
+    const request = Promise.resolve().then(() => {
+      if (epoch !== serverEpoch || !isServerAdmin()) return;
+      return read('/api/performance');
+    }).then(payload => {
+      if (epoch !== serverEpoch || !isServerAdmin()) return;
+      serverState.value = serverValue(payload); serverState.loaded = true;
+      if (serverControls) serverControls.input.value = serverState.value;
+    }).catch(error => {
+      if (epoch !== serverEpoch || !isServerAdmin()) return;
+      serverState.error = '读取后台任务设置失败：' + (error.message || '请稍后重试。');
+    }).finally(() => {
+      if (epoch !== serverEpoch || !isServerAdmin()) return;
+      serverState.loading = false; serverState.request = null; renderServerState();
+    });
+    serverState.request = request;
+    return request;
+  }
+  async function saveServer(event) {
+    event.preventDefault();
+    if (!isServerAdmin() || !serverState.loaded || serverState.loading || serverState.saving) return;
+    const input = serverControls.input; const value = Number(input.value);
+    serverState.error = ''; serverState.message = '';
+    if (String(input.value).trim() === '' || !input.checkValidity() || !Number.isInteger(value) || value < 1 || value > 8) {
+      input.reportValidity(); input.value = serverState.value;
+      serverState.error = '后台任务并发数需要填写 1～8 的整数。'; renderServerState(); return;
+    }
+    const epoch = serverEpoch;
+    serverState.saving = true; renderServerState();
+    try {
+      const payload = await serverAPI.post('/api/performance', { taskConcurrency: value });
+      if (epoch !== serverEpoch || !isServerAdmin()) return;
+      serverState.value = serverValue(payload); input.value = serverState.value; serverState.message = '已保存';
+    } catch (error) {
+      if (epoch !== serverEpoch || !isServerAdmin()) return;
+      input.value = serverState.value;
+      serverState.error = '保存后台任务设置失败：' + (error.message || '请稍后重试。');
+    } finally {
+      if (epoch === serverEpoch && isServerAdmin()) { serverState.saving = false; renderServerState(); }
+    }
+  }
   const covers = createQueue(settings.coverConcurrency); const coverRecords = new Map(); let observer; let detachObserver;
   function loadCover(image, url, lazy = true) {
     const record = { started: false, start() {
@@ -103,6 +185,7 @@
     return { ...settings };
   }
   function setUser(user) {
+    currentUser = user || null; resetServer();
     accountStorageKey = user?.id !== undefined ? `gravelle-user-${encodeURIComponent(String(user.id))}-sumi-performance` : null;
     let saved = null;
     try {
@@ -120,17 +203,38 @@
   }
   function render() {
     const panel = document.getElementById('performance-settings'); if (!panel) return;
-    // A library refresh must not interrupt a number the user is still typing.
-    if (panel.contains?.(document.activeElement)) return;
+    // Refresh status without rebuilding inputs or replacing an unfinished edit.
+    if (renderedPanel === panel) { renderServerState(); if (isServerAdmin() && !serverState.error) loadServer(); return; }
     panel.replaceChildren();
+    panel.className = 'performance-settings-page';
+    renderedPanel = panel;
     const make = (tag, text, className) => { const element = document.createElement(tag); if (text) element.textContent = text; if (className) element.className = className; return element; };
-    panel.append(make('h2', '性能设置'), make('p', '按当前账号保存在此设备。', 'settings-intro'));
+    if (isServerAdmin()) {
+      const group = make('section', '', 'settings-panel performance-server-settings');
+      group.append(make('h2', '后台任务'));
+      const form = make('form', '', 'setting-row performance-row performance-task-row');
+      const label = make('label'); label.htmlFor = 'performance-taskConcurrency'; label.append(make('strong', '后台任务并发数'), make('small', '图片优化与图片索引共用；默认 1，其他任务排队'));
+      const actions = make('div', '', 'performance-task-actions');
+      const taskInput = make('input'); taskInput.type = 'number'; taskInput.id = 'performance-taskConcurrency'; taskInput.min = 1; taskInput.max = 8; taskInput.step = 1; taskInput.required = true; taskInput.value = serverState.value; taskInput.setAttribute('aria-label', '后台任务并发数');
+      const save = make('button', '保存', 'button button-primary'); save.type = 'submit';
+      const formEpoch = serverEpoch;
+      actions.append(taskInput, save); form.append(label, actions); form.addEventListener('submit', event => {
+        if (formEpoch !== serverEpoch) { event.preventDefault(); return; }
+        return saveServer(event);
+      });
+      const feedback = make('div', '', 'performance-server-feedback');
+      const status = make('p', '', 'performance-server-status'); status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite'); status.hidden = true;
+      const retry = make('button', '重试', 'button button-secondary'); retry.type = 'button'; retry.hidden = true; retry.addEventListener('click', loadServer);
+      feedback.append(status, retry); group.append(form, feedback); panel.append(group);
+      serverControls = { group, input: taskInput, save, status, retry };
+    }
+    const device = make('section', '', 'settings-panel performance-device-settings');
+    device.append(make('h2', '加载与列表'), make('p', '按当前账号保存在此设备。', 'settings-intro'));
     const rows = [
       ['webtoonStep', '条漫加载步进', '预加载当前页前后各几页', 1, 20],
       ['coverConcurrency', '封面加载并发数', '同时加载的列表封面数量', 1, 12],
       ['imageCacheLimit', '图片缓存数量限制', '0 表示不限制；正在显示的页始终保留', 0, 999],
-      ['bookPageSize', '作品页面容量', '0 使用瀑布流滚动加载；大于 0 按指定数量分页', 0, 999],
-      ['chapterPageSize', '章节页面容量', '0 自动适应章节目录高度', 0, 999]
+      ['bookPageSize', '作品页面容量', '0 使用瀑布流滚动加载；大于 0 按指定数量分页', 0, 999]
     ];
     rows.forEach(([key, title, hint, min, max]) => {
       const row = make('label', '', 'setting-row performance-row'); const label = make('span'); label.append(make('strong', title), make('small', hint));
@@ -144,9 +248,11 @@
       input.addEventListener('input', saveValidValue);
       input.addEventListener('change', () => { if (!saveValidValue()) { input.reportValidity(); input.value = settings[key]; } });
       input.addEventListener('blur', () => { if (!saveValidValue()) input.value = settings[key]; });
-      row.append(label, input); panel.append(row);
+      row.append(label, input); device.append(row);
     });
-    panel.append(make('p', '图片缓存限制控制阅读器保留的原图数量，不清理浏览器自身的网络缓存。', 'performance-note'));
+    device.append(make('p', '图片缓存限制控制阅读器保留的原图数量，不清理浏览器自身的网络缓存。', 'performance-note'));
+    panel.append(device);
+    renderServerState(); if (isServerAdmin()) loadServer();
   }
-  return { defaults, normalize, paginate, catalogWindow, createQueue, createCache, get: () => ({ ...settings }), update, setUser, loadCover, render };
+  return { defaults, normalize, paginate, catalogWindow, createQueue, createCache, get: () => ({ ...settings }), update, setUser, configureServer, loadCover, render };
 });

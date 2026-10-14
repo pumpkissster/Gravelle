@@ -33,6 +33,7 @@ import socket
 import sqlite3
 import stat
 import struct
+import sys
 import threading
 import time
 import unicodedata
@@ -44,8 +45,11 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 from accounts import (PERMISSION_KEYS, PERMISSION_OPTIONS, check_password, hash_password,
                       migrate_accounts, prepare_account_migration, validate_password)
 from password_reset import DataDirectoryLock
+from transcoding import TranscodingManager
+from image_search import ImageSearchManager, MAX_QUERY_BYTES
+from task_scheduler import SharedTaskScheduler
 
-VERSION = "0.8.4"
+VERSION = "0.8.5"
 MEDIA_TYPES = {"manga_jp", "manga_kr", "comic_us", "photo"}
 IMAGE_TYPES = {
     ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
@@ -82,6 +86,8 @@ STATIC_FILES = {
     "/user-management.js": "user-management.js",
     "/batch-selection.js": "batch-selection.js",
     "/page-router.js": "page-router.js",
+    "/transcoding-ui.js": "transcoding-ui.js",
+    "/image-search-ui.js": "image-search-ui.js",
     "/fonts/LibreCaslonText.ttf": "fonts/LibreCaslonText.ttf",
 }
 LOG = logging.getLogger("sumi")
@@ -476,6 +482,9 @@ class Library:
         self._initialize_database()
         migrate_accounts(self.database)
         self.signing_key = self._load_secret()
+        self.task_scheduler = SharedTaskScheduler(self, ReaderError)
+        self.transcoding = TranscodingManager(self, ReaderError)
+        self.image_search = ImageSearchManager(self, ReaderError)
 
     def connect(self):
         connection = sqlite3.connect(self.database, timeout=20)
@@ -720,6 +729,8 @@ class Library:
         with self.state_lock, closing(self.connect()) as connection:
             rows = connection.execute("""SELECT l.*, author.name AS default_author_name, COUNT(b.id) AS book_count
                 FROM media_libraries l LEFT JOIN books b ON b.library_id=l.id AND b.active=1
+                AND (NOT EXISTS(SELECT 1 FROM tc_settings WHERE enabled=1)
+                     OR NOT EXISTS(SELECT 1 FROM tc_books tc WHERE tc.book_id=b.id AND tc.published=0))
                 LEFT JOIN models author ON author.id=l.default_author_id
                 GROUP BY l.id ORDER BY l.created_at,l.id""").fetchall()
             libraries = [self._library_export(row, row["id"] == self.current_scan or
@@ -816,8 +827,8 @@ class Library:
                 raise ReaderError("写真库类型需要是 manga_jp、manga_kr、comic_us 或 photo。")
             if mode not in ("single", "double", "webtoon"):
                 raise ReaderError("阅读方式需要是 single、double 或 webtoon。")
-            if direction not in ("ltr", "rtl"):
-                raise ReaderError("阅读方向需要是 ltr 或 rtl。")
+            if direction not in ("ltr", "rtl", "ttb"):
+                raise ReaderError("阅读方向需要是 ltr、rtl 或 ttb。")
             hide_date_prefix = body.get("hide_date_prefix", bool(previous.get("hide_date_prefix", 0)))
             apply_reading_defaults = body.get("apply_reading_defaults", False)
             if type(hide_date_prefix) is not bool:
@@ -898,7 +909,8 @@ class Library:
         for offset in range(0, len(ids), 500):
             batch = ids[offset:offset + 500]
             marks = ",".join("?" for _ in batch)
-            for table in ("progress", "favorites", "bookmarks", "reading_preferences", "book_models", "book_metadata"):
+            for table in ("progress", "favorites", "bookmarks", "reading_preferences", "book_models", "book_metadata",
+                          "tc_outputs", "tc_pages", "tc_books"):
                 connection.execute(f"DELETE FROM {table} WHERE book_id IN ({marks})", batch)
 
     def batch_libraries(self, body):
@@ -928,6 +940,8 @@ class Library:
             self.pending_scans.difference_update(ids)
             for book_id in book_ids:
                 self._prune_covers(book_id, set())
+            self.transcoding.remove_books(book_ids)
+            self.image_search.reconcile()
         return {"removed": ids}
 
     def batch_books(self, body):
@@ -972,6 +986,8 @@ class Library:
             connection.commit()
             for book_id in ids:
                 self._prune_covers(book_id, set())
+            self.transcoding.remove_books(ids)
+            self.image_search.reconcile()
         return {"removed": ids}
 
     @staticmethod
@@ -1067,7 +1083,7 @@ class Library:
     def require_permission(self, permission, connection=None):
         self.require_admin(connection)
 
-    def _access_sql(self, connection, alias='b', visible=False):
+    def _access_sql(self, connection, alias='b', visible=False, management=False):
         actor = self._actor(connection)
         if actor['role'] == 'admin':
             clause, arguments = '1=1', []
@@ -1077,6 +1093,11 @@ class Library:
         if visible:
             clause += f' AND {alias}.library_id NOT IN (SELECT library_id FROM user_hidden_libraries WHERE user_id=?)'
             arguments.append(actor['id'])
+        # Import eligibility is shared business state, independent of account
+        # authorization and each person's hidden-library preference.
+        if not management:
+            clause += (f" AND (NOT EXISTS(SELECT 1 FROM tc_settings WHERE enabled=1)"
+                       f" OR NOT EXISTS(SELECT 1 FROM tc_books tc WHERE tc.book_id={alias}.id AND tc.published=0))")
         return clause, arguments
 
     def _model_access(self, connection, model_id, *, editing=False):
@@ -1412,6 +1433,8 @@ class Library:
             return True
 
     def start(self):
+        self.transcoding.start()
+        self.image_search.start()
         self.start_scan()
         self.periodic_thread = threading.Thread(target=self._periodic, name="scan-timer", daemon=True)
         self.periodic_thread.start()
@@ -1424,6 +1447,9 @@ class Library:
 
     def close(self):
         self.stop_event.set()
+        self.task_scheduler.close()
+        self.image_search.close()
+        self.transcoding.close()
         with self.request_condition:
             self.request_stopping = True
             deadline = time.monotonic() + 30
@@ -1431,7 +1457,9 @@ class Library:
                 self.request_condition.wait(max(0.01, deadline - time.monotonic()))
         if self.scan_thread:
             self.scan_thread.join(timeout=30)
-        if not self.active_requests and (not self.scan_thread or not self.scan_thread.is_alive()):
+        if (not self.active_requests and (not self.scan_thread or not self.scan_thread.is_alive())
+                and not self.transcoding.is_alive()
+                and (not self.image_search.thread or not self.image_search.thread.is_alive())):
             self.service_lock.release()
 
     def _scan(self):
@@ -1566,6 +1594,18 @@ class Library:
                                                 max(entry[1].st_mtime for entry in image_files), signature))
             if self.stop_event.is_set():
                 return
+            # Lightweight page header inspection happens outside the SQLite
+            # write transaction. Full decoding is exclusively a worker task.
+            inspected = {}
+            for book in found:
+                try:
+                    inspected[book["id"]] = self.transcoding.inspect_book(book)
+                except (OSError, ValueError, RuntimeError, ReaderError, zipfile.BadZipFile) as error:
+                    inspected[book["id"]] = [dict(
+                        page_key=key, page_index=index, source_version="unavailable",
+                        size=0, width=0, height=0,
+                        inspect_error="无法读取源图片，请检查目录权限并重新扫描。")
+                        for index, key in enumerate(json.loads(book["pages"]))]
             scanned_at = time.time()
             with self.state_lock, closing(self.connect()) as connection, connection:
                 if connection.execute("SELECT 1 FROM media_libraries WHERE id=?", (library_id,)).fetchone() is None:
@@ -1599,11 +1639,14 @@ class Library:
                         source_root=excluded.source_root,scan_revision=excluded.scan_revision,active=1
                     """, book)
                     self._apply_photo_defaults(connection, config, Path(book["source_root"]), book)
+                    if book["id"] in inspected:
+                        self.transcoding.apply_book(connection, book, inspected[book["id"]])
                     connection.execute("UPDATE progress SET page=MIN(page, ?) WHERE book_id=?",
                                        (book["page_count"] - 1, book["id"]))
                 connection.execute("UPDATE media_libraries SET last_scan=?,errors=? WHERE id=?",
                     (scanned_at, json.dumps(errors, ensure_ascii=False), library_id))
             LOG.info("Media library %s scan finished: %d books, %d warnings", config["name"], len(found), len(errors))
+            self.image_search.reconcile()
         except Exception as error:
             LOG.exception("Media library %s scan failed", config["name"])
             message = str(error) if isinstance(error, ReaderError) else "扫描失败，请检查写真库挂载、目录权限和存储空间。"
@@ -1706,7 +1749,7 @@ class Library:
         book = {key: row[key] for key in ("id", "title", "series", "path", "format",
                                           "page_count", "size", "modified", "added_at",
                                           "library_id", "library_name", "author",
-                                          "media_type", "reading_mode", "reading_direction",
+                                          "media_type", "library_reading_mode", "reading_mode", "reading_direction",
                                           "release_date", "reading_direction_override",
                                           "reading_mode_override", "source_root", "cover_source")}
         book["title"] = row["title_override"] or row["title"]
@@ -1718,9 +1761,13 @@ class Library:
                 book["title"] = row["title"][len(prefix):].lstrip() or row["title"]
         book["cover_page"] = min(max(row["cover_page"], 0), max(row["page_count"] - 1, 0))
         book["cover_version"] = Library._cover_version(row)
+        # Keep the resolved preference available when its direction is not
+        # supported by the current layout. A hidden but authorized library
+        # may not be present in the client's library list to resolve it again.
+        book["reading_direction_stored"] = row["reading_direction"]
         if book["reading_mode"] == "webtoon":
             book["reading_direction"] = "ttb"
-        elif book["reading_direction"] == "ttb":
+        elif book["reading_mode"] == "double" and book["reading_direction"] == "ttb":
             book["reading_direction"] = "ltr"
         book["reading_preferences"] = {"reading_mode": row["personal_reading_mode"],
                                        "reading_direction": row["personal_reading_direction"]}
@@ -1730,14 +1777,15 @@ class Library:
             "page": row["page"], "completed": bool(row["completed"]), "updated_at": row["updated_at"]}
         return book
 
-    def _select(self, connection, book_id=None, library_id=None, visible=False):
+    def _select(self, connection, book_id=None, library_id=None, visible=False, management=False):
         actor = self._actor(connection)
-        access, arguments = self._access_sql(connection, visible=visible)
+        access, arguments = self._access_sql(connection, visible=visible, management=management)
         sql = '''SELECT b.*, p.page, p.completed, p.updated_at, COALESCE(f.favorite,0) AS favorite,
             l.name AS library_name, l.path AS library_path,
             CASE WHEN l.media_type='photo' THEN COALESCE(library_author.name,folder_model.name,l.default_author)
                  ELSE COALESCE(library_author.name,l.default_author) END AS author,
-            l.media_type, COALESCE(rp.reading_mode,m.reading_mode_override,l.reading_mode) AS reading_mode,
+            l.media_type, l.reading_mode AS library_reading_mode,
+            COALESCE(rp.reading_mode,m.reading_mode_override,l.reading_mode) AS reading_mode,
             COALESCE(rp.reading_direction,m.reading_direction_override,l.reading_direction) AS reading_direction,
             rp.reading_mode AS personal_reading_mode, rp.reading_direction AS personal_reading_direction,
             m.title AS title_override, COALESCE(m.release_date,'') AS release_date,
@@ -1771,17 +1819,19 @@ class Library:
             direction = body.get('reading_direction', book['personal_reading_direction'])
             if mode is not None and (not isinstance(mode, str) or mode not in ('single','double','webtoon')):
                 raise ReaderError('阅读方式需要是 single、double、webtoon 或 null。')
-            if direction is not None and (not isinstance(direction, str) or direction not in ('ltr','rtl')):
-                raise ReaderError('阅读方向需要是 ltr、rtl 或 null。')
+            if direction is not None and (not isinstance(direction, str) or direction not in ('ltr','rtl','ttb')):
+                raise ReaderError('阅读方向需要是 ltr、rtl、ttb 或 null。')
             connection.execute('''INSERT INTO reading_preferences(user_id,book_id,reading_mode,reading_direction)
                 VALUES(?,?,?,?) ON CONFLICT(user_id,book_id) DO UPDATE SET
                 reading_mode=excluded.reading_mode,reading_direction=excluded.reading_direction''',
                 (self._actor(connection)['id'], book_id, mode, direction))
         return {'book': self.book(book_id)}
 
-    def book(self, book_id, internal=False):
+    def book(self, book_id, internal=False, management=False):
         with closing(self.connect()) as connection:
-            row = self._select(connection, book_id)
+            if management:
+                self.require_admin(connection)
+            row = self._select(connection, book_id, management=management)
             if row is None:
                 raise ReaderError("作品不存在，可能已被移动，请重新扫描写真库。", 404)
             if internal:
@@ -2078,8 +2128,8 @@ class Library:
                 raise ReaderError("请先上传封面图片。")
             if "reading_direction" in body:
                 value = body["reading_direction"]
-                if value not in (None, "ltr", "rtl"):
-                    raise ReaderError("阅读方向需要是 ltr、rtl，或 null 跟随写真库。")
+                if value not in (None, "ltr", "rtl", "ttb"):
+                    raise ReaderError("阅读方向需要是 ltr、rtl、ttb，或 null 跟随写真库。")
                 updates["reading_direction_override"] = value
             if "reading_mode" in body:
                 value = body["reading_mode"]
@@ -2340,13 +2390,20 @@ class Library:
                 (self._actor(connection)['id'],book_id,int(favorite)))
         return {'favorite':favorite}
 
-    def image(self, book_id, index):
-        book = self.book(book_id, internal=True)
+    def image(self, book_id, index, management=False):
+        book = self.book(book_id, internal=True, management=management)
         if index is None:
             index = min(max(book["cover_page"], 0), max(0, book["page_count"] - 1))
         if index < 0 or index >= book["page_count"]:
             raise ReaderError("图片页码不存在。", 404)
         page = json.loads(book["pages"])[index]
+        if not management:
+            try:
+                optimized = self.transcoding.optimized_image(book, page)
+            except (OSError, KeyError, zipfile.BadZipFile, RuntimeError, EOFError, NotImplementedError) as error:
+                raise ReaderError("无法读取这一页的来源或优化图片，请管理员重新扫描和处理。", 422) from error
+            if optimized is not None:
+                return optimized
         try:
             root = self._directory_path(book["source_root"])
             if book["format"] == "folder":
@@ -2546,6 +2603,9 @@ class ReaderServer(ThreadingHTTPServer):
 
     def __init__(self, address, library):
         self.library = library
+        self.image_search_slots = threading.BoundedSemaphore(2)
+        self.image_search_rate_lock = threading.Lock()
+        self.image_search_attempts = {}
         self.static = Path(__file__).resolve().parent / "static"
         repository, configuration_error = release_configuration()
         self.updates = UpdateChecker(VERSION, repository, configuration_error)
@@ -2630,6 +2690,82 @@ class ReaderHandler(BaseHTTPRequestHandler):
             raise ReaderError("请求内容需要是 JSON 对象。")
         return payload
 
+    @contextmanager
+    def image_search_upload(self):
+        """Bound binary uploads separately from small JSON control requests."""
+        if self.headers.get_content_type() not in ("image/jpeg", "image/png", "image/webp"):
+            raise ReaderError("请选择 JPG、PNG 或 WebP 图片。", 415)
+        if self.headers.get("Transfer-Encoding") or self.headers.get("Content-Encoding"):
+            raise ReaderError("图片搜索不支持分块或压缩请求。")
+        lengths = self.headers.get_all("Content-Length", [])
+        if not lengths:
+            raise ReaderError("请求缺少 Content-Length。", 411)
+        if len(lengths) != 1 or not re.fullmatch(r"[0-9]{1,10}", lengths[0]):
+            raise ReaderError("请求长度无效。")
+        length = int(lengths[0])
+        if not length:
+            raise ReaderError("请选择一张图片。")
+        if length > MAX_QUERY_BYTES:
+            raise ReaderError("搜索图片不能超过 64 MiB。", 413)
+        if not self.library.image_search.snapshot().get("enabled"):
+            raise ReaderError("图片搜索尚未启用，请联系管理员。", 409)
+        if not self.server.image_search_slots.acquire(blocking=False):
+            raise ReaderError("图片搜索正在处理其他请求，请稍后重试。", 429)
+        try:
+            actor = self.library._actor()
+            now = time.monotonic()
+            key = (actor["id"], self.client_address[0])
+            with self.server.image_search_rate_lock:
+                attempts = self.server.image_search_attempts
+                for other in list(attempts):
+                    if not attempts[other] or now - attempts[other][-1] >= 60:
+                        attempts.pop(other, None)
+                history = attempts.setdefault(key, deque(maxlen=10))
+                while history and now - history[0] >= 60:
+                    history.popleft()
+                if len(history) >= 10:
+                    raise ReaderError("图片搜索请求过于频繁，请一分钟后重试。", 429)
+                history.append(now)
+            yield length
+        finally:
+            self.server.image_search_slots.release()
+
+    def query_image(self):
+        with self.image_search_upload() as length:
+            data = self.rfile.read(length)
+            if len(data) != length:
+                raise ReaderError("图片上传不完整，请重新选择。")
+            user_id = self.library._actor()["id"]
+            result = self.library.image_search.query(data, user_id)
+            # A query can outlive logout, revocation or a hidden-library change.
+            # Revalidate the session and visible catalogue before returning it.
+            with self.library.auth_lock, closing(self.library.connect()) as connection:
+                self.require_auth()
+                access, parameters = self.library._access_sql(connection, visible=True)
+                if not self.library.image_search.snapshot().get("enabled"):
+                    raise ReaderError("图片搜索已关闭。", 409)
+                matches = []
+                for item in result.get("results", [])[:30]:
+                    book_id = item["book_id"]
+                    allowed = connection.execute(
+                        f"SELECT 1 FROM books b WHERE b.id=? AND b.active=1 AND {access}",
+                        [book_id, *parameters]).fetchone()
+                    if not allowed:
+                        continue
+                    try:
+                        book = self.library.book(book_id)
+                    except ReaderError as error:
+                        if error.status == 404:
+                            continue
+                        raise
+                    if not 0 <= item["page"] < book["page_count"]:
+                        continue
+                    book = {key: value for key, value in book.items() if key not in ("path", "source_root")}
+                    matches.append({"book": book, "page": item["page"], "match": item["match"],
+                                    **({"distance": item["distance"]} if "distance" in item else {})})
+                self.respond({"results": matches, "total": len(matches),
+                              "indexing": bool(result.get("indexing"))})
+
     def check_origin(self):
         origin = self.headers.get("Origin")
         if origin is None:
@@ -2683,7 +2819,8 @@ class ReaderHandler(BaseHTTPRequestHandler):
             if self.command == "POST":
                 # An early rejection may leave unread bytes on this connection.
                 self.close_connection = True
-            headers = {"Retry-After": str(self.library.login_retry(self.client_address[0]))} if error.status == 429 else None
+            retry = 60 if urlsplit(self.path).path.startswith("/api/image-search/") else self.library.login_retry(self.client_address[0])
+            headers = {"Retry-After": str(retry)} if error.status == 429 else None
             self.respond({"error": str(error)}, error.status, headers)
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
             self.close_connection = True
@@ -2713,6 +2850,38 @@ class ReaderHandler(BaseHTTPRequestHandler):
             return
         if path.startswith("/api/"):
             self.require_auth()
+            if path == "/api/performance":
+                self.library.require_admin()
+                if request.query:
+                    raise ReaderError("性能设置不接受查询参数。")
+                self.respond(self.library.task_scheduler.snapshot())
+                return
+            if path == "/api/image-search/status":
+                if request.query:
+                    raise ReaderError("图片搜索不接受外部路径或查询参数。")
+                self.respond(self.library.image_search.snapshot())
+                return
+            search_preview = re.fullmatch(r"/api/image-search/thumbnail/([a-f0-9]{24})/([0-9]{1,6})", path)
+            if search_preview:
+                if request.query:
+                    raise ReaderError("图片搜索预览不接受外部路径或查询参数。")
+                self.respond_image(*self.library.image_search.thumbnail(search_preview[1], int(search_preview[2])))
+                return
+            if path in ("/api/transcoding", "/api/transcoding/summary"):
+                self.library.require_admin()
+                if request.query:
+                    raise ReaderError("优化管理不接受外部路径或查询参数。")
+                result = (self.library.transcoding.snapshot() if path == "/api/transcoding"
+                          else self.library.transcoding.summary())
+                self.respond(result)
+                return
+            transcode_preview = re.fullmatch(r"/api/transcoding/books/([a-f0-9]{24})/pages/([0-9]{1,6})", path)
+            if transcode_preview:
+                self.library.require_admin()
+                if request.query:
+                    raise ReaderError("优化预览不接受外部路径或查询参数。")
+                self.respond_image(*self.library.image(transcode_preview[1], int(transcode_preview[2]), management=True))
+                return
             if path == "/api/updates":
                 self.library.require_admin()
                 if request.query:
@@ -2819,9 +2988,42 @@ class ReaderHandler(BaseHTTPRequestHandler):
         path = urlsplit(self.path).path
         if path not in ("/api/register", "/api/login", "/api/logout"):
             self.require_auth()
+        if path == "/api/performance":
+            self.library.require_admin()
+            if urlsplit(self.path).query:
+                raise ReaderError("性能设置不接受查询参数。")
+            self.respond(self.library.task_scheduler.configure(self.read_body()))
+            self.library.transcoding.wake.set()
+            self.library.image_search.wake.set()
+            return
+        if path == "/api/image-search/query":
+            if urlsplit(self.path).query:
+                raise ReaderError("图片搜索不接受外部路径或查询参数。")
+            self.query_image()
+            return
+        if path in ("/api/image-search/settings", "/api/image-search/actions"):
+            self.library.require_admin()
+            if urlsplit(self.path).query:
+                raise ReaderError("图片搜索管理不接受查询参数。")
+            body = self.read_body()
+            expected = {"enabled"} if path.endswith("/settings") else {"action"}
+            if set(body) != expected:
+                raise ReaderError("图片搜索配置包含不支持的字段。")
+            self.respond(self.library.image_search.configure(body))
+            return
         upload_request = (re.fullmatch(r"/api/books/[a-f0-9]{24}/metadata", path)
                           or re.fullmatch(r"/api/models(?:/[a-f0-9]{24})?", path) or path == "/api/profile")
         body = self.read_body(MAX_COVER_BODY_BYTES if upload_request else MAX_BODY_BYTES)
+        if path in ("/api/transcoding/rules/preview", "/api/transcoding/rules", "/api/transcoding/actions", "/api/transcoding/cleanup"):
+            self.library.require_admin()
+            if urlsplit(self.path).query:
+                raise ReaderError("优化管理不接受查询参数。")
+            operation = {"/api/transcoding/rules/preview": self.library.transcoding.preview_rules,
+                         "/api/transcoding/rules": self.library.transcoding.save_rules,
+                         "/api/transcoding/actions": self.library.transcoding.actions,
+                         "/api/transcoding/cleanup": self.library.transcoding.cleanup}[path]
+            self.respond(operation(body))
+            return
         if path in ("/api/register", "/api/login"):
             # Password validation and token creation must be atomic with an
             # administrator resetting/disabling/deleting that account.
@@ -2955,4 +3157,7 @@ def main():
 
 
 if __name__ == "__main__":
+    # Private worker helpers import this module's validation functions. Share
+    # the running module so ReaderError keeps one identity under python server.py.
+    sys.modules.setdefault("server", sys.modules[__name__])
     raise SystemExit(main())

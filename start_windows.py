@@ -24,8 +24,11 @@ def main():
         return 1
     try:
         from PIL import Image  # noqa: F401
-    except ImportError:
-        print("Install the image thumbnail dependency, then run this file again:")
+        from importlib.metadata import version
+        version("numpy")
+        version("opencv-python-headless")
+    except (ImportError, ModuleNotFoundError):
+        print("Install the image processing dependencies, then run this file again:")
         print('"' + sys.executable + '" -m pip install -r "' + str(project / "requirements.txt") + '"')
         return 1
 

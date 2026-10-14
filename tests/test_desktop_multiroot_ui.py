@@ -1,5 +1,6 @@
 """Exercise the desktop root list without opening a server or user configuration."""
 from pathlib import Path
+import gc
 import sys
 import tempfile
 import unittest
@@ -25,10 +26,24 @@ class MultipleRootWindowTests(unittest.TestCase):
         save_config(self.config_path, LauncherConfig(str(self.first)))
         self.root = tk.Tk()
         self.root.withdraw()
-        self.addCleanup(self.root.destroy)
+        self.addCleanup(self._destroy_tk)
         with patch.object(LauncherWindow, "_worker"), patch.object(self.root, "after"):
             self.window = LauncherWindow(self.root, self.config_path, self.storage, Mock())
         self.root.update_idletasks()
+
+    def _destroy_tk(self):
+        # Tcl interpreters and Variables must be finalized by their creating
+        # thread. root.destroy alone leaves window/callback/image cycles alive;
+        # a later catalogue thread can otherwise trigger their cyclic GC.
+        root = self.root
+        self.window.controller.stop()
+        for callback in root.tk.call("after", "info"):
+            root.after_cancel(callback)
+        root.destroy()
+        self.window = None
+        self.root = None
+        root = None
+        gc.collect()
 
     def test_add_remove_and_save_multiple_folders(self):
         with patch("tkinter.filedialog.askdirectory", return_value=str(self.second)):

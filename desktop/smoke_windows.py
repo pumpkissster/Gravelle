@@ -11,8 +11,11 @@ from contextlib import closing
 from datetime import datetime, timezone
 import hashlib
 import http.cookiejar
+from io import BytesIO
 import json
+import math
 from pathlib import Path
+import random
 import socket
 import sqlite3
 import struct
@@ -30,16 +33,86 @@ from desktop.core import LauncherConfig, check_port
 from desktop.runtime import ServerController
 
 
-def sample_png(color=(234, 80, 152)) -> bytes:
+def sample_png(color=(234, 80, 152), size=(2, 2)) -> bytes:
     def chunk(kind, data):
         return (struct.pack("!I", len(data)) + kind + data +
                 struct.pack("!I", zlib.crc32(kind + data) & 0xffffffff))
-    # Two-by-two pink/white pixels; stdlib-only so the smoke driver does not
-    # depend on any image codecs beyond the application's own bundled Pillow.
-    pixels = b"\x00" + bytes(color) + b"\xff\xff\xff\x00\xff\xff\xff" + bytes(color)
+    # Keep the original tiny-image checks independent of extra image codecs.
+    width, height = size
+    pixels = b"".join(b"\x00" + bytes(color) * width for _ in range(height))
     return (b"\x89PNG\r\n\x1a\n" +
-            chunk(b"IHDR", struct.pack("!2I5B", 2, 2, 8, 2, 0, 0, 0)) +
+            chunk(b"IHDR", struct.pack("!2I5B", width, height, 8, 2, 0, 0, 0)) +
             chunk(b"IDAT", zlib.compress(pixels)) + chunk(b"IEND", b""))
+
+
+def screenshot_and_crop_fixtures() -> tuple[bytes, bytes, bytes]:
+    """A generated source and two queries that need real local-feature matching.
+
+    Use Pillow, already an application dependency, only to make disposable test
+    illustrations. Neither query contains a user photograph or downloaded image.
+    The smoke driver deliberately does not import the application's search code.
+    """
+    from PIL import Image, ImageDraw, ImageFont
+
+    randomizer = random.Random(701)
+    width, height = 960, 1280
+    source = Image.new("RGB", (width, height), (238, 229, 220))
+    draw = ImageDraw.Draw(source)
+    draw.polygon(((0, 0), (width * .56, 0), (width * .2, height), (0, height)),
+                 fill=(45, 65, 91))
+    draw.ellipse((width * .36, height * .08, width * 1.2, height * .83),
+                 fill=(166, 83, 111))
+    font = ImageFont.load_default(size=15)
+    for row in range(16):
+        for column in range(12):
+            x = column * width // 12 + randomizer.randrange(5, 21)
+            y = row * height // 16 + randomizer.randrange(5, 21)
+            w, h = randomizer.randrange(32, 55), randomizer.randrange(30, 57)
+            color = tuple(randomizer.randrange(20, 235) for _ in range(3))
+            variant = randomizer.randrange(3)
+            if variant == 0:
+                draw.rectangle((x, y, x + w, y + h), fill=color, outline="white", width=2)
+            elif variant == 1:
+                draw.ellipse((x, y, x + w, y + h), fill=color, outline="black", width=3)
+            else:
+                draw.polygon(((x, y + h), (x + w // 3, y), (x + w, y + h // 3)),
+                             fill=color, outline="white", width=2)
+            draw.line((x + 4, y + h // 3, x + w - 4, y + h - 4),
+                      fill=(250, 247, 235), width=randomizer.randrange(2, 5))
+            draw.text((x, y + 5), f"{randomizer.randrange(1000):03}", font=font,
+                      fill=(10, 10, 15), stroke_width=1, stroke_fill=(245, 245, 240))
+            for _ in range(3):
+                dx, dy = x + randomizer.randrange(w), y + randomizer.randrange(h)
+                draw.line((dx, dy, dx + randomizer.randrange(5, 17),
+                           dy + randomizer.randrange(4, 14)), fill="black", width=2)
+    draw.text((32, height - 44), "Generated fixture 701", font=font,
+              fill="white", stroke_width=2, stroke_fill="black")
+
+    def encoded(image, format_name, quality=65):
+        output = BytesIO()
+        image.save(output, format_name, quality=quality)
+        return output.getvalue()
+
+    content = source.copy()
+    content.thumbnail((660, 880), Image.Resampling.LANCZOS)
+    screenshot = Image.new("RGB", (1000, 1120), (28, 27, 31))
+    chrome = ImageDraw.Draw(screenshot)
+    chrome.rectangle((0, 0, 1000, 42), fill=(244, 240, 243))
+    chrome.rounded_rectangle((105, 7, 820, 35), radius=10, fill=(218, 215, 219))
+    chrome.text((125, 14), "localhost / generated screenshot", fill=(60, 60, 65))
+    chrome.rectangle((0, 42, 1000, 112), fill=(49, 45, 49))
+    chrome.text((30, 70), "Fixture reader", fill=(240, 230, 237))
+    screenshot.paste(content, ((1000 - content.width) // 2, 136))
+    chrome.rounded_rectangle((72, 1054, 928, 1097), radius=14, fill=(72, 65, 72))
+    chrome.line((118, 1075, 875, 1075), fill=(234, 80, 152), width=5)
+
+    retained_area = .45
+    crop_width, crop_height = round(width * math.sqrt(retained_area)), round(height * math.sqrt(retained_area))
+    left, top = round((width - crop_width) * .22), round((height - crop_height) * .72)
+    crop = source.crop((left, top, left + crop_width, top + crop_height))
+    crop.thumbnail((900, 900), Image.Resampling.LANCZOS)
+    return (encoded(source, "PNG"), encoded(screenshot, "JPEG", quality=68),
+            encoded(crop, "JPEG", quality=57))
 
 
 def random_port() -> int:
@@ -54,15 +127,18 @@ class Client:
         self.cookies = http.cookiejar.CookieJar()
         self.opener = build_opener(ProxyHandler({}), HTTPCookieProcessor(self.cookies))
 
-    def request(self, path: str, body=None):
+    def request(self, path: str, body=None, *, image=None):
         headers = {"Origin": self.url}
         payload = None
-        if body is not None:
+        if image is not None:
+            payload = image
+            headers["Content-Type"] = "image/jpeg" if image.startswith(b"\xff\xd8") else "image/png"
+        elif body is not None:
             payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
             headers["Content-Type"] = "application/json"
         request = Request(self.url + path, data=payload, headers=headers)
         try:
-            response = self.opener.open(request, timeout=5)
+            response = self.opener.open(request, timeout=65 if path == "/api/image-search/query" else 5)
         except HTTPError as error:
             response = error
         with response:
@@ -218,6 +294,158 @@ def run_smoke(executable: Path, work_root: Path) -> dict:
             require(source_image.read_bytes() == image and second_source.read_bytes() == second_image,
                     "Multi-root or model operations changed original files")
             passed("batch_model_replacement_across_roots")
+
+            status, helper, _ = client.request("/transcoding-ui.js")
+            require(status == 200 and b"GravelleTranscodingUI" in helper,
+                    "Frozen bundle is missing the transcoding frontend module")
+            passed("packaged_transcoding_module")
+            tiny = sample_png((80, 100, 130), (1, 1))
+            tiny_source = book_folder / "002.png"
+            tiny_source.write_bytes(tiny)
+            status, _, _ = client.request("/api/scan", {"library_id": library_id})
+            require(status in (200, 202), "Disposable rescan failed")
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                status, listing, _ = client.request("/api/library?library_id=" + library_id)
+                if status == 200 and not listing.get("scanning"):
+                    break
+                time.sleep(.1)
+            require(listing["books"][0]["page_count"] == 2, "Frozen rescan missed the unmatched tiny page")
+            status, snapshot, _ = client.request("/api/transcoding")
+            require(status == 200 and snapshot["rules"]["enabled"] is False,
+                    "Transcoding must stay disabled until the administrator enables it")
+            rules = {**snapshot["rules"], "enabled": True, "file_size_mb": 0,
+                     "max_source_pixels": 3, "max_source_side": 0,
+                     "max_output_side": 512, "min_free_space_mb": 0}
+            status, impact, _ = client.request("/api/transcoding/rules/preview", {"rules": rules})
+            require(status == 200 and impact["totals"]["newly_matched"] == 2,
+                    "Frozen rule preview must count individual matched pages")
+            status, snapshot, _ = client.request("/api/transcoding/rules", {
+                "rules": rules, "expected_revision": snapshot["revision"]})
+            require(status == 200 and snapshot["summary"]["pending_books"] == 2,
+                    "Frozen rule save did not create persistent pending records")
+            status, reminder, _ = client.request("/api/transcoding/summary")
+            require(status == 200 and reminder["summary"]["pending_books"] == 2
+                    and len(reminder["pending_book_ids"]) == 2
+                    and book["id"] in reminder["pending_book_ids"]
+                    and isinstance(reminder["scanning"], bool)
+                    and len(reminder["pending_records"]) == 2,
+                    "Frozen reminder summary must report consistent pending IDs and count")
+            passed("frozen_lightweight_optimization_reminders")
+            require(client.request(f"/api/books/{book['id']}")[0] == 404,
+                    "Undecided work must be excluded from ordinary detail routes")
+            require(client.request(f"/api/transcoding/books/{book['id']}/pages/0")[1] == image,
+                    "Administrator preview must retain the untouched source")
+            passed("transcoding_rule_preview_and_pending_visibility")
+            status, snapshot, _ = client.request("/api/transcoding/actions", {
+                "ids": [book["id"]], "action": "transcode"})
+            require(status == 200, "Frozen transcoding start failed")
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                status, snapshot, _ = client.request("/api/transcoding")
+                record = next(item for item in snapshot["books"] if item["id"] == book["id"])
+                if record["status"] in ("ready", "failed", "paused"):
+                    break
+                time.sleep(.1)
+            require(record["status"] == "ready", f"Frozen image worker failed: {record.get('error')}")
+            require(record["matched_count"] == record["output_count"] == 1 and record["actual_bytes"] > 0,
+                    "Frozen worker must only create the one matched page")
+            status, optimized, mime = client.request(f"/api/books/{book['id']}/pages/0")
+            require(status == 200 and mime == "image/webp" and optimized != image,
+                    "Frozen Pillow/worker did not publish a WebP derivative")
+            require(client.request(f"/api/books/{book['id']}/pages/1")[1] == tiny,
+                    "Frozen worker changed an unmatched source page")
+            require(source_image.read_bytes() == image and tiny_source.read_bytes() == tiny,
+                    "Frozen transcoding changed source files")
+            passed("frozen_isolated_transcode_worker", matched=1, outputs=record["output_count"],
+                   actual_bytes=record["actual_bytes"])
+            status, snapshot, _ = client.request("/api/transcoding/actions", {
+                "ids": [second_book["id"]], "action": "original"})
+            require(status == 200 and any(item["id"] == second_book["id"] and item["status"] == "original"
+                                         for item in snapshot["books"]),
+                    "Original choice must remain in the management list")
+            require(client.request(f"/api/books/{second_book['id']}/pages/0")[1] == second_image,
+                    "Frozen original choice did not serve original bytes")
+            status, cleared, _ = client.request("/api/transcoding/cleanup", {})
+            require(status == 200 and cleared["cleanup"]["removed_files"] == 0,
+                    "Cleanup must preserve every active derivative")
+            require(client.request(f"/api/books/{book['id']}/pages/0")[1] == optimized,
+                    "Cleanup removed the active reading image")
+            passed("frozen_original_choice_and_active_cache_protection")
+
+            # The preceding optimization test intentionally matches every page
+            # larger than three pixels. Choose original output before adding the
+            # detailed source, so rescanning cannot start an extra transcode job.
+            status, _, _ = client.request("/api/transcoding/actions", {
+                "ids": [book["id"]], "action": "original"})
+            require(status == 200, "Frozen original choice failed before adding the detailed page")
+            detailed, screenshot_query, cropped_query = screenshot_and_crop_fixtures()
+            detailed_source = book_folder / "003.png"
+            detailed_source.write_bytes(detailed)
+            detailed_digest = hashlib.sha256(detailed).hexdigest()
+            status, _, _ = client.request("/api/scan", {"library_id": library_id})
+            require(status in (200, 202), "Disposable detailed-page rescan failed")
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                status, listing, _ = client.request("/api/library?library_id=" + library_id)
+                if status == 200 and not listing.get("scanning"):
+                    break
+                time.sleep(.1)
+            require(status == 200 and not listing.get("scanning"),
+                    "Frozen rescan of the detailed image did not finish")
+            status, detail, _ = client.request(f"/api/books/{book['id']}")
+            require(status == 200 and detail.get("page_count") == 3,
+                    "Frozen rescan missed the detailed third source page")
+
+            status, helper, _ = client.request("/image-search-ui.js")
+            require(status == 200 and b"GravelleImageSearchUI" in helper,
+                    "Frozen bundle is missing the image-search module")
+            require(client.request("/api/image-search/status")[1]["enabled"] is False,
+                    "Image search must remain disabled until the administrator enables it")
+            require(client.request("/api/image-search/settings", {"enabled": True})[0] == 200,
+                    "Frozen image-search enable failed")
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                status, search_status, _ = client.request("/api/image-search/status")
+                summary = search_status.get("summary", {})
+                if summary.get("total", 0) >= 3 and summary.get("pending") == 0 and not search_status["indexing"]:
+                    break
+                time.sleep(.1)
+            require(summary.get("indexed") == summary.get("total") and summary.get("total", 0) >= 3,
+                    f"Frozen image-search index worker failed: {search_status.get('error')}")
+            status, matches, _ = client.request("/api/image-search/query", image=image)
+            match = next((item for item in matches.get("results", [])
+                          if item["book"]["id"] == book["id"] and item["page"] == 0), None)
+            require(status == 200 and match and match["match"] == "exact",
+                    "Frozen stdin image-query worker did not find the exact source page")
+            require("source_root" not in match["book"] and "path" not in match["book"],
+                    "Image-search results must not expose source directories")
+            status, preview, mime = client.request(f"/api/image-search/thumbnail/{book['id']}/0")
+            require(status == 200 and mime == "image/jpeg" and preview.startswith(b"\xff\xd8"),
+                    "Frozen search thumbnail did not return a bounded preview")
+            require(source_image.read_bytes() == image and tiny_source.read_bytes() == tiny
+                    and hashlib.sha256(detailed_source.read_bytes()).hexdigest() == detailed_digest,
+                    "Image indexing modified original files")
+            passed("frozen_isolated_image_search_workers", indexed=summary["indexed"],
+                   match_page=match["page"], preview_bytes=len(preview))
+
+            for name, query, details in (
+                    ("frozen_full_screenshot_geometry_match", screenshot_query,
+                     {"browser_chrome": True, "query_format": "JPEG"}),
+                    ("frozen_medium_crop_geometry_match", cropped_query,
+                     {"retained_source_area": .45, "query_format": "JPEG", "jpeg_quality": 57})):
+                status, matches, _ = client.request("/api/image-search/query", image=query)
+                results = matches.get("results", [])
+                require(status == 200 and results and results[0]["book"]["id"] == book["id"]
+                        and results[0]["page"] == 2 and results[0]["match"] == "similar",
+                        f"Frozen local-feature worker did not find the third source page: {name}")
+                require("source_root" not in results[0]["book"] and "path" not in results[0]["book"],
+                        "Screenshot/crop results must not expose source directories")
+                require(source_image.read_bytes() == image and tiny_source.read_bytes() == tiny
+                        and second_source.read_bytes() == second_image
+                        and hashlib.sha256(detailed_source.read_bytes()).hexdigest() == detailed_digest,
+                        "Screenshot/crop search modified an original source file")
+                passed(name, match_page=results[0]["page"], query_bytes=len(query), **details)
 
             child = controller.process
             controller.stop()

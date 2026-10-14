@@ -15,6 +15,15 @@ import webbrowser
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+# The frozen server also runs isolated image jobs. Dispatch before loading the
+# launcher/runtime so a worker cannot start Tk or acquire the application lock.
+if __name__ == "__main__" and sys.argv[1:2] == ["--transcode-worker"]:
+    from transcoding import worker_main
+    raise SystemExit(worker_main(sys.argv[2:]))
+if __name__ == "__main__" and sys.argv[1:2] == ["--image-search-worker"]:
+    from image_search import worker_main
+    raise SystemExit(worker_main(sys.argv[2:]))
+
 from desktop.core import (LauncherConfig, LauncherError, SingleInstanceLock, check_update,
                           download_update, load_config, load_release_config, network_diagnostics,
                           save_config, user_directory, verify_installer)
@@ -725,6 +734,13 @@ class LauncherWindow:
 
 
 def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["--transcode-worker"]:
+        from transcoding import worker_main
+        return worker_main(argv[1:])
+    if argv[:1] == ["--image-search-worker"]:
+        from image_search import worker_main
+        return worker_main(argv[1:])
     parser = argparse.ArgumentParser(description="Gravelle Windows launcher")
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--serve", action="store_true")

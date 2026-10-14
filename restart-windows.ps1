@@ -20,7 +20,7 @@ foreach ($candidate in @('py', 'python')) {
     }
 }
 if (-not $pythonPath) { throw 'Python 3.12 or newer is required.' }
-& $pythonPath -c 'from PIL import Image' 2>$null
+& $pythonPath -c 'from PIL import Image; from importlib.metadata import version; version("numpy"); version("opencv-python-headless")' 2>$null
 if ($LASTEXITCODE -ne 0) { throw 'Install requirements.txt with the same Python before restarting.' }
 
 $versionCode = @'
