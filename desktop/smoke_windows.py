@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Exercise the actual frozen server using disposable data and random ports.
 
+The test driver requires Pillow for generated screenshot/crop fixtures. CI runs
+it with the build environment's Python; the service itself runs only from the EXE.
+
 Example: python desktop/smoke_windows.py --executable
 dist/windows/portable/Gravelle/GravelleServer.exe --work-root work/windows-smoke
 """

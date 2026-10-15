@@ -113,7 +113,7 @@ jobs:
         run: ./desktop/build_windows.ps1 -Repository $env:RELEASE_REPOSITORY -OutputDirectory 'dist/windows'
       - name: Smoke test the frozen Windows server
         shell: pwsh
-        run: python desktop/smoke_windows.py --executable dist/windows/portable/Gravelle/GravelleServer.exe --work-root work/windows-smoke --report work/windows-smoke/report.json
+        run: ./work/windows-build/venv/Scripts/python.exe desktop/smoke_windows.py --executable dist/windows/portable/Gravelle/GravelleServer.exe --work-root work/windows-smoke --report work/windows-smoke/report.json
       - name: Preserve the Windows smoke report
         if: always()
         uses: actions/upload-artifact@v7
