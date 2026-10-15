@@ -1,6 +1,6 @@
 # Gravelle
 
-> 当前版本为 **0.8.5**，支持 Windows 安装包、便携版和 Docker 双架构镜像。[查看更新说明](docs/releases/0.8.5.md)。升级前停止服务并备份数据目录，沿用原数据目录。
+> 当前版本为 **0.8.6**，支持 Windows 安装包、便携版和 Docker 双架构镜像。[查看更新说明](docs/releases/0.8.6.md)。升级前停止服务并备份数据目录，沿用原数据目录。
 
 Gravelle 是支持 Windows、Docker 和 NAS 的个人写真阅读器，也能读取图片漫画。电脑、手机和平板通过浏览器连接同一个服务，同一账号共用进度、书签和收藏；作品资料由服务统一保存。使用 SQLite 保存资料，无需额外数据库服务。
 
@@ -28,7 +28,7 @@ Gravelle 是支持 Windows、Docker 和 NAS 的个人写真阅读器，也能读
 
 安装步骤：
 
-1. 在 [GitHub Releases](https://github.com/pumpkissster/Gravelle/releases/latest) 下载 `Gravelle-Setup-0.8.5-x64.exe` 并安装。
+1. 在 [GitHub Releases](https://github.com/pumpkissster/Gravelle/releases/latest) 下载 `Gravelle-Setup-0.8.6-x64.exe` 并安装。
 2. 打开 Gravelle，选择写真根文件夹，可添加多个，设置端口（默认 `8080`）。需要手机、平板访问时勾选「允许局域网访问」。
 3. 点击「检查目录与网络」，再点击「启动阅读器」。浏览器会自动打开，启动器最小化到任务栏。
 4. 首次访问注册账户，在网页创建写真库，选择根文件夹内的目录，保存后自动扫描。
@@ -39,12 +39,12 @@ Gravelle 是支持 Windows、Docker 和 NAS 的个人写真阅读器，也能读
 
 ## Docker / NAS 部署
 
-Docker Hub 仓库为 [`pumpkissster/gravelle`](https://hub.docker.com/r/pumpkissster/gravelle)，镜像支持 `linux/amd64`、`linux/arm64`，可使用固定版本 `0.8.5` 或 `latest`。
+Docker Hub 仓库为 [`pumpkissster/gravelle`](https://hub.docker.com/r/pumpkissster/gravelle)，镜像支持 `linux/amd64`、`linux/arm64`，可使用固定版本 `0.8.6` 或 `latest`。
 
 将仓库中的 [compose.yaml](compose.yaml) 和 [.env.example](.env.example) 保存到同一项目目录，或下载发行页中的 Docker 配置包；复制 `.env.example` 为 `.env`，填写宿主机路径和运行用户：
 
 ```dotenv
-GRAVELLE_IMAGE=pumpkissster/gravelle:0.8.5
+GRAVELLE_IMAGE=pumpkissster/gravelle:0.8.6
 COMICS_PATH=/volume1/photosets
 DATA_PATH=/volume1/docker/sumi-reader/data
 PUID=1000

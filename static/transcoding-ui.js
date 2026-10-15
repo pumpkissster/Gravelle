@@ -8,6 +8,14 @@
   const statusLabels = Object.freeze({ pending: '待选择', original: '使用原图', queued: '等待优化', running: '优化中', paused: '已暂停', failed: '失败', cancelled: '已取消', ready: '已完成' });
   const actionLabels = Object.freeze({ original: '使用原图', transcode: '开始优化', pause: '暂停', resume: '继续', cancel: '取消任务', retry: '重试' });
   const defaultRules = Object.freeze({ enabled: false, file_size_mb: 10, max_source_pixels: 40000000, max_source_side: 10000, output_format: 'webp', quality: 88, max_output_side: 3840, workers: 1, memory_limit_mb: 1024, timeout_seconds: 120, storage_limit_mb: 10240, min_free_space_mb: 512 });
+  function normalizeFilters(value) {
+    const input = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+    return {
+      query: typeof input.query === 'string' ? input.query.slice(0, 200) : '',
+      status: typeof input.status === 'string' && Object.hasOwn(statusLabels, input.status) ? input.status : '',
+      library: typeof input.library === 'string' && input.library.length <= 200 ? input.library : ''
+    };
+  }
   const numericFields = [
     ['file_size_mb', '文件大小超过', 'MiB', 0, 1024, 0.1, 1],
     ['max_source_pixels', '总像素超过', '万像素', 0, 100000, 1, 10000],
@@ -61,7 +69,7 @@
   function bookDisplaySignature(book) {
     return JSON.stringify([book.id, book.title, book.library_id, book.library_name, book.status, book.matched_count, book.success_count, book.failed_count, book.output_count, book.actual_bytes, book.output_path, book.error, book.needs_retranscode, book.published, book.reasons, book.page_count]);
   }
-  function create({ host, api, post, toast, onCatalogChange = () => {}, onTabChange = () => {} }) {
+  function create({ host, api, post, toast, onCatalogChange = () => {}, onTabChange = () => {}, onFiltersChange = () => {}, onRender = () => {} }) {
     const document = host.ownerDocument;
     const state = { active: false, tab: 'tasks', snapshot: null, loading: false, manualLoading: false, busy: false, selected: new Set(), filter: '', library: '', query: '', dirty: false, draft: null, generation: 0, timer: null, request: null, error: '', signature: '', published: '', rows: new Map(), librarySignature: '' };
     const controls = {};
@@ -91,9 +99,9 @@
     controls.library = el('select'); controls.library.append(option('', '全部写真库'));
     controls.refresh = button('刷新', 'button button-secondary', () => load(true));
     filterBar.append(label('搜索作品', controls.query), label('筛选状态', controls.status), label('筛选写真库', controls.library), controls.refresh);
-    controls.query.addEventListener('input', () => { state.query = controls.query.value; renderBooks(); });
-    controls.status.addEventListener('change', () => { state.filter = controls.status.value; renderBooks(); });
-    controls.library.addEventListener('change', () => { state.library = controls.library.value; renderBooks(); });
+    controls.query.addEventListener('input', () => { state.query = controls.query.value.slice(0, 200); renderBooks(); onFiltersChange(getFilters()); });
+    controls.status.addEventListener('change', () => { state.filter = controls.status.value; renderBooks(); onFiltersChange(getFilters()); });
+    controls.library.addEventListener('change', () => { state.library = controls.library.value; renderBooks(); onFiltersChange(getFilters()); });
     const toolbar = el('div', 'transcode-selection-tools');
     const selectLabel = el('label', 'transcode-select-all'); controls.all = el('input'); controls.all.type = 'checkbox'; controls.all.setAttribute('aria-label', '选择当前筛选的全部作品'); selectLabel.append(controls.all, el('span', '', '全选')); controls.count = el('span', 'transcode-selected-count', '未选择作品');
     controls.all.addEventListener('change', () => { filtered().forEach(book => controls.all.checked ? state.selected.add(String(book.id)) : state.selected.delete(String(book.id))); renderBooks(); });
@@ -188,6 +196,8 @@
     }
     function renderLibraries() {
       const libraries = new Map((state.snapshot?.books || []).map(book => [String(book.library_id), book.library_name || '写真库']));
+      if (state.snapshot && state.library && !libraries.has(state.library)) state.library = '';
+      controls.library.value = state.library;
       const signature = JSON.stringify(Array.from(libraries).sort((a, b) => a[0].localeCompare(b[0])));
       if (signature === state.librarySignature) return;
       state.librarySignature = signature;
@@ -224,6 +234,16 @@
       controls.empty.hidden = Boolean(books.length); controls.empty.textContent = state.loading && !state.snapshot ? '正在读取优化记录…' : state.snapshot?.books?.length ? '没有符合筛选条件的作品。' : '暂无命中规则的作品。';
       renderSelection();
       if (focus) Array.from(controls.list.querySelectorAll('input[data-transcode-id]')).find(item => item.dataset.transcodeId === focus)?.focus({ preventScroll: true });
+      if (state.snapshot) onRender();
+    }
+    function getFilters() { return normalizeFilters({ query: state.query, status: state.filter, library: state.library }); }
+    function restoreFilters(value) {
+      const filters = normalizeFilters(value);
+      state.query = filters.query; state.filter = filters.status; state.library = filters.library;
+      controls.query.value = state.query; controls.status.value = state.filter; controls.library.value = state.library;
+      if (state.snapshot) renderLibraries();
+      renderBooks();
+      return getFilters();
     }
     function accept(snapshot) {
       if (!snapshot || !Array.isArray(snapshot.books) || !snapshot.rules) throw new Error('优化数据格式不正确。');
@@ -286,9 +306,9 @@
     return {
       show(tab = 'tasks') { state.active = true; host.hidden = false; switchTab(tab, false); load(); clearInterval(state.timer); state.timer = setInterval(() => { if (state.tab === 'tasks') load(); }, 5000); },
       hide() { state.active = false; host.hidden = true; clearInterval(state.timer); state.timer = null; if (dialog.open && !state.busy) dialog.close(); if (previewDialog.open) previewDialog.close(); },
-      reset() { state.generation += 1; state.active = false; clearInterval(state.timer); state.timer = null; state.snapshot = null; state.loading = state.manualLoading = state.busy = state.dirty = false; state.draft = null; state.selected.clear(); state.rows.clear(); state.filter = state.library = state.query = state.signature = state.published = state.librarySignature = ''; controls.query.value = ''; controls.status.value = ''; if (dialog.open) dialog.close(); if (previewDialog.open) previewDialog.close(); setError(''); controls.retryLoad.hidden = true; fillRules(defaultRules); renderBooks(); host.hidden = true; },
-      refresh: () => load(true)
+      reset() { state.generation += 1; state.active = false; clearInterval(state.timer); state.timer = null; state.snapshot = null; state.loading = state.manualLoading = state.busy = state.dirty = false; state.draft = null; state.selected.clear(); state.rows.clear(); state.filter = state.library = state.query = state.signature = state.published = state.librarySignature = ''; controls.query.value = ''; controls.status.value = ''; controls.library.value = ''; if (dialog.open) dialog.close(); if (previewDialog.open) previewDialog.close(); setError(''); controls.retryLoad.hidden = true; fillRules(defaultRules); renderBooks(); host.hidden = true; },
+      refresh: () => load(true), getFilters, restoreFilters, isLoaded: () => Boolean(state.snapshot)
     };
   }
-  return { create, bytes, progress, eligible, statusLabels, defaultRules, createPendingTracker, bookDisplaySignature };
+  return { create, bytes, progress, eligible, statusLabels, defaultRules, createPendingTracker, bookDisplaySignature, normalizeFilters };
 });

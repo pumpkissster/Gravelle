@@ -4,6 +4,78 @@ const assert = require('node:assert/strict');
 const Routes = require('../static/page-router.js');
 const Transcoding = require('../static/transcoding-ui.js');
 
+test('optimization filters accept only bounded text and known statuses', () => {
+  assert.deepEqual(Transcoding.normalizeFilters({ query: '作品', status: 'running', library: '库-1', password: 'ignored' }), { query: '作品', status: 'running', library: '库-1' });
+  assert.deepEqual(Transcoding.normalizeFilters({ query: '写'.repeat(201), status: 'constructor', library: 'x'.repeat(201) }), { query: '写'.repeat(200), status: '', library: '' });
+  for (const value of [null, undefined, [], false, 'pending', { query: 42, status: {}, library: 1 }]) {
+    assert.deepEqual(Transcoding.normalizeFilters(value), { query: '', status: '', library: '' });
+  }
+  for (const status of Object.keys(Transcoding.statusLabels)) assert.equal(Transcoding.normalizeFilters({ status }).status, status);
+});
+
+function optimizationFixture() {
+  class Element {
+    constructor(tag, document) { this.tagName = tag; this.ownerDocument = document; this.children = []; this.listeners = {}; this.dataset = {}; this.attributes = {}; this.style = {}; this.value = ''; this.className = ''; this.open = false; this.classList = { add() {}, toggle() {} }; }
+    append(...items) { items.forEach(item => { item.remove(); item.parent = this; this.children.push(item); }); }
+    replaceChildren(...items) { this.children.forEach(item => { item.parent = null; }); this.children = []; this.append(...items); }
+    insertBefore(item, next) { item.remove(); const position = next ? this.children.indexOf(next) : this.children.length; item.parent = this; this.children.splice(position, 0, item); }
+    after(item) { this.parent.insertBefore(item, this.parent.children[this.parent.children.indexOf(this) + 1]); }
+    remove() { if (this.parent) { this.parent.children.splice(this.parent.children.indexOf(this), 1); this.parent = null; } }
+    setAttribute(key, value) { this.attributes[key] = String(value); }
+    removeAttribute(key) { delete this.attributes[key]; }
+    addEventListener(type, handler) { (this.listeners[type] ||= []).push(handler); }
+    dispatch(type) { return Promise.all((this.listeners[type] || []).map(handler => handler({ target: this }))); }
+    querySelectorAll(selector) { const match = item => item.tagName === selector.split('[')[0] && (!selector.includes('[open]') || item.open) && (!selector.includes('[data-transcode-id]') || item.dataset.transcodeId !== undefined); return this.children.flatMap(item => [...(match(item) ? [item] : []), ...item.querySelectorAll(selector)]); }
+    querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
+    get elements() { return ['input', 'select', 'button'].flatMap(tag => this.querySelectorAll(tag)); }
+    close() { this.open = false; }
+    showModal() { this.open = true; }
+  }
+  const document = { activeElement: null, hidden: false, createElement: tag => new Element(tag, document) };
+  document.body = new Element('body', document); const host = new Element('section', document); document.body.append(host);
+  function find(root, predicate) { if (predicate(root)) return root; for (const child of root.children) { const result = find(child, predicate); if (result) return result; } return null; }
+  return { document, host, find };
+}
+const optimizationFlush = () => new Promise(resolve => setImmediate(resolve));
+
+test('restored optimization filters wait for available libraries and render only matching works', async () => {
+  const fixture = optimizationFixture(); let resolveSnapshot; let renders = 0;
+  const ui = Transcoding.create({ host: fixture.host, api: () => new Promise(resolve => { resolveSnapshot = resolve; }), post: async () => ({}), toast() {}, onRender: () => { renders += 1; } });
+  assert.equal(ui.isLoaded(), false);
+  assert.deepEqual(ui.restoreFilters({ query: '目标', status: 'pending', library: 'a' }), { query: '目标', status: 'pending', library: 'a' });
+  assert.equal(renders, 0);
+  ui.show();
+  resolveSnapshot({ rules: Transcoding.defaultRules, books: [
+    { id: 'a1', title: '目标一', library_id: 'a', status: 'pending' },
+    { id: 'a2', title: '目标二', library_id: 'a', status: 'ready' },
+    { id: 'b1', title: '目标三', library_id: 'b', status: 'pending' }
+  ] });
+  await optimizationFlush();
+  assert.equal(ui.isLoaded(), true);
+  const list = fixture.find(fixture.host, item => item.className === 'transcode-book-list');
+  assert.equal(list.children.length, 1); assert.equal(list.querySelector('input').dataset.transcodeId, 'a1'); assert.equal(renders, 1);
+  assert.deepEqual(ui.getFilters(), { query: '目标', status: 'pending', library: 'a' });
+  assert.deepEqual(ui.restoreFilters({ library: 'removed' }), { query: '', status: '', library: '' });
+  assert.equal(list.children.length, 3);
+  ui.reset(); assert.deepEqual(ui.getFilters(), { query: '', status: '', library: '' }); assert.equal(ui.isLoaded(), false); ui.hide();
+});
+
+test('filter changes notify after rendering and unchanged polls preserve filter controls', async () => {
+  const fixture = optimizationFixture(); const snapshot = { rules: Transcoding.defaultRules, books: [] }; const events = [];
+  const ui = Transcoding.create({ host: fixture.host, api: async () => snapshot, post: async () => ({}), toast() {}, onRender: () => events.push('render'), onFiltersChange: filters => events.push(filters) });
+  ui.restoreFilters({ library: 'missing' }); assert.equal(ui.getFilters().library, 'missing');
+  ui.show(); await optimizationFlush(); assert.equal(ui.getFilters().library, '');
+  const query = fixture.find(fixture.host, item => item.placeholder === '搜索作品');
+  const status = fixture.find(fixture.host, item => item.tagName === 'select' && item.children.some(option => option.textContent === '全部状态'));
+  query.value = '新搜索'; events.length = 0; await query.dispatch('input');
+  assert.deepEqual(events, ['render', { query: '新搜索', status: '', library: '' }]);
+  status.value = 'failed'; events.length = 0; await status.dispatch('change');
+  assert.deepEqual(events, ['render', { query: '新搜索', status: 'failed', library: '' }]);
+  events.length = 0; await ui.refresh(); assert.equal(events.length, 0);
+  assert.equal(fixture.find(fixture.host, item => item.placeholder === '搜索作品'), query);
+  assert.deepEqual(ui.getFilters(), { query: '新搜索', status: 'failed', library: '' }); ui.reset(); ui.hide();
+});
+
 test('settings sections and transcode rules have distinct refreshable addresses', () => {
   for (const section of ['interface', 'performance', 'reading', 'transcoding']) {
     const route = { view: 'settings', section };

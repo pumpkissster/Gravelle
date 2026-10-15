@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       release_version:
-        description: "版本号，必须与 server.py 的 VERSION 一致，例如 0.8.5"
+        description: "版本号，必须与 server.py 的 VERSION 一致，例如 0.8.6"
         required: true
         type: string
       publish:
@@ -18,7 +18,7 @@ on:
         required: true
         type: boolean
       source_tag:
-        description: "补发已有版本的 Docker 镜像时填写原标签（如 v0.8.5）；初次发布留空"
+        description: "补发已有版本的 Docker 镜像时填写原标签（如 v0.8.6）；初次发布留空"
         default: ""
         required: false
         type: string

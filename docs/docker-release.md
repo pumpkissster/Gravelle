@@ -4,16 +4,16 @@
 
 ## 从 Docker Hub 安装
 
-镜像仓库为 [pumpkissster/gravelle](https://hub.docker.com/r/pumpkissster/gravelle)，当前版本为 `0.8.5`，也提供 `latest` 标签。Docker 会按宿主机选择 amd64 或 arm64 镜像。
+镜像仓库为 [pumpkissster/gravelle](https://hub.docker.com/r/pumpkissster/gravelle)，当前版本为 `0.8.6`，也提供 `latest` 标签。Docker 会按宿主机选择 amd64 或 arm64 镜像。
 
-可从 [GitHub Releases](https://github.com/pumpkissster/Gravelle/releases/latest) 下载 `Gravelle-Docker-0.8.5.zip` 配置包，更新内容见 [0.8.5 发行页](https://github.com/pumpkissster/Gravelle/releases/tag/v0.8.5)。
+可从 [GitHub Releases](https://github.com/pumpkissster/Gravelle/releases/latest) 下载 `Gravelle-Docker-0.8.6.zip` 配置包，更新内容见 [0.8.6 发行页](https://github.com/pumpkissster/Gravelle/releases/tag/v0.8.6)。
 
 1. 将仓库中的 [compose.yaml](../compose.yaml) 和 [.env.example](../.env.example) 保存到同一固定项目目录，或继续使用已下载的配置包。
 2. 将 `.env.example` 复制为 `.env`，填写以下项目：
 
 | 配置 | 内容 |
 | --- | --- |
-| `GRAVELLE_IMAGE` | `pumpkissster/gravelle:0.8.5` |
+| `GRAVELLE_IMAGE` | `pumpkissster/gravelle:0.8.6` |
 | `COMICS_PATH` | 宿主机写真根目录，例如 `/volume1/photosets` |
 | `DATA_PATH` | 宿主机资料目录，模板为 `/volume1/docker/sumi-reader/data`；已有安装保留原值 |
 | `PUID` / `PGID` | 对作品目录有读取权限、对资料目录有读写权限的用户 UID / GID |
@@ -68,7 +68,7 @@ docker compose -f compose.build.yaml -f compose.optimization.yaml up -d --build
 docker compose -f compose.build.yaml -f compose.optimization.yaml ps
 ```
 
-使用 Docker Hub 镜像时，将 `.env` 的 `GRAVELLE_IMAGE` 设为 `pumpkissster/gravelle:0.8.5`，再使用：
+使用 Docker Hub 镜像时，将 `.env` 的 `GRAVELLE_IMAGE` 设为 `pumpkissster/gravelle:0.8.6`，再使用：
 
 ```sh
 docker compose -f compose.yaml -f compose.optimization.yaml config
@@ -124,7 +124,7 @@ Docker 支持使用 GitHub 账户注册或登录，但仍需确认自己的 Dock
 - **publish 勾选、publish_docker 不勾选**：独立发布 Windows 版本。测试与构建全部通过后，创建 GitHub Release 草稿，上传安装包、便携包、Docker 配置包、源码包及 SHA-256 校验值，再公开 Release。发行说明明确注明 Docker Hub 镜像尚未发布，不需要 Docker Hub 账号。
 - **publish 和 publish_docker 都勾选**：要求 Docker Hub 配置完整，上传草稿资产并推送双架构版本镜像，全部成功后才公开 Release，再更新镜像 `latest`。
 
-首次发版将 **source_tag 留空**。如果先发布了 Windows，之后补发同版本 Docker 镜像，再次运行默认分支的工作流，填写相同版本号、将 **source_tag 设为原标签（例如 `v0.8.5`）**，并勾选 publish 和 publish_docker。构建使用该标签的原始代码；已公开的安装器、便携包、源码包、Docker 配置包和校验文件五项资产保持不变，仅补发镜像并更新发行说明。若该版本已经不是 GitHub 最新版，不会把 Docker `latest` 指回旧版。
+首次发版将 **source_tag 留空**。如果先发布了 Windows，之后补发同版本 Docker 镜像，再次运行默认分支的工作流，填写相同版本号、将 **source_tag 设为原标签（例如 `v0.8.6`）**，并勾选 publish 和 publish_docker。构建使用该标签的原始代码；已公开的安装器、便携包、源码包、Docker 配置包和校验文件五项资产保持不变，仅补发镜像并更新发行说明。若该版本已经不是 GitHub 最新版，不会把 Docker `latest` 指回旧版。
 
 正式发布的工作流仅允许从默认分支运行；source_tag 必须是与版本号对应的既有稳定标签。发布步骤失败时不会提前更新 Docker `latest`。已有正式 Windows 资产不会被覆盖；修改程序应提升版本号，已创建的同一提交草稿可重试。版本镜像推送成功但 Release 公开失败时，该版本镜像可能已存在，草稿仍保留供排查。Release 已公开但最后的 `latest` 更新失败时，固定版本安装仍可用，确认版本镜像后再手动更新 `latest`。
 

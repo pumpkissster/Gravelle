@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import argparse
 import base64
-from contextlib import closing, nullcontext
+from contextlib import closing, contextmanager, nullcontext
 import hashlib
 import heapq
 from io import BytesIO
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -25,7 +26,7 @@ import tempfile
 import threading
 import time
 
-from PIL import Image, ImageOps, ImageStat
+from PIL import Image, ImageOps, ImageStat, UnidentifiedImageError
 import image_search_features as local_features
 
 ALGORITHM_VERSION = 1
@@ -41,11 +42,127 @@ PREVIEW_SIDE = 384
 MAX_PREVIEW_BYTES = 192 * 1024
 MAX_MATCH_CANDIDATES = 64
 MAX_MATCH_INPUT = 4 * MIB
+CATALOGUE_BATCH_SIZE = 64
+
+
+def _png_without_bad_exif(source):
+    """Return a bounded decode-only copy after discarding only bad eXIf CRCs.
+
+    Called solely after Pillow rejects the input. Every other chunk retains its
+    original bytes and checksum, and must pass framing/order/CRC checks before
+    the copy is decoded. No source bytes or source digest are changed.
+    """
+    import zlib
+
+    source.seek(0)
+    signature = source.read(8)
+    if signature != b"\x89PNG\r\n\x1a\n":
+        return None
+    source.seek(0, os.SEEK_END)
+    size = source.tell()
+    if size > MAX_BYTES:
+        raise ValueError("PNG 图片超过 64 MiB，无法建立索引。")
+    source.seek(8)
+    output = BytesIO()
+    output.write(signature)
+    seen_ihdr = seen_plte = seen_idat = seen_exif = False
+    idat_closed = removed = False
+    color_type = None
+    try:
+        for _ in range(20_000):
+            header = source.read(8)
+            if len(header) != 8:
+                raise ValueError("PNG 图片结构不完整或无效。")
+            length, kind = int.from_bytes(header[:4], "big"), header[4:]
+            if (any(not (65 <= byte <= 90 or 97 <= byte <= 122) for byte in kind)
+                    or kind[2] & 32 or length > size - source.tell() - 4):
+                raise ValueError("PNG 图片块边界无效。")
+            if not seen_ihdr and kind != b"IHDR":
+                raise ValueError("PNG 图片缺少有效的 IHDR。")
+            if kind[0] & 32 == 0 and kind not in (b"IHDR", b"PLTE", b"IDAT", b"IEND"):
+                raise ValueError("PNG 图片包含不支持的关键数据块。")
+            if kind == b"IHDR":
+                if seen_ihdr or length != 13:
+                    raise ValueError("PNG 图片的 IHDR 无效。")
+                seen_ihdr = True
+            elif kind == b"PLTE":
+                if seen_plte or seen_idat or not 0 < length <= 768 or length % 3:
+                    raise ValueError("PNG 图片的 PLTE 无效。")
+                seen_plte = True
+            elif kind == b"IDAT":
+                if idat_closed or (color_type == 3 and not seen_plte):
+                    raise ValueError("PNG 图片的 IDAT 顺序无效。")
+                seen_idat = True
+            elif kind == b"eXIf":
+                if seen_exif or seen_idat:
+                    raise ValueError("PNG 图片的 eXIf 顺序或数量无效。")
+                seen_exif = True
+            elif kind == b"IEND":
+                if length != 0 or not seen_idat:
+                    raise ValueError("PNG 图片缺少有效的 IEND。")
+            if seen_idat and kind != b"IDAT":
+                idat_closed = True
+            checkpoint = output.tell()
+            output.write(header)
+            checksum = zlib.crc32(kind)
+            remaining = length
+            while remaining:
+                chunk = source.read(min(MIB, remaining))
+                if not chunk:
+                    raise ValueError("PNG 图片数据不完整。")
+                remaining -= len(chunk)
+                checksum = zlib.crc32(chunk, checksum)
+                output.write(chunk)
+                if kind == b"IHDR":
+                    color_type = chunk[9]
+            stored = source.read(4)
+            if len(stored) != 4:
+                raise ValueError("PNG 图片校验值不完整。")
+            if checksum & 0xffffffff != int.from_bytes(stored, "big"):
+                if kind != b"eXIf":
+                    raise ValueError("PNG 图片的数据校验失败。")
+                # The failed checksum means its orientation and other metadata
+                # are not trusted, even if a TIFF parser could read them.
+                output.seek(checkpoint)
+                output.truncate()
+                removed = True
+            else:
+                output.write(stored)
+            if kind == b"IEND":
+                if source.tell() != size:
+                    raise ValueError("PNG 图片的 IEND 后存在额外数据。")
+                if removed:
+                    output.seek(0)
+                    return output
+                output.close()
+                return None
+        raise ValueError("PNG 图片的数据块数量超过安全上限。")
+    except BaseException:
+        output.close()
+        raise
+
+
+@contextmanager
+def _open_feature_image(source):
+    normalized = None
+    try:
+        try:
+            image = Image.open(source)
+        except UnidentifiedImageError:
+            normalized = _png_without_bad_exif(source)
+            if normalized is None:
+                raise
+            image = Image.open(normalized)
+        with image:
+            yield image
+    finally:
+        if normalized is not None:
+            normalized.close()
 
 
 def _features(source, *, preview=False, max_pixels=MAX_QUERY_PIXELS):
     """Run only inside a bounded worker (or on tiny images in pure unit tests)."""
-    with Image.open(source) as original:
+    with _open_feature_image(source) as original:
         width, height = original.size
         if width <= 0 or height <= 0 or width * height > max_pixels:
             raise ValueError("图片像素超过安全上限。")
@@ -188,6 +305,13 @@ class ImageSearchManager:
         self.stop_event = threading.Event()
         self.thread = None
         self.auto_start = True
+        self._index_turn_due = None
+        self.activity_lock = threading.Lock()
+        now = time.time()
+        self.activity = {"stage": "idle", "generation": None, "done": 0, "total": 0,
+                         "startedAt": now, "lastProgressAt": now, "heartbeatAt": now}
+        self._activity_logged_at = 0
+        self._failed_generation = None
         self.processes = set()
         self.root = library.data / "image-search-work"
         self._initialize()
@@ -261,6 +385,47 @@ class ImageSearchManager:
     def _settings(self, connection):
         return dict(connection.execute("SELECT * FROM is_settings WHERE id=1").fetchone())
 
+    def _set_activity(self, stage, generation, *, done=0, total=0):
+        """Keep maintenance progress in memory, without per-page SQLite writes."""
+        now = time.time()
+        done, total = max(0, int(done)), max(0, int(total))
+        with self.activity_lock:
+            old = self.activity
+            if old["generation"] is not None and generation < old["generation"]:
+                return
+            changed = old["stage"] != stage or old["generation"] != generation
+            advanced = changed or done > old["done"]
+            self.activity = {"stage": stage, "generation": generation, "done": done, "total": total,
+                             "startedAt": now if changed else old["startedAt"],
+                             "lastProgressAt": now if advanced else old["lastProgressAt"],
+                             "heartbeatAt": now}
+            report = stage == "reconciling" and (changed or now - self._activity_logged_at >= 10
+                                                  or (advanced and done == total))
+            if report:
+                self._activity_logged_at = now
+        if report:
+            logging.getLogger("sumi").info("Image index catalogue check: %d/%d", done, total)
+
+    def _activity_snapshot(self, settings, summary):
+        with self.activity_lock:
+            activity = dict(self.activity)
+        alive = bool(self.thread and self.thread.is_alive())
+        if activity.pop("generation") != settings["generation"]:
+            activity.update(stage="starting", done=0, total=0)
+        if not settings["enabled"]:
+            activity["stage"] = "disabled"
+        elif settings["paused"]:
+            activity["stage"] = "paused"
+        elif self.stop_event.is_set() or self.library.stop_event.is_set():
+            activity["stage"] = "stopping" if alive else "stopped"
+        elif self.thread is not None and not alive:
+            activity["stage"] = "stopped"
+        elif activity["stage"] == "idle" and (summary["pending"] or settings["reconcile_pending"]):
+            activity["stage"] = "queued"
+        activity["workerAlive"] = alive
+        activity["background"] = self.library.task_scheduler.snapshot_debug()
+        return activity
+
     def _work_directory(self):
         self.root.mkdir(exist_ok=True)
         info = self.root.lstat()
@@ -296,12 +461,26 @@ class ImageSearchManager:
 
     def _loop(self):
         while not self.stop_event.is_set() and not self.library.stop_event.is_set():
+            with self.activity_lock:
+                attempt_generation = self.activity["generation"]
+                self._failed_generation = None
             try:
                 if self.run_once():
                     continue
-            except Exception:
-                with closing(self.library.connect()) as connection, connection:
-                    connection.execute("UPDATE is_settings SET error=?", ("图片索引任务失败，请重试或重新建立索引。",))
+            except Exception as error:
+                # Failed error persistence must not silently kill indexing.
+                # Log exception classes only; decoder/source paths stay private.
+                logging.getLogger("sumi").error("Image index coordinator error (%s)", type(error).__name__)
+                with self.activity_lock:
+                    generation = self._failed_generation if self._failed_generation is not None else attempt_generation
+                if generation is not None:
+                    self._set_activity("error", generation)
+                try:
+                    with closing(self.library.connect()) as connection, connection:
+                        connection.execute("UPDATE is_settings SET error=? WHERE generation=? AND enabled=1 AND paused=0",
+                                           ("图片索引任务失败，正在重试，请检查服务端日志。", generation))
+                except Exception as persistence_error:
+                    logging.getLogger("sumi").error("Image index error could not be recorded (%s)", type(persistence_error).__name__)
             self.wake.wait(2)
             self.wake.clear()
 
@@ -345,6 +524,9 @@ class ImageSearchManager:
             connection.execute("UPDATE is_pages SET status='pending' WHERE status='running'")
             connection.execute("UPDATE is_pages SET local_state='pending' WHERE local_state='running'")
             connection.execute("UPDATE is_settings SET generation=generation+1,revision=revision+1")
+            settings = self._settings(connection)
+        self._set_activity("disabled" if not settings["enabled"] else "paused" if settings["paused"] else "queued",
+                           settings["generation"])
         if self.auto_start:
             self.start()
         self.wake.set()
@@ -389,85 +571,160 @@ class ImageSearchManager:
             if actor["role"] == "admin":
                 result.update(paused=bool(settings["paused"]), summary=summary,
                               progress={"done": summary["indexed"] + summary["failed"], "total": summary["total"]},
-                              revision=settings["revision"], error=settings["error"])
+                              revision=settings["revision"], error=settings["error"],
+                              activity=self._activity_snapshot(settings, summary))
             return result
 
-    def _current(self, generation):
+    def _current(self, generation, connection=None):
         if self.stop_event.is_set() or self.library.stop_event.is_set():
             return False
-        with closing(self.library.connect()) as connection:
-            settings = self._settings(connection)
-            return bool(settings["enabled"] and not settings["paused"] and settings["generation"] == generation)
+        if connection is None:
+            with closing(self.library.connect()) as own:
+                return self._current(generation, own)
+        settings = self._settings(connection)
+        return bool(settings["enabled"] and not settings["paused"] and settings["generation"] == generation)
 
-    def _sync_catalogue(self, generation):
-        with closing(self.library.connect()) as connection, connection:
-            # Clear first so a concurrent scan can set it again without being
-            # lost at the end of this pass.
-            connection.execute("UPDATE is_settings SET reconcile_pending=0 WHERE generation=?", (generation,))
-            books = [dict(row) for row in connection.execute("SELECT * FROM books WHERE active=1 AND removed=0 ORDER BY id")]
-        seen = {}
-        for book in books:
-            if not self._current(generation):
-                return
-            keys = json.loads(book["pages"])
-            seen[book["id"]] = set(keys)
-            for index, key in enumerate(keys):
-                if not self._current(generation):
-                    return
-                error = ""
-                try:
-                    with self.library.transcoding._open_source(book, key) as (source, version):
-                        pass
-                except Exception:
-                    version = "unreadable"
-                    error = "源图片无法读取，请重新扫描后重试。"
-                with self.lock, closing(self.library.connect()) as connection, connection:
-                    current_book = connection.execute("SELECT * FROM books WHERE id=? AND active=1 AND removed=0", (book["id"],)).fetchone()
-                    if not self._current(generation) or not current_book or current_book["signature"] != book["signature"]:
-                        continue
-                    old = connection.execute("SELECT * FROM is_pages WHERE book_id=? AND page_key=?", (book["id"], key)).fetchone()
-                    same = bool(old and old["source_version"] == version and old["algorithm"] == ALGORITHM_VERSION)
-                    if same:
+    def _apply_catalogue_batch(self, connection, generation, checked):
+        # Sources have already been opened and closed outside this short
+        # transaction. A concurrent scan or account action must be rechecked
+        # after reserving the writer before any old observations are applied.
+        with self.lock, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if not self._current(generation, connection):
+                return False
+            current_books = {}
+            changed = False
+            for book, index, key, version, error in checked:
+                if book["id"] not in current_books:
+                    current_books[book["id"]] = connection.execute(
+                        "SELECT signature FROM books WHERE id=? AND active=1 AND removed=0",
+                        (book["id"],)).fetchone()
+                current_book = current_books[book["id"]]
+                if not current_book or current_book["signature"] != book["signature"]:
+                    changed = True
+                    continue
+                old = connection.execute("""SELECT source_version,algorithm,page_index,book_signature
+                    FROM is_pages WHERE book_id=? AND page_key=?""", (book["id"], key)).fetchone()
+                same = bool(old and old["source_version"] == version and old["algorithm"] == ALGORITHM_VERSION)
+                if same:
+                    if old["page_index"] != index or old["book_signature"] != book["signature"]:
                         connection.execute("UPDATE is_pages SET page_index=?,book_signature=? WHERE book_id=? AND page_key=?",
                                            (index, book["signature"], book["id"], key))
-                    else:
-                        connection.execute("""INSERT INTO is_pages(book_id,page_key,page_index,source_version,book_signature,algorithm,status,error,updated_at)
-                            VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(book_id,page_key) DO UPDATE SET
-                            page_index=excluded.page_index,source_version=excluded.source_version,book_signature=excluded.book_signature,
-                            algorithm=excluded.algorithm,status=excluded.status,error=excluded.error,digest='',dhash='',phash='',mean='[]',preview=NULL,
-                            local_features=NULL,local_sketch=NULL,local_state='pending',local_version=0,local_error='',updated_at=excluded.updated_at""",
-                            (book["id"], key, index, version, book["signature"], ALGORITHM_VERSION,
-                             "failed" if error else "pending", error, time.time()))
-        with self.lock, closing(self.library.connect()) as connection, connection:
-            if not self._current(generation):
+                else:
+                    connection.execute("""INSERT INTO is_pages(book_id,page_key,page_index,source_version,book_signature,algorithm,status,error,updated_at)
+                        VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(book_id,page_key) DO UPDATE SET
+                        page_index=excluded.page_index,source_version=excluded.source_version,book_signature=excluded.book_signature,
+                        algorithm=excluded.algorithm,status=excluded.status,error=excluded.error,digest='',dhash='',phash='',mean='[]',preview=NULL,
+                        local_features=NULL,local_sketch=NULL,local_state='pending',local_version=0,local_error='',updated_at=excluded.updated_at""",
+                        (book["id"], key, index, version, book["signature"], ALGORITHM_VERSION,
+                         "failed" if error else "pending", error, time.time()))
+            if changed:
+                connection.execute("UPDATE is_settings SET reconcile_pending=1 WHERE generation=?", (generation,))
+        return True
+
+    def _remove_catalogue_batch(self, connection, generation, obsolete):
+        with self.lock, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if not self._current(generation, connection):
+                return False
+            current_keys = {}
+            for book_id, page_key in obsolete:
+                if book_id not in current_keys:
+                    book = connection.execute("SELECT pages FROM books WHERE id=? AND active=1 AND removed=0",
+                                              (book_id,)).fetchone()
+                    current_keys[book_id] = set(json.loads(book["pages"])) if book else set()
+                # The manifest may have changed after cleanup candidates were
+                # collected. Never delete a newly restored or added page.
+                if page_key not in current_keys[book_id]:
+                    connection.execute("DELETE FROM is_pages WHERE book_id=? AND page_key=?", (book_id, page_key))
+        return True
+
+    def _sync_catalogue(self, generation):
+        # Keep one connection for the pass, with no read transaction held while
+        # inspecting files. This also avoids last-connection WAL checkpoints
+        # and connection/schema setup for each individual page.
+        with closing(self.library.connect()) as connection:
+            with self.lock, connection:
+                connection.execute("BEGIN IMMEDIATE")
+                if not self._current(generation, connection):
+                    return
+                # Clear first so a concurrent scan can request another pass
+                # without its request being lost when this one completes.
+                connection.execute("UPDATE is_settings SET reconcile_pending=0 WHERE generation=?", (generation,))
+                books = [dict(row) for row in connection.execute("""SELECT id,source_root,path,format,pages,signature
+                    FROM books WHERE active=1 AND removed=0 ORDER BY id""")]
+            total = sum(len(json.loads(book["pages"])) for book in books)
+            done = 0
+            self._set_activity("reconciling", generation, done=done, total=total)
+            checked = []
+            for book in books:
+                for index, key in enumerate(json.loads(book["pages"])):
+                    if not self._current(generation, connection):
+                        return
+                    error = ""
+                    try:
+                        with self.library.transcoding._open_source(book, key) as (source, version):
+                            pass
+                    except Exception:
+                        version = "unreadable"
+                        error = "源图片无法读取，请重新扫描后重试。"
+                    checked.append((book, index, key, version, error))
+                    done += 1
+                    self._set_activity("reconciling", generation, done=done, total=total)
+                    if len(checked) >= CATALOGUE_BATCH_SIZE:
+                        if not self._apply_catalogue_batch(connection, generation, checked):
+                            return
+                        checked.clear()
+            if checked and not self._apply_catalogue_batch(connection, generation, checked):
                 return
-            for row in connection.execute("SELECT book_id,page_key FROM is_pages").fetchall():
-                if row["page_key"] not in seen.get(row["book_id"], set()):
-                    connection.execute("DELETE FROM is_pages WHERE book_id=? AND page_key=?", (row["book_id"], row["page_key"]))
-            connection.execute("UPDATE is_settings SET revision=revision+1,error=''")
+            if not self._current(generation, connection):
+                return
+            live = {row["id"]: set(json.loads(row["pages"])) for row in connection.execute(
+                "SELECT id,pages FROM books WHERE active=1 AND removed=0")}
+            obsolete = [(row["book_id"], row["page_key"]) for row in connection.execute(
+                "SELECT book_id,page_key FROM is_pages") if row["page_key"] not in live.get(row["book_id"], set())]
+            for start in range(0, len(obsolete), CATALOGUE_BATCH_SIZE):
+                if not self._remove_catalogue_batch(connection, generation, obsolete[start:start + CATALOGUE_BATCH_SIZE]):
+                    return
+            with self.lock, connection:
+                connection.execute("BEGIN IMMEDIATE")
+                if not self._current(generation, connection):
+                    return
+                connection.execute("UPDATE is_settings SET revision=revision+1,error=''")
 
     def run_once(self):
         """One coordination pass or one page; useful for deterministic tests."""
         if not self.run_lock.acquire(blocking=False):
             return False
+        generation = None
         try:
             with closing(self.library.connect()) as connection:
                 settings = self._settings(connection)
+            generation = settings["generation"]
             if not self._current(settings["generation"]):
+                self._set_activity("disabled" if not settings["enabled"] else "paused", generation)
                 return False
-            if settings["reconcile_pending"]:
+            if settings["reconcile_pending"] and self._index_turn_due != settings["generation"]:
                 self._sync_catalogue(settings["generation"])
+                # A scan can request another pass while this one is still
+                # checking sources. Give one page a turn before reconciling
+                # again; otherwise a slow catalogue can starve decoding.
+                self._index_turn_due = settings["generation"]
+                self._set_activity("idle", generation)
                 return True
+            self._index_turn_due = None
             with self.lock, closing(self.library.connect()) as connection:
                 job = connection.execute("""SELECT b.*,p.page_key,p.page_index,p.source_version,p.status AS index_status FROM is_pages p JOIN books b ON b.id=p.book_id
                     WHERE b.active=1 AND b.removed=0 AND (p.status='pending' OR (p.status='ready' AND p.local_state='pending'))
                     ORDER BY CASE p.status WHEN 'pending' THEN 0 ELSE 1 END,b.id,p.page_index LIMIT 1""").fetchone()
                 if not job:
-                    return False
+                    self._set_activity("idle", generation)
+                    return bool(settings["reconcile_pending"])
                 job = dict(job)
             # Keep the row pending while another family owns the shared budget.
             # The decoder resource also prevents queries and indexing from
             # reserving two global slots for the same single decoder.
+            self._set_activity("waiting", generation)
             with self.library.task_scheduler.slot(resource="image-search", cancel=lambda: not self._current(settings["generation"])) as acquired:
                 if not acquired:
                     return True
@@ -480,7 +737,15 @@ class ImageSearchManager:
                             or row["source_version"] != job["source_version"] or row["signature"] != job["signature"]):
                         return True
                     connection.execute("UPDATE is_pages SET status=CASE WHEN status='ready' THEN 'ready' ELSE 'running' END,local_state='running' WHERE book_id=? AND page_key=?", (job["id"], job["page_key"]))
-                return self._run_index_job(job, settings["generation"])
+                result = self._run_index_job(job, settings["generation"])
+                self._set_activity("idle", generation)
+                return result
+        except Exception:
+            # Keep the failing attempt's generation even if configure() has
+            # already published a later pause/clear/resume while it unwinds.
+            with self.activity_lock:
+                self._failed_generation = generation
+            raise
         finally:
             self.run_lock.release()
 
@@ -519,21 +784,26 @@ class ImageSearchManager:
                     and row["status"] in ("running", "ready") and row["local_state"] == "running" and job["page_key"] in json.loads(row["pages"]))
 
     def _index_page(self, job, generation):
+        self._set_activity("reading", generation)
         with tempfile.TemporaryDirectory(prefix=".index-", dir=self._work_directory()) as temporary:
             source_path = Path(temporary) / "input"
             with self.library.transcoding._open_source(job, job["page_key"]) as (source, version):
                 if version != job["source_version"]:
                     self.reconcile()
                     raise self._error("源图片已变化，请重新扫描后重试。", 422)
-                with source_path.open("xb") as sink:
+                # Reuse one autocommit connection for cancellation checks;
+                # every chunk still observes newly committed account actions.
+                with source_path.open("xb") as sink, closing(self.library.connect()) as connection:
                     total = 0
                     while chunk := source.read(MIB):
                         total += len(chunk)
                         if total > MAX_BYTES:
                             raise self._error("图片超过 64 MiB，无法建立索引。", 422)
-                        if not self._current(generation):
+                        if not self._current(generation, connection):
                             raise self._error("索引任务已暂停或取消。", 409)
                         sink.write(chunk)
+                        self._set_activity("reading", generation, done=total)
+            self._set_activity("decoding", generation)
             result = self._decode(source_path=source_path, preview=True, generation=generation)
             with self.library.transcoding._open_source(job, job["page_key"]) as (source, version):
                 if version != job["source_version"]:
@@ -599,23 +869,26 @@ class ImageSearchManager:
                     process.communicate()
                     raise self._error("图片识别超时，请缩小图片后重试。", 422)
             else:
-                deadline = time.monotonic() + TIMEOUT_SECONDS
-                while process.poll() is None:
-                    if not self._current(generation):
-                        process.kill()
-                        raise self._error("索引任务已暂停或取消。", 409)
-                    if time.monotonic() > deadline:
-                        process.kill()
-                        raise self._error("图片索引超时，请重试或缩小源图片。", 422)
-                    # Drain through communicate to avoid a full stdout pipe
-                    # blocking a valid preview response before process exit.
-                    try:
-                        output, _ = process.communicate(timeout=.1)
-                        break
-                    except subprocess.TimeoutExpired:
-                        continue
-                else:
-                    output, _ = process.communicate()
+                # SELECT checks do not retain a transaction across polls, so
+                # pause/clear remain visible without reconnecting at 10 Hz.
+                with closing(self.library.connect()) as connection:
+                    deadline = time.monotonic() + TIMEOUT_SECONDS
+                    while process.poll() is None:
+                        if not self._current(generation, connection):
+                            process.kill()
+                            raise self._error("索引任务已暂停或取消。", 409)
+                        if time.monotonic() > deadline:
+                            process.kill()
+                            raise self._error("图片索引超时，请重试或缩小源图片。", 422)
+                        # Drain through communicate to avoid a full stdout pipe
+                        # blocking a valid preview response before process exit.
+                        try:
+                            output, _ = process.communicate(timeout=.1)
+                            break
+                        except subprocess.TimeoutExpired:
+                            continue
+                    else:
+                        output, _ = process.communicate()
             if len(output) > MAX_PREVIEW_BYTES * 2:
                 raise self._error("图片识别结果无效。", 422)
             try:

@@ -6,6 +6,7 @@
   "start-windows-lan.cmd", "restart-windows-lan.cmd",
   "static/index.html", "static/app.js", "static/styles.css", "static/reader-model.js",
   "static/performance-settings.js", "static/reader-end.js", "static/reader-end.css", "static/avatar-ui.js", "static/user-management.js", "static/batch-selection.js", "static/page-router.js", "static/transcoding-ui.js", "static/image-search-ui.js",
+  "static/list-state.js", "tests/test_list_state.js",
   "static/gravelle-logo.png", "static/gravelle-wordmark.svg", "static/gravelle-icon.png", "static/default-avatar.png",
   "static/fonts/LibreCaslonText.ttf", "static/fonts/OFL.txt", "static/fonts/README.md",
   "desktop/__init__.py", "desktop/core.py", "desktop/runtime.py", "desktop/launcher.py",
@@ -14,11 +15,11 @@
   "desktop/assets/gravelle-wordmark.png", "desktop/languages/ChineseSimplified.isl",
   "desktop/gravelle.manifest",
   "desktop/languages/LICENSE-Inno-Setup.txt", "desktop/languages/README.md",
-  "docs/windows.md", "docs/docker-release.md", "docs/users.md", "docs/transcoding.md", "docs/image-search.md", "docs/performance.md", "docs/routing.md", "docs/releases/0.8.4.md", "docs/releases/0.8.5.md",
+  "docs/windows.md", "docs/docker-release.md", "docs/users.md", "docs/transcoding.md", "docs/image-search.md", "docs/performance.md", "docs/routing.md", "docs/releases/0.8.4.md", "docs/releases/0.8.5.md", "docs/releases/0.8.6.md",
   "tests/test_integration.py", "tests/test_v15.py", "tests/test_v16_auth.py", "tests/test_v18.py",
   "tests/test_v19_models.py", "tests/test_settings_access.py", "tests/test_updates.py", "tests/test_desktop_launcher.py", "tests/test_desktop_multiroot_ui.py",
   "tests/test_multiuser.py", "tests/test_multiuser_security.py", "tests/test_password_reset.py", "tests/test_multi_roots.py", "tests/test_batch_models.py", "tests/test_transcoding.py", "tests/test_transcoding_security.py", "tests/test_transcoding_colour.py", "tests/test_transcoding_migration.py", "tests/test_image_search.py", "tests/test_image_search_api.py", "tests/test_task_scheduler.py", "tests/test_shared_tasks.py", "tests/test_performance_api.py",
-  "tests/test_image_search_crops.py",
+  "tests/test_image_search_crops.py", "tests/test_image_search_catalogue.py", "tests/test_image_search_activity.py", "tests/test_image_search_page_io.py", "tests/test_image_search_png_metadata.py",
   "tests/test_reader_model.js", "tests/test_performance_settings.js", "tests/test_reader_end.js", "tests/test_avatar_ui.js", "tests/test_user_management.js", "tests/test_batch_selection.js", "tests/test_page_router.js", "tests/test_transcoding_ui.js", "tests/test_image_search_ui.js",
   "packaging/source_manifest.json", "packaging/package_source.py", "packaging/check_docker_context.py", "packaging/smoke_image_workers.py"
 ]

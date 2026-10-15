@@ -14,6 +14,10 @@
   const Batch = window.GravelleBatchSelection;
   const Routes = window.GravellePageRouter;
   const routing = { current: Routes.parse(location.hash), ready: false, restoring: false, generation: 0 };
+  let listPositions = null;
+  let listRestoration = null;
+  let listPositionTimer;
+  if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
   let activeUser = null;
   let authGeneration = 0;
   const userManagement = { users: [], libraries: [], loaded: false, loading: false, error: false, updatedAt: 0, request: 0, busy: false, editingId: null, generation: 0 };
@@ -78,6 +82,9 @@
   }
   function activateAccount(user) {
     if (String(activeUser?.id ?? '') === String(user?.id ?? '')) { activeUser = user || null; return; }
+    cancelListRestoration(); clearTimeout(listPositionTimer);
+    let sessionStore; try { sessionStore = window.sessionStorage; } catch (_) { /* Navigation still works without browser storage. */ }
+    listPositions = user ? window.GravelleListState.createStore({ storage: sessionStore, accountId: user.id }) : null;
     routing.ready = false; routing.restoring = false; routing.generation += 1;
     authGeneration += 1;
     reader.pending = null; clearTimeout(reader.saveTimer);
@@ -457,9 +464,55 @@
   function currentViewRoute() {
     return Routes.normalize({ view: state.view, id: state.view === 'library' ? state.libraryId : state.modelId, section: state.settingsSection, tab: state.settingsTab, image: state.view === 'search' && searchMode === 'image', query: state.query, sort: state.sort, series: state.series });
   }
+  function listRoute(route) {
+    const base = Routes.base(route);
+    return Routes.normalize({ ...base, sort: base.sort || (base.view === 'library' ? librarySort(base.id) : state.sort) });
+  }
+  function cancelListRestoration() {
+    if (listRestoration) cancelAnimationFrame(listRestoration.frame);
+    listRestoration = null;
+  }
+  function saveListPosition() {
+    if (!listPositions || !routing.ready || !state.loaded || state.loading || reader.open || routing.current.view === 'reader' || listRestoration || String(activeUser?.id) !== String(state.session?.user?.id)) return;
+    const position = { x: window.scrollX, y: window.scrollY, page: catalogPaging.page, revealed: catalogPaging.revealed, capacity: Performance.get().bookPageSize };
+    if (!$('#catalog-section').hidden) {
+      const anchor = $$('#book-grid .book-open').find(item => { const bounds = item.getBoundingClientRect(); return bounds.bottom > 0 && bounds.top < innerHeight; });
+      if (anchor) position.anchor = { id: anchor.dataset.bookId, offset: anchor.getBoundingClientRect().top };
+    }
+    if (state.view === 'settings' && state.settingsSection === 'transcoding') position.filters = transcodingUI?.getFilters();
+    listPositions.write(Routes.hash(currentViewRoute()), position);
+  }
+  function prepareListRestoration(route, generation) {
+    cancelListRestoration();
+    const key = Routes.hash(listRoute(route));
+    let saved = listPositions?.read(key);
+    if (!saved) return;
+    if (saved.capacity !== Performance.get().bookPageSize) saved = { ...saved, x: 0, y: 0, page: 0, revealed: 0, anchor: undefined };
+    listRestoration = { key, saved, generation, account: String(activeUser?.id), frame: 0, filtersApplied: false };
+  }
+  function restoreListPosition() {
+    const pending = listRestoration;
+    if (!pending || reader.open) return;
+    if (pending.key !== Routes.hash(currentViewRoute()) || pending.account !== String(activeUser?.id)) { cancelListRestoration(); return; }
+    if (state.view === 'settings' && state.settingsSection === 'transcoding') {
+      if (!pending.filtersApplied) { pending.filtersApplied = true; transcodingUI?.restoreFilters(pending.saved.filters); }
+      if (!state.settingsTab && !transcodingUI?.isLoaded()) return;
+    }
+    cancelAnimationFrame(pending.frame);
+    pending.frame = requestAnimationFrame(() => {
+      if (listRestoration !== pending || reader.open) return;
+      if (pending.generation !== routing.generation || pending.account !== String(activeUser?.id) || pending.key !== Routes.hash(currentViewRoute())) { cancelListRestoration(); return; }
+      const anchor = pending.saved.anchor && $$('#book-grid .book-open').find(item => item.dataset.bookId === pending.saved.anchor.id);
+      const top = anchor && !$('#catalog-section').hidden ? window.scrollY + anchor.getBoundingClientRect().top - pending.saved.anchor.offset : pending.saved.y;
+      window.scrollTo({ left: pending.saved.x, top: Math.max(0, top), behavior: 'instant' });
+      listRestoration = null;
+      saveListPosition();
+    });
+  }
   function commitRoute(route, { replace = false } = {}) {
     const value = Routes.normalize(route); const hash = Routes.hash(value);
     const previous = Routes.hash(Routes.parse(location.hash));
+    saveListPosition();
     routing.current = value;
     if (location.hash !== hash) {
       const entry = { gravelleRoute: hash, gravellePrevious: replace ? history.state?.gravellePrevious : previous };
@@ -484,8 +537,12 @@
     if (selection.busy && Routes.hash(requested) !== Routes.hash(routing.current)) {
       commitRoute(routing.current, { replace: true }); toast('批量操作进行中，请稍候。'); return;
     }
+    const wasReady = routing.ready;
+    saveListPosition();
     const resolved = Routes.resolve(requested, state);
     const route = resolved.route; const generation = ++routing.generation;
+    if (!wasReady || Routes.hash(listRoute(route)) !== Routes.hash(currentViewRoute())) prepareListRestoration(route, generation);
+    else if (listRestoration) listRestoration.generation = generation;
     routing.ready = true; routing.restoring = true;
     commitRoute(route, { replace: true });
     try {
@@ -503,10 +560,11 @@
         if (reader.open && String(reader.book?.id) === route.id) { if (route.page) setReaderPage(route.page - 1); }
         else await openBook(book, route.page ? route.page - 1 : null, null, { fromRoute: true });
       }
-    } finally { if (generation === routing.generation) routing.restoring = false; }
+    } finally { if (generation === routing.generation) { routing.restoring = false; restoreListPosition(); } }
   }
   function navigate(view, options = {}) {
     if (!Object.hasOwn(viewLabels, view)) return;
+    saveListPosition();
     if (!options.fromRoute && state.loaded) {
       const candidate = Routes.resolve({ view, id: view === 'library' ? String(options.libraryId ?? state.libraryId) : String(options.modelId ?? state.modelId) }, state);
       if (candidate.unavailable) { toast('写真库或模特不存在，或当前账号无权访问。'); view = candidate.route.view; }
@@ -518,10 +576,11 @@
     const nextSearchMode = options.image === undefined ? searchMode : options.image ? 'image' : 'text';
     const samePage = state.view === view && (view !== 'library' || libraryId === String(state.libraryId)) && (view !== 'model' || modelId === String(state.modelId)) && (view !== 'search' || searchMode === nextSearchMode) && (view !== 'settings' || state.settingsSection === settingsSection && state.settingsTab === settingsTab);
     if (selection.busy && !samePage) { toast('批量操作进行中，请稍候。'); return; }
-    if (!options.fromRoute) { routing.generation += 1; routing.restoring = false; }
+    if (!options.fromRoute) { cancelListRestoration(); routing.generation += 1; routing.restoring = false; }
     closeAccountMenu();
     $('#sidebar').classList.remove('is-open'); $('#nav-backdrop').hidden = true; $('#nav-toggle').setAttribute('aria-expanded', 'false');
-    if (samePage && !options.fromRoute) {
+    const sameFilters = state.query === (options.query || '') && state.series === (options.series || '') && state.sort === (options.sort ? End.normalizeSort(options.sort) : view === 'library' ? librarySort(libraryId) : state.sort);
+    if (samePage && (!options.fromRoute || sameFilters && !listRestoration)) {
       if (['book', 'reader'].includes(routing.current.view)) syncViewRoute();
       if (view === 'search') $(searchMode === 'image' ? '#search-tab-image' : '#search').focus({ preventScroll: true }); return;
     }
@@ -538,8 +597,9 @@
     if (options.modelId !== undefined) state.modelId = String(options.modelId);
     renderLibraryNavigation(); renderSeries(); renderLibrary();
     syncViewRoute();
-    window.scrollTo({ top: 0, behavior: 'instant' });
-    if (view === 'search') $(searchMode === 'image' ? '#search-tab-image' : '#search').focus();
+    if (!listRestoration) window.scrollTo({ top: 0, behavior: 'instant' });
+    if (view === 'search' && !options.fromRoute) $(searchMode === 'image' ? '#search-tab-image' : '#search').focus({ preventScroll: true });
+    if (!options.fromRoute) saveListPosition();
     if (['models', 'bookmarks'].includes(view) && !options.fromRoute) refreshLibrary();
   }
   function updateCounts() {
@@ -936,7 +996,7 @@
     const transcode = node('section'); transcode.id = 'transcoding-settings'; transcode.hidden = true;
     host.replaceChildren(back, panels[0], panels[1], index, ...panels.slice(2), transcode, imageSearchSettings);
     settingsLayout = { index, back, items, panels: Object.fromEntries(sections.map((section, position) => [section, panels[position]])), transcode };
-    transcodingUI = window.GravelleTranscodingUI.create({ host: transcode, api, post, toast, onCatalogChange: () => refreshLibrary(), onTabChange: tab => { state.settingsTab = tab === 'rules' ? 'rules' : ''; syncViewRoute(); } });
+    transcodingUI = window.GravelleTranscodingUI.create({ host: transcode, api, post, toast, onCatalogChange: () => refreshLibrary(), onFiltersChange: () => { cancelListRestoration(); saveListPosition(); }, onRender: restoreListPosition, onTabChange: tab => { state.settingsTab = tab === 'rules' ? 'rules' : ''; syncViewRoute(); } });
   }
   function renderSettings() {
     ensureSettingsLayout();
@@ -1171,7 +1231,10 @@
     const books = filteredBooks();
     const capacity = Performance.get().bookPageSize;
     const signature = JSON.stringify([state.view, state.libraryId, state.modelId, state.query, state.series, state.sort, capacity]);
-    if (catalogPaging.signature !== signature) { catalogPaging.signature = signature; catalogPaging.page = 0; catalogPaging.revealed = 0; }
+    if (catalogPaging.signature !== signature || listRestoration?.key === Routes.hash(currentViewRoute())) {
+      const saved = listRestoration?.key === Routes.hash(currentViewRoute()) ? listRestoration.saved : null;
+      catalogPaging.signature = signature; catalogPaging.page = saved?.page || 0; catalogPaging.revealed = saved?.revealed || 0;
+    }
     const grid = $('#book-grid');
     const page = Performance.catalogWindow(books.length, catalogPaging.page, capacity, catalogPaging.revealed, catalogBatchSize());
     catalogPaging.page = page.page; catalogPaging.revealed = page.end;
@@ -2829,7 +2892,10 @@
   }
   window.addEventListener('focus', refreshOnReturn);
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flushProgress(true); else refreshOnReturn(); });
-  window.addEventListener('pagehide', () => flushProgress(true));
+  window.addEventListener('scroll', () => { clearTimeout(listPositionTimer); listPositionTimer = setTimeout(saveListPosition, 150); }, { passive: true });
+  ['wheel', 'touchstart', 'pointerdown', 'keydown'].forEach(type => window.addEventListener(type, () => { if (!reader.open) cancelListRestoration(); }, { passive: true, capture: true }));
+  window.addEventListener('pagehide', () => { saveListPosition(); flushProgress(true); });
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') saveListPosition(); });
   window.addEventListener('hashchange', restoreLocation);
 
   let performanceResizeTimer;

@@ -1,5 +1,6 @@
 """Disposable-source checks for private, incremental local image matching."""
 from contextlib import closing
+import base64
 import hashlib
 from io import BytesIO
 import json
@@ -95,6 +96,142 @@ class ImageSearchFixture(unittest.TestCase):
 
 
 class ImageSearchTests(ImageSearchFixture):
+    def decode_fixture(self, data=None, *, source_path=None, **options):
+        payload = source_path.read_bytes() if source_path is not None else data
+        result = _features(BytesIO(payload), preview=options.get("preview", False))
+        result["digest"] = hashlib.sha256(payload).hexdigest()
+        for name in ("preview", "local_features", "local_sketch"):
+            if name in result:
+                result[name] = base64.b64decode(result[name], validate=True)
+        return result
+
+    def test_repeated_catalogue_reconciliation_does_not_starve_page_indexing(self):
+        self.manager.configure({"enabled": True})
+        synchronize = self.manager._sync_catalogue
+
+        def scan_during_synchronization(generation):
+            synchronize(generation)
+            # A periodic scan can finish while this directory pass is running.
+            self.manager.reconcile()
+
+        with patch.object(self.manager, "_sync_catalogue", side_effect=scan_during_synchronization), \
+                patch.object(self.manager, "_decode", side_effect=self.decode_fixture) as decoder:
+            for _ in range(4):
+                self.assertTrue(self.manager.run_once())
+            self.assertGreater(self.manager.snapshot()["summary"]["indexed"], 0)
+            self.assertGreater(decoder.call_count, 0)
+
+    def test_unchanged_scan_does_not_reconcile_but_source_changes_do(self):
+        def reconciliation_pending():
+            with closing(self.app.connect()) as connection:
+                return connection.execute("SELECT reconcile_pending FROM is_settings WHERE id=1").fetchone()[0]
+
+        def scan():
+            self.app._scan_library(self.app._library_config(self.library_id))
+
+        with patch.object(self.manager, "_decode", side_effect=self.decode_fixture) as decoder:
+            self.enable()
+            initial = {row["page_key"]: row for row in self.rows()}
+            self.assertFalse(reconciliation_pending())
+            decoder.reset_mock()
+            scan()
+            self.assertFalse(reconciliation_pending(), "An unchanged scan must not restart the whole index catalogue pass")
+            self.assertFalse(self.manager.run_once())
+            decoder.assert_not_called()
+
+            added = picture(51)
+            (self.album / "3.png").write_bytes(added)
+            scan()
+            self.assertTrue(reconciliation_pending())
+            self.finish()
+            self.assertEqual(decoder.call_count, 1)
+            added_rows = {row["page_key"]: row for row in self.rows()}
+            self.assertEqual(len(added_rows), 3)
+            for key, row in initial.items():
+                self.assertEqual(added_rows[key]["updated_at"], row["updated_at"])
+
+            decoder.reset_mock()
+            changed = picture(52)
+            (self.album / "1.png").write_bytes(changed)
+            scan()
+            self.assertTrue(reconciliation_pending())
+            self.finish()
+            self.assertEqual(decoder.call_count, 1)
+            changed_rows = {row["page_key"]: row for row in self.rows()}
+            for key, row in added_rows.items():
+                if key.endswith("/1.png"):
+                    self.assertEqual(changed_rows[key]["digest"], hashlib.sha256(changed).hexdigest())
+                else:
+                    self.assertEqual(changed_rows[key]["updated_at"], row["updated_at"])
+            self.assertEqual(self.manager.snapshot()["summary"], {"total": 3, "indexed": 3, "pending": 0, "failed": 0})
+
+    def test_scan_detects_atomic_page_replacement_preserving_size_and_mtime(self):
+        original = picture(61)
+        replacement = picture(62)
+        padded_size = max(len(original), len(replacement)) + 128
+        original += b"\0" * (padded_size - len(original))
+        replacement += b"\0" * (padded_size - len(replacement))
+        target = self.album / "1.png"
+        target.write_bytes(original)
+        self.app._scan_library(self.app._library_config(self.library_id))
+        with patch.object(self.manager, "_decode", side_effect=self.decode_fixture) as decoder:
+            self.enable()
+            previous = target.stat()
+            with closing(self.app.connect()) as connection:
+                signature = connection.execute("SELECT signature FROM books WHERE id=?", (self.book_id,)).fetchone()[0]
+            temporary = self.album / "replacement.tmp"
+            temporary.write_bytes(replacement)
+            os.utime(temporary, ns=(previous.st_atime_ns, previous.st_mtime_ns))
+            os.replace(temporary, target)
+            current = target.stat()
+            self.assertEqual((current.st_size, current.st_mtime_ns), (previous.st_size, previous.st_mtime_ns))
+            if current.st_ino == previous.st_ino:
+                self.skipTest("This filesystem does not expose distinct file identities for atomic replacement")
+            decoder.reset_mock()
+            self.app._scan_library(self.app._library_config(self.library_id))
+            with closing(self.app.connect()) as connection:
+                self.assertEqual(connection.execute("SELECT signature FROM books WHERE id=?", (self.book_id,)).fetchone()[0], signature)
+                self.assertTrue(connection.execute("SELECT reconcile_pending FROM is_settings WHERE id=1").fetchone()[0])
+            self.finish()
+            self.assertEqual(decoder.call_count, 1)
+            row = next(row for row in self.rows() if row["page_key"].endswith("/1.png"))
+            self.assertEqual(row["digest"], hashlib.sha256(replacement).hexdigest())
+            self.assertEqual(row["source_version"], self.app.transcoding._file_version(current))
+
+    def test_changed_scan_warnings_reconcile_including_partial_recovery(self):
+        walk = os.walk
+
+        def scan_with_warnings(names):
+            def walking(path, *args, **options):
+                for name in names:
+                    options["onerror"](PermissionError(13, "Temporary directory access failure", str(Path(path) / name)))
+                yield from walk(path, *args, **options)
+
+            with patch("server.os.walk", side_effect=walking):
+                self.app._scan_library(self.app._library_config(self.library_id))
+
+        def reconciliation_pending():
+            with closing(self.app.connect()) as connection:
+                return connection.execute("SELECT reconcile_pending FROM is_settings WHERE id=1").fetchone()[0]
+
+        with patch.object(self.manager, "_decode", side_effect=self.decode_fixture) as decoder:
+            self.enable()
+            initial = {row["page_key"]: row["updated_at"] for row in self.rows()}
+            decoder.reset_mock()
+            scan_with_warnings(["unreadable-a", "unreadable-b"])
+            self.assertTrue(reconciliation_pending())
+            self.finish()
+            scan_with_warnings(["unreadable-a"])
+            self.assertTrue(reconciliation_pending(), "Recovering one directory must be detected while another warning remains")
+            self.finish()
+            scan_with_warnings(["unreadable-a"])
+            self.assertFalse(reconciliation_pending(), "Identical persistent warnings must not continually restart reconciliation")
+            scan_with_warnings([])
+            self.assertTrue(reconciliation_pending())
+            self.finish()
+            decoder.assert_not_called()
+            self.assertEqual({row["page_key"]: row["updated_at"] for row in self.rows()}, initial)
+
     def test_invalid_admin_actions_do_not_change_settings(self):
         before = self.manager.snapshot()
         for body in ({"action": None}, {"action": []}, {"action": {}}, {"enabled": 1}, {},

@@ -21,9 +21,32 @@
     if (!status) return '正在读取图片搜索状态…';
     if (!status.enabled) return admin ? '图片索引未启用。' : '图片搜索尚未启用，请联系管理员。';
     if (status.paused) return status.available ? '图片索引已暂停，仍可搜索已收录的图片。' : '图片索引已暂停。';
+    if (admin && status.activity) {
+      const activity = status.activity;
+      if (activity.stage === 'stopped') return '图片索引任务已停止，请查看服务端日志。';
+      if (activity.stage === 'stopping') return '服务正在停止图片索引任务…';
+      if (activity.stage === 'error') return '图片索引暂时中断，正在重试，请查看服务端日志。';
+      if (status.indexing) {
+        if (activity.stage === 'reconciling') {
+          const progress = indexProgress(status);
+          return `正在核对图片：${progress.done} / ${progress.total} 张${status.available ? '，可先搜索已收录的图片。' : '，核对后开始建立索引。'}`;
+        }
+        if (activity.stage === 'waiting') return '正在等待后台任务名额…';
+        if (activity.stage === 'reading') return '正在读取图片…';
+        if (activity.stage === 'decoding') return '正在建立图片特征…';
+        if (activity.stage === 'starting' || activity.stage === 'queued') return '图片索引任务等待处理…';
+      }
+    }
     if (status.indexing) return status.available ? '索引更新中，可先搜索已收录的图片。' : '正在建立图片索引，请稍后再试。';
     if (!status.available) return '暂无可搜索的图片。';
     return '搜索你可访问的写真库中的相同或近似图片。';
+  }
+  function indexProgress(status) {
+    const checking = Boolean(status?.enabled && !status?.paused && status?.activity?.stage === 'reconciling');
+    const source = checking ? status.activity : status?.progress;
+    const count = value => Number.isSafeInteger(value) && value >= 0 ? value : 0;
+    const total = count(source?.total); const done = Math.min(count(source?.done), total);
+    return { done, total, percent: total ? done / total * 100 : 0, label: checking ? '图片核对进度' : '图片索引进度' };
   }
   function normalizeResults(payload) {
     const seen = new Set();
@@ -149,8 +172,8 @@
       const snapshot = state.status;
       settings.enabled.checked = Boolean(snapshot?.enabled); settings.enabled.disabled = state.busy || !snapshot;
       settings.message.textContent = statusMessage(snapshot, true);
-      const summary = snapshot?.summary || {}; const done = Math.max(0, Number(snapshot?.progress?.done) || 0); const total = Math.max(0, Number(snapshot?.progress?.total) || 0);
-      settings.progress.value = total ? Math.min(100, done / total * 100) : 0; settings.progress.hidden = !snapshot?.indexing && !snapshot?.paused;
+      const summary = snapshot?.summary || {}; const progress = indexProgress(snapshot);
+      settings.progress.value = progress.percent; settings.progress.setAttribute('aria-label', progress.label); settings.progress.hidden = !snapshot?.indexing && !snapshot?.paused;
       settings.counts.textContent = snapshot ? `已索引 ${Number(summary.indexed) || 0} · 待处理 ${Number(summary.pending) || 0} · 失败 ${Number(summary.failed) || 0} · 共 ${Number(summary.total) || 0} 张` : '';
       settings.pause.textContent = snapshot?.paused ? '继续' : '暂停'; settings.pause.hidden = !snapshot?.indexing && !snapshot?.paused; settings.retry.hidden = !Number(summary.failed);
       settings.pause.disabled = settings.retry.disabled = state.busy || !snapshot?.enabled; settings.rebuild.disabled = state.busy || !snapshot?.enabled; settings.clear.disabled = state.busy || !snapshot || !(Number(summary.indexed) + Number(summary.pending) + Number(summary.failed)); settings.refresh.disabled = state.busy;
@@ -183,5 +206,5 @@
       reset() { state.generation += 1; state.fileGeneration += 1; state.active = state.managing = state.busy = false; stopStatus(); state.statusRequest?.abort(); state.statusRequest = null; cancelQuery(); releasePreview(); Object.assign(state, { file: null, mime: '', status: null, catalog: '' }); clearResults(); error(search.error, ''); error(settings.error, ''); search.input.value = ''; if (confirm.open) confirm.close(); renderSearch(); renderSettings(); }
     };
   }
-  return { maxBytes, fileError, imageType, statusMessage, normalizeResults, createRequestGate, create };
+  return { maxBytes, fileError, imageType, statusMessage, indexProgress, normalizeResults, createRequestGate, create };
 });

@@ -52,6 +52,46 @@ test('search availability messages distinguish disabled, partial, paused and emp
   assert.match(Search.statusMessage({ enabled: true, available: true }), /可访问/);
 });
 
+test('administrator maintenance stages distinguish catalogue work from completed fingerprints', () => {
+  const status = { enabled: true, available: false, indexing: true, progress: { done: 0, total: 12000 }, activity: { stage: 'reconciling', done: 320, total: 12000 } };
+  assert.match(Search.statusMessage(status, true), /核对图片：320 \/ 12000/);
+  assert.deepEqual(Search.indexProgress(status), { done: 320, total: 12000, percent: 320 / 12000 * 100, label: '图片核对进度' });
+  assert.doesNotMatch(Search.statusMessage(status, false), /核对|320/);
+  for (const [stage, text] of [['waiting', /等待后台任务/], ['reading', /读取图片/], ['decoding', /图片特征/], ['stopped', /任务已停止/], ['error', /正在重试/]]) {
+    status.activity.stage = stage;
+    assert.match(Search.statusMessage(status, true), text);
+  }
+  status.paused = true;
+  assert.match(Search.statusMessage(status, true), /已暂停/);
+  assert.deepEqual(Search.indexProgress(status), { done: 0, total: 12000, percent: 0, label: '图片索引进度' });
+});
+
+test('maintenance progress rejects malformed values and old servers retain index progress', () => {
+  for (const [done, total] of [[NaN, Infinity], [-1, -5], ['999', '1000'], [1.5, {}]]) {
+    const status = { enabled: true, indexing: true, activity: { stage: 'reconciling', done, total } };
+    assert.deepEqual(Search.indexProgress(status), { done: 0, total: 0, percent: 0, label: '图片核对进度' });
+    assert.doesNotMatch(Search.statusMessage(status, true), /NaN|Infinity|undefined/);
+  }
+  assert.deepEqual(Search.indexProgress({ progress: { done: 3, total: 10 } }), { done: 3, total: 10, percent: 30, label: '图片索引进度' });
+  assert.equal(Search.indexProgress({ progress: { done: 20, total: 10 } }).percent, 100);
+});
+
+test('settings update existing controls while catalogue progress changes', async () => {
+  const fixture = browserFixture(); let done = 2;
+  const payload = () => ({ enabled: true, indexing: true, available: false, summary: { indexed: 0, pending: 20, failed: 0, total: 20 }, progress: { done: 0, total: 20 }, activity: { stage: 'reconciling', done, total: 20 } });
+  const ui = Search.create({ ...fixture, api: async () => payload(), post: async () => ({}), openBook: () => {}, isAdmin: () => true });
+  ui.showSettings(); await flush();
+  const progress = fixture.find(fixture.settingsHost, item => item.tagName === 'progress');
+  const refresh = fixture.find(fixture.settingsHost, item => item.textContent === '刷新');
+  assert.equal(progress.value, 10); assert.equal(progress.attributes['aria-label'], '图片核对进度');
+  done = 12; await refresh.dispatch('click'); await flush();
+  assert.strictEqual(fixture.find(fixture.settingsHost, item => item.tagName === 'progress'), progress);
+  assert.strictEqual(fixture.find(fixture.settingsHost, item => item.textContent === '刷新'), refresh);
+  assert.equal(progress.value, 60);
+  assert.match(fixture.find(fixture.settingsHost, item => item.className === 'image-search-index-counts').textContent, /已索引 0/);
+  ui.reset();
+});
+
 // A minimal browser surface exercises asynchronous account boundaries without
 // depending on a browser, real source images, cookies or a running server.
 function browserFixture() {

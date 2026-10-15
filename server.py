@@ -49,7 +49,7 @@ from transcoding import TranscodingManager
 from image_search import ImageSearchManager, MAX_QUERY_BYTES
 from task_scheduler import SharedTaskScheduler
 
-VERSION = "0.8.5"
+VERSION = "0.8.6"
 MEDIA_TYPES = {"manga_jp", "manga_kr", "comic_us", "photo"}
 IMAGE_TYPES = {
     ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
@@ -86,6 +86,7 @@ STATIC_FILES = {
     "/user-management.js": "user-management.js",
     "/batch-selection.js": "batch-selection.js",
     "/page-router.js": "page-router.js",
+    "/list-state.js": "list-state.js",
     "/transcoding-ui.js": "transcoding-ui.js",
     "/image-search-ui.js": "image-search-ui.js",
     "/fonts/LibreCaslonText.ttf": "fonts/LibreCaslonText.ttf",
@@ -1515,6 +1516,12 @@ class Library:
             with closing(self.connect()) as connection:
                 cached = {row["id"]: dict(row) for row in connection.execute(
                     "SELECT * FROM books WHERE library_id=?", (library_id,))}
+            # Only source/availability changes require another index pass.
+            # Periodic scans also update metadata and last_scan, but must not
+            # restart a slow full-catalogue reconciliation every five minutes.
+            index_columns = ("id", "signature", "pages", "source_root", "path", "format")
+            index_before = {tuple(row[key] for key in index_columns) for row in cached.values()
+                            if row["active"] and not row["removed"]}
             previous_ids = {(self._source_identity(Path(row["source_root"]), row["path"]),
                              "folder" if row["format"] == "folder" else "archive"): row["id"]
                             for row in cached.values()}
@@ -1614,6 +1621,15 @@ class Library:
                 if current["revision"] != revision:
                     self.pending_scans.add(library_id)
                     return
+                index_versions = {(row["book_id"], row["page_key"]): row["source_version"] for row in connection.execute(
+                    "SELECT p.book_id,p.page_key,p.source_version FROM is_pages p JOIN books b ON b.id=p.book_id WHERE b.library_id=?", (library_id,))}
+                # Header inspection already obtained fresh per-file identity
+                # (or ZIP CRC). A same-size/mtime replacement must still queue
+                # reconciliation, without reading any large index payloads.
+                index_sources_changed = any(
+                    (book_id, page["page_key"]) in index_versions and
+                    index_versions[(book_id, page["page_key"])] != page["source_version"]
+                    for book_id, pages in inspected.items() for page in pages)
                 connection.execute("UPDATE books SET active=0 WHERE library_id=?", (library_id,))
                 for row in cached.values():
                     if row["active"] and any(
@@ -1645,8 +1661,11 @@ class Library:
                                        (book["page_count"] - 1, book["id"]))
                 connection.execute("UPDATE media_libraries SET last_scan=?,errors=? WHERE id=?",
                     (scanned_at, json.dumps(errors, ensure_ascii=False), library_id))
+                index_after = {tuple(row[key] for key in index_columns) for row in connection.execute(
+                    "SELECT * FROM books WHERE library_id=? AND active=1 AND removed=0", (library_id,))}
             LOG.info("Media library %s scan finished: %d books, %d warnings", config["name"], len(found), len(errors))
-            self.image_search.reconcile()
+            if index_after != index_before or index_sources_changed or errors != json.loads(config["errors"]):
+                self.image_search.reconcile()
         except Exception as error:
             LOG.exception("Media library %s scan failed", config["name"])
             message = str(error) if isinstance(error, ReaderError) else "扫描失败，请检查写真库挂载、目录权限和存储空间。"
