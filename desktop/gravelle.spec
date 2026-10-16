@@ -15,7 +15,7 @@ analysis = Analysis(
         (str(resources / 'desktop' / 'release.json'), 'desktop'),
         (str(root / 'desktop' / 'assets' / 'gravelle-wordmark.png'), 'desktop/assets'),
     ],
-    hiddenimports=['server', 'transcoding', 'image_search', 'image_search_features', 'task_scheduler', 'desktop.runtime', 'PIL.Image', 'cv2', 'numpy'],
+    hiddenimports=['server', 'transcoding', 'image_search', 'image_search_features', 'task_scheduler', 'library_covers', 'cache_manager', 'desktop.runtime', 'desktop.platforms', 'PIL.Image', 'cv2', 'numpy'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

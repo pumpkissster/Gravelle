@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import gc
 from contextlib import closing, contextmanager, nullcontext
 import hashlib
 import heapq
@@ -17,6 +18,7 @@ import logging
 import math
 import os
 from pathlib import Path
+from queue import Empty, Full, Queue
 import re
 import sqlite3
 import stat
@@ -43,6 +45,153 @@ MAX_PREVIEW_BYTES = 192 * 1024
 MAX_MATCH_CANDIDATES = 64
 MAX_MATCH_INPUT = 4 * MIB
 CATALOGUE_BATCH_SIZE = 64
+INDEX_WORKER_PAGES = 32
+INDEX_WORKER_LIFETIME = 300
+INDEX_WORKER_IDLE = 10
+INDEX_WORKER_RECYCLE_RSS = 512 * MIB
+INDEX_PROTOCOL = 1
+INDEX_MAX_REQUEST = 16 * 1024
+
+
+class _UnsupportedImage(ValueError):
+    def __init__(self, actual_format):
+        self.actual_format = str(actual_format or "UNKNOWN")[:20]
+        super().__init__(f"当前图片实际格式为 {self.actual_format}，图片索引暂不支持；支持 JPG、PNG 和 WebP。")
+
+
+def _worker_error(error):
+    message = str(error) if isinstance(error, (ValueError, MemoryError)) else "图片无法解码或内存不足，请使用有效的 JPG、PNG 或 WebP 图片。"
+    result = {"ok": False, "error": message[:300], "failure_code": "decode_error"}
+    if isinstance(error, _UnsupportedImage):
+        result.update(actual_format=error.actual_format, failure_code="unsupported_format")
+    return result
+
+
+def _source_fingerprint(path, preview):
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+        raise ValueError("图片任务输入不能是链接。")
+    if not 0 < info.st_size <= MAX_BYTES:
+        raise ValueError("图片文件为空或超过 64 MiB。")
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(fd, "rb") as source:
+        opened = os.fstat(source.fileno())
+        if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+            raise ValueError("图片任务输入发生变化。")
+        digest = hashlib.sha256()
+        total = 0
+        while chunk := source.read(MIB):
+            total += len(chunk)
+            if total > MAX_BYTES:
+                raise ValueError("图片文件超过 64 MiB。")
+            digest.update(chunk)
+        source.seek(0)
+        result = _features(source, preview=preview, max_pixels=MAX_SOURCE_PIXELS)
+    return {"ok": True, "digest": digest.hexdigest(), **result}
+
+
+def _worker_peak_rss():
+    """A recycle hint, not a replacement for the enforced address-space limit."""
+    try:
+        if os.name == "nt":
+            import ctypes
+            from ctypes import wintypes
+            class Counters(ctypes.Structure):
+                _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD)] + [(name, ctypes.c_size_t) for name in
+                    ("PeakWorkingSetSize", "WorkingSetSize", "QuotaPeakPagedPoolUsage", "QuotaPagedPoolUsage", "QuotaPeakNonPagedPoolUsage", "QuotaNonPagedPoolUsage", "PagefileUsage", "PeakPagefileUsage")]
+            counters = Counters()
+            counters.cb = ctypes.sizeof(counters)
+            kernel, psapi = ctypes.WinDLL("kernel32", use_last_error=True), ctypes.WinDLL("psapi", use_last_error=True)
+            kernel.GetCurrentProcess.restype = wintypes.HANDLE
+            psapi.GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD]
+            psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
+            handle = kernel.GetCurrentProcess()
+            if not psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb):
+                return 0
+            return int(counters.PeakWorkingSetSize)
+        import resource
+        return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * (1 if sys.platform == "darwin" else 1024)
+    except (ImportError, OSError, AttributeError):
+        return 0
+
+
+def _serve_index_worker():
+    """Private one-request-at-a-time protocol; no query uploads enter this worker."""
+    local_features._native()  # Pay native import cost once, under the OS budget.
+    started = time.monotonic()
+    print(json.dumps({"ready": True, "protocol": INDEX_PROTOCOL}), flush=True)
+    for count in range(1, INDEX_WORKER_PAGES + 1):
+        raw = sys.stdin.buffer.readline(INDEX_MAX_REQUEST + 1)
+        if not raw:
+            return 0
+        request_id = None
+        try:
+            if len(raw) > INDEX_MAX_REQUEST or not raw.endswith(b"\n"):
+                raise ValueError("索引任务输入无效。")
+            request = json.loads(raw)
+            if (not isinstance(request, dict) or set(request) != {"id", "source", "preview"}
+                    or type(request["id"]) is not int or request["id"] != count
+                    or not isinstance(request["source"], str) or not 0 < len(request["source"]) < 4096
+                    or type(request["preview"]) is not bool):
+                raise ValueError("索引任务输入无效。")
+            request_id = request["id"]
+            result = _source_fingerprint(Path(request["source"]), request["preview"])
+        except (Exception, MemoryError) as error:
+            result = _worker_error(error)
+        gc.collect()
+        peak = _worker_peak_rss()
+        retire = (count >= INDEX_WORKER_PAGES or time.monotonic() - started >= INDEX_WORKER_LIFETIME
+                  or peak >= INDEX_WORKER_RECYCLE_RSS or not result["ok"])
+        print(json.dumps({"id": request_id, "retire": retire, "peak_rss_bytes": peak, "result": result}, separators=(",", ":")), flush=True)
+        del result
+        if retire:
+            return 0
+    return 0
+
+
+class _IndexWorkerSession:
+    """Bounded pipe reader; the manager checks cancellation while awaiting a line."""
+    def __init__(self, process):
+        self.process = process
+        self.responses = Queue(maxsize=2)
+        self.count = 0
+        self.started = time.monotonic()
+        self.busy = True
+        self.broken = False
+        self.timer = None
+        self.closed = threading.Event()
+        self.reader = threading.Thread(target=self._read, name="image-index-pipe", daemon=True)
+        self.reader.start()
+
+    def _read(self):
+        try:
+            while True:
+                line = self.process.stdout.readline(MAX_PREVIEW_BYTES * 2 + 1)
+                if not line or len(line) > MAX_PREVIEW_BYTES * 2 or not line.endswith(b"\n"):
+                    self.responses.put(None, timeout=1)
+                    return
+                self.responses.put(line, timeout=1)
+        except (OSError, ValueError, Full):
+            try:
+                self.responses.put_nowait(None)
+            except Full:
+                pass
+
+    def close(self):
+        if self.timer:
+            self.timer.cancel()
+        if self.process.poll() is None:
+            try:
+                self.process.kill()
+            except OSError:
+                pass
+        self.process.wait(timeout=5)
+        for pipe in (self.process.stdin, self.process.stdout):
+            if pipe:
+                pipe.close()
+        if self.reader is not threading.current_thread():
+            self.reader.join(timeout=1)
+        self.closed.set()
 
 
 def _png_without_bad_exif(source):
@@ -169,7 +318,7 @@ def _features(source, *, preview=False, max_pixels=MAX_QUERY_PIXELS):
         if getattr(original, "is_animated", False):
             raise ValueError("暂不支持动画图片，请选择静态 JPG、PNG 或 WebP 图片。")
         if original.format not in ("JPEG", "PNG", "WEBP"):
-            raise ValueError("请选择 JPG、PNG 或 WebP 图片。")
+            raise _UnsupportedImage(original.format)
         # JPEG decoder reduction avoids allocating the full 69 MP source. PNG
         # and WebP still decode in the child under the enforced memory ceiling.
         if original.format == "JPEG":
@@ -225,15 +374,18 @@ def worker_main(argv=None):
     parser.add_argument("--stdin", action="store_true")
     parser.add_argument("--preview", action="store_true")
     parser.add_argument("--match", action="store_true")
+    parser.add_argument("--serve-index", action="store_true")
     args = parser.parse_args(argv)
     try:
         from transcoding import _restrict_worker, _lower_background_priority
         # Native libraries must not create a BLAS/OpenMP thread pool per task.
         for name in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
             os.environ[name] = "1"
-        if args.source:
+        if args.source or args.serve_index:
             _lower_background_priority()
         limit_handle = _restrict_worker(MEMORY_MB * MIB)
+        if args.serve_index and (args.stdin or args.source or args.preview or args.match):
+            raise ValueError("索引进程参数无效。")
         if args.match:
             if not args.stdin or args.source or args.preview:
                 raise ValueError("图片匹配任务输入无效。")
@@ -256,6 +408,10 @@ def worker_main(argv=None):
             print(json.dumps({"ok": True, "matches": matches}, separators=(",", ":")))
             return 0
         Image.MAX_IMAGE_PIXELS = None  # Private child has its own pixel budget.
+        if args.serve_index:
+            if args.stdin or args.source or args.preview or args.match:
+                raise ValueError("索引进程参数无效。")
+            return _serve_index_worker()
         if args.stdin == bool(args.source):
             raise ValueError("图片任务输入无效。")
         if args.stdin:
@@ -265,30 +421,15 @@ def worker_main(argv=None):
             source = BytesIO(data)
             digest = hashlib.sha256(data).hexdigest()
         else:
-            info = args.source.lstat()
-            if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
-                raise ValueError("图片任务输入不能是链接。")
-            if not 0 < info.st_size <= MAX_BYTES:
-                raise ValueError("图片文件为空或超过 64 MiB。")
-            fd = os.open(args.source, os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0))
-            opened_info = os.fstat(fd)
-            if not stat.S_ISREG(opened_info.st_mode) or (opened_info.st_dev, opened_info.st_ino) != (info.st_dev, info.st_ino):
-                os.close(fd)
-                raise ValueError("图片任务输入发生变化。")
-            source = os.fdopen(fd, "rb")
-            digest_hash = hashlib.sha256()
-            while chunk := source.read(MIB):
-                digest_hash.update(chunk)
-            digest = digest_hash.hexdigest()
-            source.seek(0)
+            print(json.dumps(_source_fingerprint(args.source, args.preview), separators=(",", ":")))
+            return 0
         with source:
             result = _features(source, preview=args.preview,
                                max_pixels=MAX_QUERY_PIXELS if args.stdin else MAX_SOURCE_PIXELS)
         print(json.dumps({"ok": True, "digest": digest, **result}, separators=(",", ":")))
         return 0
     except (Exception, MemoryError) as error:
-        message = str(error) if isinstance(error, (ValueError, MemoryError)) else "图片无法解码或内存不足，请使用有效的 JPG、PNG 或 WebP 图片。"
-        print(json.dumps({"ok": False, "error": message[:300]}, ensure_ascii=True))
+        print(json.dumps(_worker_error(error), ensure_ascii=True))
         return 1
 
 
@@ -313,6 +454,7 @@ class ImageSearchManager:
         self._activity_logged_at = 0
         self._failed_generation = None
         self.processes = set()
+        self._index_worker = None
         self.root = library.data / "image-search-work"
         self._initialize()
 
@@ -353,7 +495,9 @@ class ImageSearchManager:
             for name, declaration in (("local_features", "BLOB"), ("local_sketch", "BLOB"),
                                       ("local_version", "INTEGER NOT NULL DEFAULT 0"),
                                       ("local_state", "TEXT NOT NULL DEFAULT 'pending'"),
-                                      ("local_error", "TEXT NOT NULL DEFAULT ''")):
+                                      ("local_error", "TEXT NOT NULL DEFAULT ''"),
+                                      ("failure_code", "TEXT NOT NULL DEFAULT ''"),
+                                      ("actual_format", "TEXT NOT NULL DEFAULT ''")):
                 if name not in columns:
                     connection.execute(f"ALTER TABLE is_pages ADD COLUMN {name} {declaration}")
             connection.execute("UPDATE is_pages SET status='pending' WHERE status='running'")
@@ -444,6 +588,10 @@ class ImageSearchManager:
 
     def close(self):
         self.stop_event.set()
+        try:
+            self._stop_index_worker()
+        except (OSError, subprocess.TimeoutExpired):
+            logging.getLogger("sumi").error("Image index worker did not exit within its shutdown deadline")
         self.wake.set()
         self.library.task_scheduler.wake()
         with self.decoder_condition:
@@ -515,8 +663,10 @@ class ImageSearchManager:
                 connection.execute("DELETE FROM is_pages")
                 connection.execute("UPDATE is_settings SET enabled=1,paused=0,reconcile_pending=1,error=''")
             elif action == "retry":
-                connection.execute("UPDATE is_pages SET status='pending',error='' WHERE status='failed'")
-                connection.execute("UPDATE is_pages SET local_state='pending',local_error='' WHERE local_state='failed'")
+                connection.execute("""UPDATE is_pages SET status='pending',error='' WHERE status='failed' AND failure_code<>'unsupported_format'
+                    AND error<>'请选择 JPG、PNG 或 WebP 图片。' AND local_error<>'请选择 JPG、PNG 或 WebP 图片。'""")
+                connection.execute("""UPDATE is_pages SET local_state='pending',local_error='' WHERE local_state='failed' AND failure_code<>'unsupported_format'
+                    AND error<>'请选择 JPG、PNG 或 WebP 图片。' AND local_error<>'请选择 JPG、PNG 或 WebP 图片。'""")
                 connection.execute("UPDATE is_settings SET paused=0,error='',reconcile_pending=1")
             elif action == "clear":
                 connection.execute("DELETE FROM is_pages")
@@ -527,6 +677,7 @@ class ImageSearchManager:
             settings = self._settings(connection)
         self._set_activity("disabled" if not settings["enabled"] else "paused" if settings["paused"] else "queued",
                            settings["generation"])
+        self._stop_index_worker()
         if self.auto_start:
             self.start()
         self.wake.set()
@@ -539,6 +690,106 @@ class ImageSearchManager:
             JOIN books b ON b.id=p.book_id JOIN media_libraries l ON l.id=b.library_id
             WHERE b.active=1 AND b.removed=0 AND {access} GROUP BY p.status,p.local_state""", arguments)
         return self._counts(rows)
+
+    def _failure_format(self, row):
+        actual = row["actual_format"]
+        if actual or "请选择 JPG、PNG 或 WebP 图片" not in (row["error"] + row["local_error"]):
+            return actual
+        # Older indexes did not record actual format. Inspect only a bounded
+        # signature for the old unsupported-format error; never decode on GET.
+        try:
+            with self.library.transcoding._open_source(row, row["page_key"]) as (source, version):
+                if version != row["source_version"]:
+                    return ""
+                head = source.read(64)
+            if head.startswith(b"BM"):
+                return "BMP"
+            if head[:6] in (b"GIF87a", b"GIF89a"):
+                return "GIF"
+            if head[4:8] == b"ftyp" and b"avif" in head[8:64]:
+                return "AVIF"
+        except Exception:
+            pass
+        return ""
+
+    def failures(self, page=1, page_size=20):
+        if type(page) is not int or not 1 <= page <= 1_000_000 or type(page_size) is not int or not 1 <= page_size <= 100:
+            raise self._error("失败列表分页参数无效。")
+        with closing(self.library.connect()) as connection:
+            self.library.require_admin(connection)
+            where = "b.active=1 AND b.removed=0 AND (p.status='failed' OR (p.status='ready' AND p.local_state='failed'))"
+            total = connection.execute("SELECT COUNT(*) FROM is_pages p JOIN books b ON b.id=p.book_id WHERE " + where).fetchone()[0]
+            rows = [dict(row) for row in connection.execute("""SELECT b.*,p.page_key,p.page_index,p.source_version,
+                p.error,p.local_error,p.failure_code,p.actual_format,p.updated_at,COALESCE(NULLIF(m.title,''),b.title) AS display_title,
+                l.name AS library_name FROM is_pages p JOIN books b ON b.id=p.book_id
+                JOIN media_libraries l ON l.id=b.library_id LEFT JOIN book_metadata m ON m.book_id=b.id WHERE """ + where +
+                " ORDER BY p.updated_at DESC,p.book_id,p.page_index LIMIT ? OFFSET ?", (page_size, (page - 1) * page_size))]
+        items = []
+        for row in rows:
+            actual = self._failure_format(row)
+            unsupported = (row["failure_code"] == "unsupported_format" or actual in ("AVIF", "BMP", "GIF")
+                           or "请选择 JPG、PNG 或 WebP 图片。" in (row["error"], row["local_error"]))
+            reason = (f"当前图片实际格式为 {actual}，图片索引暂不支持；支持 JPG、PNG 和 WebP。" if unsupported and actual
+                      else "当前图片格式暂不支持索引；支持 JPG、PNG 和 WebP。" if unsupported
+                      else row["error"] or row["local_error"] or "图片索引失败，请重试或检查源图片。")
+            items.append({"book_id": row["id"], "page_key": row["page_key"], "page": row["page_index"],
+                          "book_title": row["display_title"], "library_name": row["library_name"],
+                          "filename": Path(row["page_key"].replace("\\", "/")).name, "reason": reason[:300],
+                          "actual_format": actual, "failure_code": "unsupported_format" if unsupported else row["failure_code"] or "decode_error",
+                          "retryable": not unsupported, "updated_at": row["updated_at"]})
+        return {"items": items, "total": total, "page": page, "page_size": page_size}
+
+    def retry_failures(self, body):
+        if not isinstance(body, dict) or set(body) != {"items"} or not isinstance(body["items"], list) or not 1 <= len(body["items"]) <= 100:
+            raise self._error("请选择 1 至 100 张失败图片。")
+        keys = set()
+        for item in body["items"]:
+            if (not isinstance(item, dict) or set(item) != {"book_id", "page_key"}
+                    or not isinstance(item["book_id"], str) or not re.fullmatch(r"[a-f0-9]{24}", item["book_id"])
+                    or not isinstance(item["page_key"], str) or not 0 < len(item["page_key"]) <= 4096):
+                raise self._error("失败图片选择无效。")
+            keys.add((item["book_id"], item["page_key"]))
+        with closing(self.library.connect()) as connection:
+            self.library.require_admin(connection)
+            rows = []
+            for book_id, key in keys:
+                row = connection.execute("""SELECT b.*,p.page_key,p.source_version,p.failure_code,p.actual_format,p.error,p.local_error
+                    FROM is_pages p JOIN books b ON b.id=p.book_id WHERE p.book_id=? AND p.page_key=?
+                    AND b.active=1 AND b.removed=0 AND (p.status='failed' OR (p.status='ready' AND p.local_state='failed'))""", (book_id, key)).fetchone()
+                if row:
+                    rows.append(dict(row))
+        formats = {(row["id"], row["page_key"]): self._failure_format(row) for row in rows}
+        retried = 0
+        with self.lock, closing(self.library.connect()) as connection, connection:
+            self.library.require_admin(connection)
+            connection.execute("BEGIN IMMEDIATE")
+            settings = self._settings(connection)
+            if not settings["enabled"]:
+                raise self._error("请先启用图片索引。", 409)
+            for row in rows:
+                actual = formats[(row["id"], row["page_key"])]
+                if (row["failure_code"] == "unsupported_format" or actual in ("AVIF", "BMP", "GIF")
+                        or "请选择 JPG、PNG 或 WebP 图片。" in (row["error"], row["local_error"])):
+                    continue
+                cursor = connection.execute("""UPDATE is_pages SET status=CASE WHEN status='failed' THEN 'pending' ELSE status END,
+                    local_state='pending',error='',local_error='',failure_code='',actual_format=''
+                    WHERE book_id=? AND page_key=? AND source_version=? AND (status='failed' OR (status='ready' AND local_state='failed'))
+                    AND EXISTS(SELECT 1 FROM books b WHERE b.id=is_pages.book_id AND b.active=1 AND b.removed=0)""",
+                    (row["id"], row["page_key"], row["source_version"]))
+                retried += cursor.rowcount
+            if retried:
+                connection.execute("UPDATE is_pages SET status='pending' WHERE status='running'")
+                connection.execute("UPDATE is_pages SET local_state='pending' WHERE local_state='running'")
+                connection.execute("UPDATE is_settings SET paused=0,error='',generation=generation+1,revision=revision+1,reconcile_pending=1")
+                settings = self._settings(connection)
+        if retried:
+            self._stop_index_worker()
+            self._set_activity("queued", settings["generation"])
+            self.wake.set()
+            self.library.task_scheduler.wake()
+            if self.auto_start:
+                self.start()
+        return {"retried": retried, "skipped": len(keys) - retried, "snapshot": self.snapshot()}
 
     @staticmethod
     def _counts(rows):
@@ -615,7 +866,7 @@ class ImageSearchManager:
                         VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(book_id,page_key) DO UPDATE SET
                         page_index=excluded.page_index,source_version=excluded.source_version,book_signature=excluded.book_signature,
                         algorithm=excluded.algorithm,status=excluded.status,error=excluded.error,digest='',dhash='',phash='',mean='[]',preview=NULL,
-                        local_features=NULL,local_sketch=NULL,local_state='pending',local_version=0,local_error='',updated_at=excluded.updated_at""",
+                        local_features=NULL,local_sketch=NULL,local_state='pending',local_version=0,local_error='',failure_code='',actual_format='',updated_at=excluded.updated_at""",
                         (book["id"], key, index, version, book["signature"], ALGORITHM_VERSION,
                          "failed" if error else "pending", error, time.time()))
             if changed:
@@ -698,10 +949,17 @@ class ImageSearchManager:
             return False
         generation = None
         try:
+            with self.lock:
+                broken = self._index_worker if self._index_worker and self._index_worker.broken else None
+            if broken:
+                # Do not claim further pages while a failed child still needs
+                # reaping. Retry cleanup on the coordination loop instead.
+                self._stop_index_worker(broken)
             with closing(self.library.connect()) as connection:
                 settings = self._settings(connection)
             generation = settings["generation"]
             if not self._current(settings["generation"]):
+                self._stop_index_worker()
                 self._set_activity("disabled" if not settings["enabled"] else "paused", generation)
                 return False
             if settings["reconcile_pending"] and self._index_turn_due != settings["generation"]:
@@ -718,6 +976,7 @@ class ImageSearchManager:
                     WHERE b.active=1 AND b.removed=0 AND (p.status='pending' OR (p.status='ready' AND p.local_state='pending'))
                     ORDER BY CASE p.status WHEN 'pending' THEN 0 ELSE 1 END,b.id,p.page_index LIMIT 1""").fetchone()
                 if not job:
+                    self._stop_index_worker()
                     self._set_activity("idle", generation)
                     return bool(settings["reconcile_pending"])
                 job = dict(job)
@@ -756,7 +1015,7 @@ class ImageSearchManager:
                 if not self._job_current(connection, job, generation):
                     return True
                 connection.execute("""UPDATE is_pages SET status='ready',digest=?,dhash=?,phash=?,mean=?,width=?,height=?,preview=?,error='',updated_at=?,
-                    local_features=?,local_sketch=?,local_version=?,local_state='ready',local_error=''
+                    local_features=?,local_sketch=?,local_version=?,local_state='ready',local_error='',failure_code='',actual_format=''
                     WHERE book_id=? AND page_key=?""", (result["digest"], result["dhash"], result["phash"], json.dumps(result["mean"]),
                     result["width"], result["height"], result["preview"], time.time(), result.get("local_features"), result.get("local_sketch"),
                     LOCAL_VERSION, job["id"], job["page_key"]))
@@ -766,8 +1025,9 @@ class ImageSearchManager:
                 if self._job_current(connection, job, generation):
                     message = str(error) if isinstance(error, self._error("x").__class__) else "图片索引失败，请重试或检查源图片。"
                     connection.execute("""UPDATE is_pages SET status=CASE WHEN status='ready' THEN 'ready' ELSE 'failed' END,error=?,
-                        local_state='failed',local_version=?,local_error=?,updated_at=? WHERE book_id=? AND page_key=?""",
-                                       (message[:300], LOCAL_VERSION, message[:300], time.time(), job["id"], job["page_key"]))
+                        local_state='failed',local_version=?,local_error=?,failure_code=?,actual_format=?,updated_at=? WHERE book_id=? AND page_key=?""",
+                                       (message[:300], LOCAL_VERSION, message[:300], getattr(error, "failure_code", "decode_error"),
+                                        getattr(error, "actual_format", ""), time.time(), job["id"], job["page_key"]))
                     connection.execute("UPDATE is_settings SET revision=revision+1,error=?", (message[:300],))
                 else:
                     connection.execute("UPDATE is_pages SET status='pending' WHERE book_id=? AND page_key=? AND status='running'",
@@ -804,14 +1064,130 @@ class ImageSearchManager:
                         sink.write(chunk)
                         self._set_activity("reading", generation, done=total)
             self._set_activity("decoding", generation)
-            result = self._decode(source_path=source_path, preview=True, generation=generation)
+            result = self._decode(source_path=source_path, preview=True, generation=generation, reusable=True)
             with self.library.transcoding._open_source(job, job["page_key"]) as (source, version):
                 if version != job["source_version"]:
                     self.reconcile()
                     raise self._error("源图片在建立索引时发生变化，请重试。", 422)
             return result
 
-    def _decode(self, data=None, *, source_path=None, preview=False, generation=None):
+    def _stop_index_worker(self, expected=None, *, idle=False):
+        with self.lock:
+            session = self._index_worker
+            if session is None or (expected is not None and session is not expected) or (idle and session.busy):
+                return
+            self._index_worker = None
+        try:
+            session.close()
+        except BaseException:
+            if session.process.poll() is None:
+                session.broken = True
+                with self.lock:
+                    if self._index_worker is None:
+                        self._index_worker = session
+            raise
+        finally:
+            if session.process.poll() is not None:
+                with self.lock:
+                    self.processes.discard(session.process)
+
+    def _receive_index(self, session, deadline, generation, connection):
+        while True:
+            if not self._current(generation, connection):
+                raise self._error("索引任务已暂停或取消。", 409)
+            if time.monotonic() >= deadline:
+                raise self._error("图片索引超时，请重试或缩小源图片。", 422)
+            try:
+                line = session.responses.get(timeout=.1)
+                break
+            except Empty:
+                continue
+        if line is None:
+            from transcoding import _worker_exit_message
+            returncode = session.process.poll()
+            if returncode is None:
+                # EOF can precede process reaping by a few milliseconds.
+                try:
+                    returncode = session.process.wait(timeout=.2)
+                except subprocess.TimeoutExpired:
+                    pass
+            resource_error = _worker_exit_message(returncode)
+            if resource_error:
+                raise self._error(resource_error, 422)
+            raise self._error("图片识别进程失败或内存不足，请缩小图片后重试。", 422)
+        try:
+            result = json.loads(line)
+        except (ValueError, UnicodeDecodeError):
+            raise self._error("图片识别结果无效。", 422)
+        if not isinstance(result, dict):
+            raise self._error("图片识别结果无效。", 422)
+        return result
+
+    def _decode_reusable_index(self, source_path, preview, generation):
+        deadline = time.monotonic() + TIMEOUT_SECONDS
+        with closing(self.library.connect()) as connection:
+            try:
+                with self.lock:
+                    session = self._index_worker
+                    fresh = session is None
+                    if not fresh:
+                        if session.timer:
+                            session.timer.cancel()
+                        session.busy = True
+                if session and (session.process.poll() is not None or session.count >= INDEX_WORKER_PAGES
+                                or time.monotonic() - session.started >= INDEX_WORKER_LIFETIME):
+                    self._stop_index_worker(session)
+                    session = None
+                    fresh = True
+                if session is None:
+                    if not self._current(generation, connection):
+                        raise self._error("索引任务已暂停或取消。", 409)
+                    prefix = [sys.executable, "--image-search-worker"] if getattr(sys, "frozen", False) else [sys.executable, str(Path(__file__).resolve()), "--worker"]
+                    process = subprocess.Popen([*prefix, "--serve-index"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                               stderr=subprocess.DEVNULL, close_fds=True,
+                                               creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+                    session = _IndexWorkerSession(process)
+                    with self.lock:
+                        self._index_worker = session
+                        self.processes.add(process)
+                if fresh:
+                    ready = self._receive_index(session, deadline, generation, connection)
+                    if (set(ready) != {"ready", "protocol"} or ready["ready"] is not True
+                            or type(ready["protocol"]) is not int or ready["protocol"] != INDEX_PROTOCOL):
+                        raise self._error("图片索引进程启动失败，请查看服务端运行环境。", 422)
+                if not self._current(generation, connection):
+                    raise self._error("索引任务已暂停或取消。", 409)
+                session.count += 1
+                request = json.dumps({"id": session.count, "source": str(source_path), "preview": bool(preview)}, separators=(",", ":")).encode() + b"\n"
+                if len(request) > INDEX_MAX_REQUEST:
+                    raise self._error("图片索引任务路径过长。", 422)
+                session.process.stdin.write(request)
+                session.process.stdin.flush()
+                response = self._receive_index(session, deadline, generation, connection)
+                if (set(response) != {"id", "retire", "peak_rss_bytes", "result"} or type(response["id"]) is not int or response["id"] != session.count
+                        or type(response["retire"]) is not bool or type(response["peak_rss_bytes"]) is not int
+                        or not 0 <= response["peak_rss_bytes"] <= MEMORY_MB * MIB * 2):
+                    raise self._error("图片识别结果无效。", 422)
+                result = self._parse_worker_result(json.dumps(response["result"]).encode(), preview=preview, strict=True)
+                if (response["retire"] or response["peak_rss_bytes"] >= INDEX_WORKER_RECYCLE_RSS
+                        or session.count >= INDEX_WORKER_PAGES or time.monotonic() - session.started >= INDEX_WORKER_LIFETIME):
+                    self._stop_index_worker(session)
+                else:
+                    with self.lock:
+                        if self._index_worker is session:
+                            session.busy = False
+                            session.timer = threading.Timer(INDEX_WORKER_IDLE, lambda: self._stop_index_worker(session, idle=True))
+                            session.timer.daemon = True
+                            session.timer.start()
+                return result
+            except BaseException as error:
+                if not self._index_worker or not self._index_worker.broken:
+                    self._stop_index_worker()
+                if isinstance(error, (BrokenPipeError, OSError, ValueError)):
+                    raise self._error("图片识别进程失败或内存不足，请重试。", 422) from error
+                raise
+
+    def _decode(self, data=None, *, source_path=None, preview=False, generation=None, reusable=False):
         query = data is not None
         active = False
         def cancelled():
@@ -832,14 +1208,18 @@ class ImageSearchManager:
                         self.decoder_condition.wait(.1)
                     self.decoder_active = True
                     active = True
-                return self._decode_exclusive(data, source_path=source_path, preview=preview, generation=generation)
+                if query:
+                    self._stop_index_worker()  # Free the idle batch before a foreground query.
+                return self._decode_exclusive(data, source_path=source_path, preview=preview, generation=generation, reusable=reusable)
         finally:
             with self.decoder_condition:
                 if active:
                     self.decoder_active = False
                 self.decoder_condition.notify_all()
 
-    def _decode_exclusive(self, data=None, *, source_path=None, preview=False, generation=None, matching=False):
+    def _decode_exclusive(self, data=None, *, source_path=None, preview=False, generation=None, matching=False, reusable=False):
+        if reusable and source_path is not None and data is None and generation is not None and not matching:
+            return self._decode_reusable_index(source_path, preview, generation)
         prefix = [sys.executable, "--image-search-worker"] if getattr(sys, "frozen", False) else [sys.executable, str(Path(__file__).resolve()), "--worker"]
         command = [*prefix, "--stdin"] if data is not None else [*prefix, "--source", str(source_path)]
         if preview:
@@ -889,47 +1269,72 @@ class ImageSearchManager:
                             continue
                     else:
                         output, _ = process.communicate()
-            if len(output) > MAX_PREVIEW_BYTES * 2:
-                raise self._error("图片识别结果无效。", 422)
-            try:
-                result = json.loads(output)
-            except (ValueError, UnicodeDecodeError):
-                raise self._error("图片识别进程失败或内存不足，请缩小图片后重试。", 422)
-            if not isinstance(result, dict):
-                raise self._error("图片识别结果无效。", 422)
-            if process.returncode or not result.get("ok"):
-                raise self._error(result.get("error", "图片识别失败。"), 422)
-            if matching:
-                matches = result.get("matches")
-                if (not isinstance(matches, list) or len(matches) > MAX_MATCH_CANDIDATES
-                        or any(not isinstance(item, list) or len(item) != 2 or type(item[0]) is not int
-                               or not 0 <= item[0] < MAX_MATCH_CANDIDATES or type(item[1]) not in (int, float)
-                               or not math.isfinite(item[1]) or not 0 <= item[1] <= 13 for item in matches)):
-                    raise self._error("图片匹配结果无效。", 422)
-                if len({item[0] for item in matches}) != len(matches):
-                    raise self._error("图片匹配结果无效。", 422)
-                return matches
-            if not all(isinstance(result.get(key), str) and re.fullmatch(f"[0-9a-f]{{{length}}}", result[key]) for key, length in (("digest", 64), ("dhash", 16), ("phash", 16))):
-                raise self._error("图片指纹无效。", 422)
-            if preview:
-                result["preview"] = base64.b64decode(result["preview"], validate=True)
-                if not 0 < len(result["preview"]) <= MAX_PREVIEW_BYTES:
-                    raise self._error("图片预览无效。", 422)
-            for name, validator in (("local_features", local_features.validate), ("local_sketch", local_features.validate_sketch)):
-                try:
-                    blob = base64.b64decode(result[name], validate=True)
-                except (ValueError, KeyError, TypeError):
-                    raise self._error("图片局部索引无效。", 422)
-                if not validator(blob):
-                    raise self._error("图片局部索引无效。", 422)
-                result[name] = blob
-            return result
+            return self._parse_worker_result(output, preview=preview, matching=matching, returncode=process.returncode)
         finally:
             if process.poll() is None:
                 process.kill()
             process.wait(timeout=5)
+            for pipe in (getattr(process, "stdin", None), getattr(process, "stdout", None)):
+                if pipe:
+                    pipe.close()
             with self.lock:
                 self.processes.discard(process)
+
+    def _parse_worker_result(self, output, *, preview=False, matching=False, returncode=0, strict=False):
+        from transcoding import _worker_exit_message
+        resource_error = _worker_exit_message(returncode)
+        if resource_error:
+            raise self._error(resource_error, 422)
+        if len(output) > MAX_PREVIEW_BYTES * 2:
+            raise self._error("图片识别结果无效。", 422)
+        try:
+            result = json.loads(output)
+        except (ValueError, UnicodeDecodeError):
+            raise self._error("图片识别进程失败或内存不足，请缩小图片后重试。", 422)
+        if not isinstance(result, dict):
+            raise self._error("图片识别结果无效。", 422)
+        if strict and type(result.get("ok")) is not bool:
+            raise self._error("图片识别结果无效。", 422)
+        if returncode or not result.get("ok"):
+            error = self._error(str(result.get("error", "图片识别失败。"))[:300], 422)
+            code = result.get("failure_code", "decode_error")
+            actual = result.get("actual_format", "")
+            error.failure_code = code if code in ("unsupported_format", "decode_error") else "decode_error"
+            error.actual_format = actual if isinstance(actual, str) and re.fullmatch(r"[A-Z0-9_-]{1,20}", actual) else ""
+            raise error
+        if strict:
+            if (any(type(result.get(name)) is not int or result[name] <= 0 for name in ("width", "height"))
+                    or result["width"] * result["height"] > MAX_SOURCE_PIXELS
+                    or not isinstance(result.get("mean"), list) or len(result["mean"]) != 3
+                    or any(type(value) is not int or not 0 <= value <= 255 for value in result["mean"])):
+                raise self._error("图片识别尺寸或颜色结果无效。", 422)
+        if matching:
+            matches = result.get("matches")
+            if (not isinstance(matches, list) or len(matches) > MAX_MATCH_CANDIDATES
+                    or any(not isinstance(item, list) or len(item) != 2 or type(item[0]) is not int
+                           or not 0 <= item[0] < MAX_MATCH_CANDIDATES or type(item[1]) not in (int, float)
+                           or not math.isfinite(item[1]) or not 0 <= item[1] <= 13 for item in matches)):
+                raise self._error("图片匹配结果无效。", 422)
+            if len({item[0] for item in matches}) != len(matches):
+                raise self._error("图片匹配结果无效。", 422)
+            return matches
+        if not all(isinstance(result.get(key), str) and re.fullmatch(f"[0-9a-f]{{{length}}}", result[key]) for key, length in (("digest", 64), ("dhash", 16), ("phash", 16))):
+            raise self._error("图片指纹无效。", 422)
+        if preview:
+            result["preview"] = base64.b64decode(result["preview"], validate=True)
+            if not 0 < len(result["preview"]) <= MAX_PREVIEW_BYTES:
+                raise self._error("图片预览无效。", 422)
+        for name, validator in (("local_features", local_features.validate), ("local_sketch", local_features.validate_sketch)):
+            try:
+                blob = base64.b64decode(result[name], validate=True)
+            except (ValueError, KeyError, TypeError):
+                raise self._error("图片局部索引无效。", 422)
+            if not validator(blob):
+                raise self._error("图片局部索引无效。", 422)
+            result[name] = blob
+        if strict and local_features.sketch(result["local_features"]) != result["local_sketch"]:
+            raise self._error("图片局部索引不一致。", 422)
+        return result
 
     @staticmethod
     def _distance(feature, row):

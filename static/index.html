@@ -19,6 +19,7 @@
   <script src="/list-state.js" defer></script>
   <script src="/transcoding-ui.js" defer></script>
   <script src="/image-search-ui.js" defer></script>
+  <script src="/cache-management-ui.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
@@ -132,6 +133,7 @@
     <form id="library-form">
       <header class="dialog-header"><div><h2 id="library-dialog-title">创建你的写真库</h2></div><button type="button" class="icon-button" id="library-dialog-close" aria-label="关闭写真库设置"><svg><use href="#i-close"/></svg></button></header><div class="dialog-body">
       <label class="library-field" for="library-name">写真库名称 <span>必填</span></label><input id="library-name" maxlength="100" required placeholder="例如：模特名 · 写真收藏" autocomplete="off">
+      <section id="library-cover-editor" class="library-cover-editor" hidden><img id="library-cover-preview" alt="写真库封面预览"><div><button id="library-cover-shuffle" type="button" class="button button-secondary">换一组封面</button><p id="library-cover-status" class="field-hint" role="status" hidden></p></div></section>
       <label class="library-field" for="library-type">写真库类型</label><select id="library-type"><option value="photo">写真</option></select>
       <div class="form-columns"><div><label class="library-field" for="library-mode">默认阅读方式</label><select id="library-mode"><option value="single">单页</option><option value="double">双页</option><option value="webtoon">条漫 · 连续滚动</option></select></div><div><label class="library-field" for="library-direction">默认阅读方向</label><select id="library-direction"><option value="ltr">从左到右</option><option value="rtl">从右到左</option></select></div></div>
       <div id="library-apply-reading-field" hidden><label class="model-checkbox library-field"><input id="library-apply-reading" type="checkbox"><span>全部作品跟随写真库阅读设置</span></label></div>

@@ -48,6 +48,8 @@ from password_reset import DataDirectoryLock
 from transcoding import TranscodingManager
 from image_search import ImageSearchManager, MAX_QUERY_BYTES
 from task_scheduler import SharedTaskScheduler
+from library_covers import LibraryCoverManager
+from cache_manager import CacheManager
 
 VERSION = "0.8.6"
 MEDIA_TYPES = {"manga_jp", "manga_kr", "comic_us", "photo"}
@@ -89,6 +91,7 @@ STATIC_FILES = {
     "/list-state.js": "list-state.js",
     "/transcoding-ui.js": "transcoding-ui.js",
     "/image-search-ui.js": "image-search-ui.js",
+    "/cache-management-ui.js": "cache-management-ui.js",
     "/fonts/LibreCaslonText.ttf": "fonts/LibreCaslonText.ttf",
 }
 LOG = logging.getLogger("sumi")
@@ -486,6 +489,8 @@ class Library:
         self.task_scheduler = SharedTaskScheduler(self, ReaderError)
         self.transcoding = TranscodingManager(self, ReaderError)
         self.image_search = ImageSearchManager(self, ReaderError)
+        self.library_covers = LibraryCoverManager(self, ReaderError)
+        self.cache_manager = CacheManager(self, library_cover_manager=self.library_covers)
 
     def connect(self):
         connection = sqlite3.connect(self.database, timeout=20)
@@ -726,7 +731,7 @@ class Library:
         result["scanning"] = scanning
         return result
 
-    def libraries(self, include_hidden=False):
+    def libraries(self, include_hidden=False, *, include_covers=True):
         with self.state_lock, closing(self.connect()) as connection:
             rows = connection.execute("""SELECT l.*, author.name AS default_author_name, COUNT(b.id) AS book_count
                 FROM media_libraries l LEFT JOIN books b ON b.library_id=l.id AND b.active=1
@@ -744,6 +749,10 @@ class Library:
                     "SELECT library_id FROM user_libraries WHERE user_id=?", (actor["id"],))}
                 libraries = [item for item in libraries if item["id"] in allowed]
             libraries = [item for item in libraries if item["id"] not in hidden]
+        if include_covers and not include_hidden:
+            cover_metadata = self.library_covers.metadata_many([item["id"] for item in libraries])
+            for item in libraries:
+                item["cover"] = cover_metadata.get(item["id"])
         return {"libraries": libraries, "root_path": str(self.root) if actor["role"] == "admin" else None,
                 "root_paths": [str(root) for root in self.roots] if actor["role"] == "admin" else []}
 
@@ -1436,6 +1445,8 @@ class Library:
     def start(self):
         self.transcoding.start()
         self.image_search.start()
+        self.library_covers.start()
+        self.cache_manager.start()
         self.start_scan()
         self.periodic_thread = threading.Thread(target=self._periodic, name="scan-timer", daemon=True)
         self.periodic_thread.start()
@@ -1449,6 +1460,8 @@ class Library:
     def close(self):
         self.stop_event.set()
         self.task_scheduler.close()
+        self.cache_manager.close()
+        self.library_covers.close()
         self.image_search.close()
         self.transcoding.close()
         with self.request_condition:
@@ -1460,6 +1473,8 @@ class Library:
             self.scan_thread.join(timeout=30)
         if (not self.active_requests and (not self.scan_thread or not self.scan_thread.is_alive())
                 and not self.transcoding.is_alive()
+                and not self.cache_manager.is_alive()
+                and not self.library_covers.is_alive()
                 and (not self.image_search.thread or not self.image_search.thread.is_alive())):
             self.service_lock.release()
 
@@ -1664,6 +1679,7 @@ class Library:
                 index_after = {tuple(row[key] for key in index_columns) for row in connection.execute(
                     "SELECT * FROM books WHERE library_id=? AND active=1 AND removed=0", (library_id,))}
             LOG.info("Media library %s scan finished: %d books, %d warnings", config["name"], len(found), len(errors))
+            self.library_covers.reconcile(library_id)
             if index_after != index_before or index_sources_changed or errors != json.loads(config["errors"]):
                 self.image_search.reconcile()
         except Exception as error:
@@ -1886,7 +1902,7 @@ class Library:
             rows = self._select(connection, library_id=library_id, visible=True)
             models = self._models_for_books(connection, [row["id"] for row in rows])
             books = [self._export(row, models.get(row["id"])) for row in rows]
-            libraries = self.libraries()["libraries"]
+            libraries = self.libraries(include_covers=False)["libraries"]
         books.sort(key=lambda book: (natural_key(book["title"]), natural_key(book["series"]), book["path"]))
         if library_id is not None:
             libraries = [item for item in libraries if item["id"] == library_id]
@@ -2078,6 +2094,8 @@ class Library:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, self.covers / name)
+            if hasattr(self, "cache_manager"):
+                self.cache_manager.enforce_cover_limit()
         finally:
             temporary.unlink(missing_ok=True)
 
@@ -2471,7 +2489,7 @@ class Library:
                 try:
                     with self._open_media_file(root, relative) as handle:
                         info = os.fstat(handle.fileno())
-                        stamp = f"{info.st_size}:{info.st_mtime_ns}"
+                        stamp = f"{info.st_dev}:{info.st_ino}:{info.st_size}:{info.st_mtime_ns}:{info.st_ctime_ns}"
                 except OSError as error:
                     raise ReaderError("无法读取封面来源，请重新扫描写真库。", 422) from error
                 version = hashlib.sha256((self._cover_version(book) + stamp).encode()).hexdigest()[:24]
@@ -2562,8 +2580,38 @@ def _linux_default_ipv4():
     return result
 
 
+def _macos_default_ipv4():
+    """Read the default-route IPv4 interface without contacting the network."""
+    import subprocess
+    environment = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C"}
+    try:
+        route = subprocess.run(["/sbin/route", "-n", "get", "default"],
+                               capture_output=True, text=True, timeout=2,
+                               check=False, env=environment)
+        if route.returncode or len(route.stdout) > 16384:
+            return []
+        interfaces = re.findall(r"^\s*interface:\s*(\S+)\s*$", route.stdout, re.MULTILINE)
+        if len(interfaces) != 1 or not re.fullmatch(r"[A-Za-z][A-Za-z0-9]{0,15}", interfaces[0]):
+            return []
+        address = subprocess.run(["/usr/sbin/ipconfig", "getifaddr", interfaces[0]],
+                                 capture_output=True, text=True, timeout=2,
+                                 check=False, env=environment)
+        value = address.stdout.strip()
+        if address.returncode or len(value) > 64:
+            return []
+        try:
+            ipaddress.IPv4Address(value)
+        except ipaddress.AddressValueError:
+            return []
+        return [value] if _private_address(value) else []
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+
+
 def _lan_ipv4_addresses():
     try:
+        if sys.platform == "darwin":
+            return _macos_default_ipv4()
         return _windows_default_ipv4() if os.name == "nt" else _linux_default_ipv4()
     except (OSError, ValueError, ImportError, AttributeError):
         return []
@@ -2894,6 +2942,31 @@ class ReaderHandler(BaseHTTPRequestHandler):
                           else self.library.transcoding.summary())
                 self.respond(result)
                 return
+            if path == "/api/image-search/failures":
+                self.library.require_admin()
+                page, page_size = self.pagination_query(query, 20)
+                self.respond(self.library.image_search.failures(page=page, page_size=page_size))
+                return
+            optimization_details = re.fullmatch(r"/api/transcoding/books/([a-f0-9]{24})/details", path)
+            if optimization_details:
+                self.library.require_admin()
+                page, page_size = self.pagination_query(query, 40)
+                self.respond(self.library.transcoding.details(optimization_details[1], page=page, page_size=page_size))
+                return
+            if path == "/api/cache":
+                self.library.require_admin()
+                if request.query:
+                    raise ReaderError("缓存管理不接受查询参数。")
+                self.respond(self.library.cache_manager.snapshot())
+                return
+            library_cover = re.fullmatch(r"/api/libraries/([a-f0-9]{24})/cover", path)
+            if library_cover:
+                if set(query) - {"v"} or any(len(values) != 1 for values in query.values()):
+                    raise ReaderError("写真库封面参数无效。")
+                with self.library.auth_lock:
+                    self.require_auth()
+                    self.respond_image(*self.library.library_covers.image(library_cover[1]))
+                return
             transcode_preview = re.fullmatch(r"/api/transcoding/books/([a-f0-9]{24})/pages/([0-9]{1,6})", path)
             if transcode_preview:
                 self.library.require_admin()
@@ -2986,6 +3059,18 @@ class ReaderHandler(BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(data)
 
+    @staticmethod
+    def pagination_query(query, default_size):
+        if set(query) - {"page", "page_size"} or any(len(values) != 1 for values in query.values()):
+            raise ReaderError("分页参数无效。")
+        values = []
+        for key, default in (("page", 1), ("page_size", default_size)):
+            value = query.get(key, [str(default)])[0]
+            if not re.fullmatch(r"[1-9][0-9]{0,5}", value):
+                raise ReaderError("分页参数需要是正整数。")
+            values.append(int(value))
+        return values
+
     def respond_image(self, data, mime, etag):
         if self.headers.get("If-None-Match") == etag:
             self.send_response(304)
@@ -3020,6 +3105,21 @@ class ReaderHandler(BaseHTTPRequestHandler):
                 raise ReaderError("图片搜索不接受外部路径或查询参数。")
             self.query_image()
             return
+        if path == "/api/image-search/retry":
+            self.library.require_admin()
+            if urlsplit(self.path).query:
+                raise ReaderError("图片索引重试不接受查询参数。")
+            self.respond(self.library.image_search.retry_failures(self.read_body()))
+            return
+        library_shuffle = re.fullmatch(r"/api/libraries/([a-f0-9]{24})/cover/shuffle", path)
+        if library_shuffle:
+            self.library.require_admin()
+            if urlsplit(self.path).query or self.read_body():
+                raise ReaderError("换一组封面不接受其他参数。")
+            with self.library.auth_lock:
+                self.require_auth()
+                self.respond(self.library.library_covers.shuffle(library_shuffle[1]))
+            return
         if path in ("/api/image-search/settings", "/api/image-search/actions"):
             self.library.require_admin()
             if urlsplit(self.path).query:
@@ -3033,6 +3133,13 @@ class ReaderHandler(BaseHTTPRequestHandler):
         upload_request = (re.fullmatch(r"/api/books/[a-f0-9]{24}/metadata", path)
                           or re.fullmatch(r"/api/models(?:/[a-f0-9]{24})?", path) or path == "/api/profile")
         body = self.read_body(MAX_COVER_BODY_BYTES if upload_request else MAX_BODY_BYTES)
+        if path in ("/api/cache/settings", "/api/cache/clear"):
+            self.library.require_admin()
+            if urlsplit(self.path).query:
+                raise ReaderError("缓存管理不接受查询参数。")
+            operation = self.library.cache_manager.save_settings if path.endswith("/settings") else self.library.cache_manager.clear
+            self.respond(operation(body))
+            return
         if path in ("/api/transcoding/rules/preview", "/api/transcoding/rules", "/api/transcoding/actions", "/api/transcoding/cleanup"):
             self.library.require_admin()
             if urlsplit(self.path).query:

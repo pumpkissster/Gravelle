@@ -5,8 +5,14 @@
   else root.SumiPerformance = api;
 })(typeof window === 'undefined' ? globalThis : window, () => {
   'use strict';
-  const defaults = Object.freeze({ webtoonStep: 3, coverConcurrency: 3, imageCacheLimit: 0, bookPageSize: 0, chapterPageSize: 0 });
-  const limits = { webtoonStep: [1, 20], coverConcurrency: [1, 12], imageCacheLimit: [0, 999], bookPageSize: [0, 999], chapterPageSize: [0, 999] };
+  const defaults = Object.freeze({ webtoonStep: 3, coverConcurrency: 3, imageCacheLimit: 0, imageCacheMemoryMB: 256, bookPageSize: 0, chapterPageSize: 0 });
+  const limits = { webtoonStep: [1, 20], coverConcurrency: [1, 12], imageCacheLimit: [0, 999], imageCacheMemoryMB: [0, 16384], bookPageSize: [0, 999], chapterPageSize: [0, 999] };
+  function decodedImageBytes(size, fallback = 16 * 1024 * 1024) {
+    const width = Number(size?.width); const height = Number(size?.height);
+    return Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0
+      ? Math.min(Number.MAX_SAFE_INTEGER, Math.ceil(width) * Math.ceil(height) * 4)
+      : Math.max(0, Number.isFinite(fallback) ? fallback : 16 * 1024 * 1024);
+  }
   function normalize(values = {}) {
     if (!values || typeof values !== 'object' || Array.isArray(values)) values = {};
     return Object.fromEntries(Object.entries(defaults).map(([key, fallback]) => {
@@ -51,21 +57,34 @@
       stats() { return { active: active.size, pending: pending.length, limit }; }
     };
   }
-  function createCache(initialLimit = 0, dispose = () => {}) {
+  function createCache(initialLimit = 0, dispose = () => {}, options = {}) {
     const entries = new Map(); let limit = Math.max(0, Math.trunc(initialLimit) || 0);
+    let byteLimit = Math.max(0, Math.trunc(options.byteLimit) || 0);
+    const weight = typeof options.weight === 'function' ? options.weight : value => value?.bytes || 0;
+    const bytes = () => [...entries.values()].reduce((sum, value) => {
+      const size = Number(weight(value));
+      return Math.min(Number.MAX_SAFE_INTEGER, sum + (Number.isFinite(size) && size > 0 ? size : 0));
+    }, 0);
     const api = {
       get(key) { const value = entries.get(key); if (value !== undefined) { entries.delete(key); entries.set(key, value); } return value; },
       peek: key => entries.get(key),
       set(key, value) { if (entries.has(key) && entries.get(key) !== value) dispose(entries.get(key), key); entries.delete(key); entries.set(key, value); return value; },
       delete(key) { if (!entries.has(key)) return; const value = entries.get(key); entries.delete(key); dispose(value, key); },
       trim(protectedKeys = []) {
-        if (!limit) return;
+        if (!limit && !byteLimit) return;
         const protectedSet = new Set(protectedKeys);
-        for (const key of entries.keys()) { if (entries.size <= limit) break; if (!protectedSet.has(key)) api.delete(key); }
+        for (const key of entries.keys()) {
+          if ((!limit || entries.size <= limit) && (!byteLimit || bytes() <= byteLimit)) break;
+          if (!protectedSet.has(key)) api.delete(key);
+        }
       },
       setLimit(value, protectedKeys = []) { limit = Math.max(0, Math.trunc(value) || 0); api.trim(protectedKeys); },
+      setByteLimit(value, protectedKeys = []) { byteLimit = Math.max(0, Math.trunc(value) || 0); api.trim(protectedKeys); },
+      setLimits(count, memory, protectedKeys = []) { limit = Math.max(0, Math.trunc(count) || 0); byteLimit = Math.max(0, Math.trunc(memory) || 0); api.trim(protectedKeys); },
       clear() { [...entries.keys()].forEach(key => api.delete(key)); },
       keys: () => [...entries.keys()],
+      get bytes() { return bytes(); },
+      get availableBytes() { return byteLimit ? Math.max(0, byteLimit - bytes()) : Infinity; },
       get size() { return entries.size; }
     };
     return api;
@@ -234,6 +253,7 @@
       ['webtoonStep', '条漫加载步进', '预加载当前页前后各几页', 1, 20],
       ['coverConcurrency', '封面加载并发数', '同时加载的列表封面数量', 1, 12],
       ['imageCacheLimit', '图片缓存数量限制', '0 表示不限制；正在显示的页始终保留', 0, 999],
+      ['imageCacheMemoryMB', '图片解码缓存预算（MiB）', '默认 256；0 不限制，当前显示页始终保留', 0, 16384],
       ['bookPageSize', '作品页面容量', '0 使用瀑布流滚动加载；大于 0 按指定数量分页', 0, 999]
     ];
     rows.forEach(([key, title, hint, min, max]) => {
@@ -250,9 +270,9 @@
       input.addEventListener('blur', () => { if (!saveValidValue()) input.value = settings[key]; });
       row.append(label, input); device.append(row);
     });
-    device.append(make('p', '图片缓存限制控制阅读器保留的原图数量，不清理浏览器自身的网络缓存。', 'performance-note'));
+    device.append(make('p', '按图片像素估算浏览器解码占用，优先释放较远页面；当前页可能超过预算。不清理浏览器网络缓存。', 'performance-note'));
     panel.append(device);
     renderServerState(); if (isServerAdmin()) loadServer();
   }
-  return { defaults, normalize, paginate, catalogWindow, createQueue, createCache, get: () => ({ ...settings }), update, setUser, configureServer, loadCover, render };
+  return { defaults, normalize, paginate, catalogWindow, createQueue, createCache, decodedImageBytes, get: () => ({ ...settings }), update, setUser, configureServer, loadCover, render };
 });

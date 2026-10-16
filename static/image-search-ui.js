@@ -64,10 +64,19 @@
       cancel() { generation += 1; controller?.abort(); controller = null; }
     };
   }
-  function create({ searchHost, settingsHost, api, post, openBook, isAdmin, toast = () => {}, onManage = () => {} }) {
+  const failureKey = item => JSON.stringify([item.book_id, item.page_key]);
+  function normalizeFailures(payload) {
+    const seen = new Set();
+    return (Array.isArray(payload?.items) ? payload.items : []).filter(item => {
+      if (!item || typeof item.book_id !== 'string' || !item.book_id || typeof item.page_key !== 'string' || !item.page_key || item.page_key.length > 4096 || !Number.isSafeInteger(item.page) || item.page < 0 || typeof item.retryable !== 'boolean' || typeof item.reason !== 'string' || typeof item.filename !== 'string') return false;
+      const key = failureKey(item); if (seen.has(key)) return false; seen.add(key); return true;
+    });
+  }
+  function create({ searchHost, settingsHost, api, post, openBook, isAdmin, toast = () => {}, onManage = () => {}, onOpenFailure = () => {} }) {
     const document = searchHost.ownerDocument;
     const state = { active: false, managing: false, status: null, file: null, mime: '', url: '', results: [], searched: false, searching: false, busy: false, timer: null, statusRequest: null, generation: 0, fileGeneration: 0, catalog: '' };
     const queryGate = createRequestGate(); const search = {}; const settings = {};
+    const failures = { expanded: false, page: 1, pageSize: 20, items: [], total: 0, selected: new Set(), request: null, generation: 0, loading: false, busy: false, loaded: false, observedCount: null };
     function el(tag, cls, text) { const item = document.createElement(tag); if (cls) item.className = cls; if (text !== undefined) item.textContent = String(text); return item; }
     function button(text, cls, action) { const item = el('button', cls || 'button button-secondary', text); item.type = 'button'; item.addEventListener('click', action); return item; }
     function error(target, message) { target.textContent = message || ''; target.hidden = !message; }
@@ -160,51 +169,143 @@
     settings.enabled = el('input', 'image-search-toggle'); settings.enabled.type = 'checkbox'; settings.enabled.setAttribute('aria-label', '启用图片索引'); settings.enabled.addEventListener('change', () => mutate('/api/image-search/settings', { enabled: settings.enabled.checked })); enableRow.append(enableText, settings.enabled);
     settings.message = el('p', 'image-search-status'); settings.message.setAttribute('role', 'status');
     settings.progress = el('progress'); settings.progress.max = 100; settings.progress.setAttribute('aria-label', '图片索引进度'); settings.counts = el('div', 'image-search-index-counts');
+    settings.countBefore = el('span'); settings.countAfter = el('span'); settings.failureToggle = button('失败 0 张', 'button button-secondary image-search-failure-toggle', toggleFailures); settings.failureToggle.setAttribute('aria-expanded', 'false'); settings.failureToggle.setAttribute('aria-controls', 'image-search-failure-panel'); settings.counts.append(settings.countBefore, settings.failureToggle, settings.countAfter);
     const tools = el('div', 'image-search-index-tools'); settings.pause = button('暂停', 'button button-secondary', () => mutate('/api/image-search/actions', { action: state.status?.paused ? 'resume' : 'pause' }));
     settings.retry = button('重试失败图片', 'button button-secondary', () => mutate('/api/image-search/actions', { action: 'retry' }));
     settings.rebuild = button('重建索引', 'button button-secondary', () => confirmAction('rebuild')); settings.clear = button('清理索引', 'button button-danger', () => confirmAction('clear')); settings.refresh = button('刷新', 'button button-secondary', () => loadStatus(true));
     tools.append(settings.pause, settings.retry, settings.rebuild, settings.clear, settings.refresh);
     settings.error = el('p', 'notice error'); settings.error.hidden = true; settings.error.setAttribute('role', 'alert');
     panel.append(enableRow, settings.message, settings.progress, settings.counts, tools, settings.error); settingsHost.append(panel);
+    const failurePanel = el('section', 'settings-panel image-search-failures'); failurePanel.id = 'image-search-failure-panel'; failurePanel.hidden = true;
+    const failureHeading = el('div', 'image-search-failure-heading'); failureHeading.append(el('h2', '', '索引失败明细'));
+    settings.failureRefresh = button('刷新列表', 'button button-secondary', () => loadFailures(failures.page)); failureHeading.append(settings.failureRefresh);
+    settings.failureStatus = el('p', 'image-search-status'); settings.failureStatus.setAttribute('role', 'status');
+    const failureTools = el('div', 'image-search-failure-tools');
+    const selectLabel = el('label', 'image-search-failure-select'); settings.failureAll = el('input'); settings.failureAll.type = 'checkbox'; settings.failureAll.setAttribute('aria-label', '选择本页可重试图片'); selectLabel.append(settings.failureAll, el('span', '', '选择本页'));
+    settings.failureAll.addEventListener('change', () => { failures.selected.clear(); if (settings.failureAll.checked) failures.items.filter(item => item.retryable).forEach(item => failures.selected.add(failureKey(item))); renderFailureRows(); });
+    settings.failureSelected = el('span', 'image-search-status'); settings.failureRetry = button('重试所选', 'button button-primary', () => retryFailures(failures.items.filter(item => failures.selected.has(failureKey(item)))));
+    failureTools.append(selectLabel, settings.failureSelected, settings.failureRetry);
+    settings.failureList = el('div', 'image-search-failure-list'); settings.failureList.setAttribute('aria-label', '索引失败图片');
+    settings.failureError = el('p', 'notice error'); settings.failureError.hidden = true; settings.failureError.setAttribute('role', 'alert');
+    const failurePages = el('div', 'image-search-failure-pages'); settings.failurePrevious = button('上一页', 'button button-secondary', () => loadFailures(failures.page - 1)); settings.failurePage = el('span', 'image-search-status'); settings.failureNext = button('下一页', 'button button-secondary', () => loadFailures(failures.page + 1)); failurePages.append(settings.failurePrevious, settings.failurePage, settings.failureNext);
+    failurePanel.append(failureHeading, settings.failureStatus, failureTools, settings.failureList, settings.failureError, failurePages); settingsHost.append(failurePanel);
+    function cancelFailures(clear = false) {
+      failures.generation += 1; failures.request?.abort(); failures.request = null; failures.loading = failures.busy = false;
+      if (clear) { failures.expanded = false; failures.page = 1; failures.items = []; failures.total = 0; failures.selected.clear(); failures.loaded = false; failures.observedCount = null; settings.failureList.replaceChildren(); error(settings.failureError, ''); }
+      updateFailureControls();
+    }
+    async function toggleFailures() {
+      if (!state.managing || !isAdmin() || state.busy || failures.busy || settings.failureToggle.disabled) return;
+      failures.expanded = !failures.expanded;
+      if (!failures.expanded) cancelFailures();
+      updateFailureControls();
+      if (failures.expanded && (!failures.loaded || (Number(state.status?.summary?.failed) !== failures.observedCount && !failures.selected.size))) await loadFailures(failures.page);
+    }
+    function updateFailureControls() {
+      const busy = failures.loading || failures.busy || state.busy;
+      const eligible = failures.items.filter(item => item.retryable);
+      settings.failureToggle.textContent = `失败 ${Number(state.status?.summary?.failed) || 0} 张`;
+      settings.failureToggle.disabled = failures.busy || state.busy || (!Number(state.status?.summary?.failed) && !failures.expanded);
+      settings.failureToggle.setAttribute('aria-expanded', String(failures.expanded));
+      settings.failureAll.checked = Boolean(eligible.length && eligible.every(item => failures.selected.has(failureKey(item))));
+      settings.failureAll.indeterminate = Boolean(failures.selected.size && !settings.failureAll.checked);
+      settings.failureAll.disabled = busy || !eligible.length || !state.status?.enabled;
+      settings.failureSelected.textContent = `已选择 ${failures.selected.size} 张`;
+      settings.failureRetry.disabled = busy || !failures.selected.size || !state.status?.enabled;
+      if (failures.loaded && failures.total === Number(state.status?.summary?.failed) && failures.total <= failures.pageSize && !eligible.length) settings.retry.disabled = true;
+      settings.failureRefresh.disabled = busy;
+      settings.failurePrevious.disabled = busy || failures.page <= 1;
+      settings.failureNext.disabled = busy || failures.page * failures.pageSize >= failures.total;
+      settings.failurePage.textContent = `第 ${failures.page} / ${Math.max(1, Math.ceil(failures.total / failures.pageSize))} 页`;
+      settings.failureStatus.textContent = failures.loading ? '正在读取失败图片…' : failures.total ? `共 ${failures.total} 张失败图片` : '暂无失败图片';
+      failurePanel.hidden = !isAdmin() || !failures.expanded;
+    }
+    function renderFailureRows() {
+      settings.failureList.replaceChildren();
+      failures.items.forEach(item => {
+        const row = el('article', 'image-search-failure-row');
+        const check = el('input', 'image-search-failure-check'); check.type = 'checkbox'; check.checked = failures.selected.has(failureKey(item)); check.disabled = !item.retryable || failures.busy || state.busy || !state.status?.enabled; check.setAttribute('aria-label', `选择 ${item.filename}`);
+        check.addEventListener('change', () => { if (check.checked) failures.selected.add(failureKey(item)); else failures.selected.delete(failureKey(item)); updateFailureControls(); });
+        const info = el('div', 'image-search-failure-info'); const title = button(item.book_title || '未命名作品', 'image-search-failure-book', async () => { if (!state.managing || failures.busy) return; const generation = failures.generation; try { await onOpenFailure(item.book_id, item.page); } catch (failure) { if (generation === failures.generation && state.managing) error(settings.failureError, failure.message || '无法打开作品。'); } });
+        info.append(title, el('span', '', [item.library_name, `第 ${item.page + 1} 页`, item.filename].filter(Boolean).join(' · ')), el('p', 'image-search-failure-reason', item.reason));
+        const action = item.retryable ? button('重试', 'button button-secondary', () => retryFailures([item])) : el('span', 'image-search-failure-unsupported', '格式暂不支持');
+        if (item.retryable) action.disabled = failures.busy || state.busy || !state.status?.enabled;
+        row.append(check, info, action); settings.failureList.append(row);
+      });
+      updateFailureControls();
+    }
+    async function loadFailures(page = failures.page) {
+      if (!state.managing || !failures.expanded || !isAdmin() || failures.busy || state.busy || !Number.isSafeInteger(page) || page < 1) return;
+      const generation = ++failures.generation; failures.request?.abort(); const request = new AbortController(); failures.request = request; failures.loading = true; error(settings.failureError, ''); updateFailureControls();
+      try {
+        const payload = await api(`/api/image-search/failures?page=${page}&page_size=${failures.pageSize}`, { signal: request.signal });
+        if (generation !== failures.generation || request.signal.aborted || !state.managing || !isAdmin()) return;
+        const total = Number.isSafeInteger(payload?.total) && payload.total >= 0 ? payload.total : 0;
+        const last = Math.max(1, Math.ceil(total / failures.pageSize));
+        if (page > last) { failures.loading = false; failures.request = null; return loadFailures(last); }
+        failures.page = page; failures.total = total; failures.items = normalizeFailures(payload); failures.selected.clear(); failures.loaded = true; failures.observedCount = Number(state.status?.summary?.failed) || 0; renderFailureRows();
+      } catch (failure) { if (generation === failures.generation && !request.signal.aborted && failure.status !== 401) error(settings.failureError, failure.message || '无法读取失败图片。'); }
+      finally { if (generation === failures.generation) { failures.loading = false; failures.request = null; updateFailureControls(); } }
+    }
+    async function retryFailures(items) {
+      if (!state.managing || !failures.expanded || !isAdmin() || state.busy || failures.busy || !state.status?.enabled) return;
+      const chosen = items.filter(item => item.retryable); if (!chosen.length) return;
+      const generation = ++failures.generation; failures.request?.abort(); failures.request = null; failures.loading = false; failures.busy = true; stopStatus(); error(settings.failureError, ''); renderFailureRows(); renderSettings();
+      try {
+        const payload = await post('/api/image-search/retry', { items: chosen.map(({ book_id, page_key }) => ({ book_id, page_key })) });
+        if (generation !== failures.generation || !state.managing || !isAdmin()) return;
+        if (payload.snapshot) state.status = payload.snapshot;
+        failures.selected.clear(); toast(`已重试 ${Number(payload.retried) || 0} 张图片${Number(payload.skipped) ? `，跳过 ${Number(payload.skipped)} 张` : ''}`);
+        failures.busy = false; await loadFailures(failures.page);
+      } catch (failure) { if (generation === failures.generation && failure.status !== 401) error(settings.failureError, failure.message || '图片重试失败。'); }
+      finally { if (generation === failures.generation || !failures.busy) { failures.busy = false; renderSearch(); renderSettings(); scheduleStatus(); } }
+    }
     const confirm = el('dialog', 'settings-dialog image-search-confirm'); confirm.setAttribute('aria-labelledby', 'image-search-confirm-title'); const confirmHeader = el('header', 'dialog-header'); settings.confirmTitle = el('h2'); settings.confirmTitle.id = 'image-search-confirm-title'; const close = button('关闭', 'button button-secondary', () => confirm.close()); confirmHeader.append(settings.confirmTitle, close); settings.confirmText = el('p', 'settings-intro'); const footer = el('footer', 'dialog-footer'); const back = button('取消', 'button button-secondary', () => confirm.close()); settings.confirmRun = button('确认', 'button button-danger', async () => { const action = confirm.dataset.action; confirm.close(); await mutate('/api/image-search/actions', { action }); }); footer.append(back, settings.confirmRun); confirm.append(confirmHeader, settings.confirmText, footer); document.body.append(confirm);
     function confirmAction(action) { if (state.busy) return; confirm.dataset.action = action; settings.confirmTitle.textContent = action === 'clear' ? '清理图片索引？' : '重新建立图片索引？'; settings.confirmText.textContent = action === 'clear' ? '清除图片搜索索引并关闭搜索。原始图片、优化图片和阅读记录保留。' : '清除现有搜索索引并重新生成。原始图片和阅读资料保留。'; settings.confirmRun.textContent = action === 'clear' ? '清理并关闭' : '开始重建'; confirm.showModal(); }
     function renderSettings() {
       const snapshot = state.status;
-      settings.enabled.checked = Boolean(snapshot?.enabled); settings.enabled.disabled = state.busy || !snapshot;
+      const busy = state.busy || failures.busy;
+      settings.enabled.checked = Boolean(snapshot?.enabled); settings.enabled.disabled = busy || !snapshot;
       settings.message.textContent = statusMessage(snapshot, true);
       const summary = snapshot?.summary || {}; const progress = indexProgress(snapshot);
       settings.progress.value = progress.percent; settings.progress.setAttribute('aria-label', progress.label); settings.progress.hidden = !snapshot?.indexing && !snapshot?.paused;
-      settings.counts.textContent = snapshot ? `已索引 ${Number(summary.indexed) || 0} · 待处理 ${Number(summary.pending) || 0} · 失败 ${Number(summary.failed) || 0} · 共 ${Number(summary.total) || 0} 张` : '';
+      settings.counts.hidden = !snapshot;
+      settings.countBefore.textContent = snapshot ? `已索引 ${Number(summary.indexed) || 0} · 待处理 ${Number(summary.pending) || 0} · ` : '';
+      settings.countAfter.textContent = snapshot ? ` · 共 ${Number(summary.total) || 0} 张` : '';
       settings.pause.textContent = snapshot?.paused ? '继续' : '暂停'; settings.pause.hidden = !snapshot?.indexing && !snapshot?.paused; settings.retry.hidden = !Number(summary.failed);
-      settings.pause.disabled = settings.retry.disabled = state.busy || !snapshot?.enabled; settings.rebuild.disabled = state.busy || !snapshot?.enabled; settings.clear.disabled = state.busy || !snapshot || !(Number(summary.indexed) + Number(summary.pending) + Number(summary.failed)); settings.refresh.disabled = state.busy;
+      settings.pause.disabled = settings.retry.disabled = busy || !snapshot?.enabled; settings.rebuild.disabled = busy || !snapshot?.enabled; settings.clear.disabled = busy || !snapshot || !(Number(summary.indexed) + Number(summary.pending) + Number(summary.failed)); settings.refresh.disabled = busy;
+      updateFailureControls();
     }
     async function loadStatus(manual = false) {
-      if (!(state.active || state.managing) || state.statusRequest || state.busy) { scheduleStatus(); return; }
+      if (!(state.active || state.managing) || state.statusRequest || state.busy || failures.busy) { scheduleStatus(); return; }
       const generation = state.generation; const request = new AbortController(); state.statusRequest = request;
       try {
         const payload = await api('/api/image-search/status', { signal: request.signal });
         if (generation !== state.generation || request.signal.aborted) return;
         state.status = payload; error(settings.error, payload.error || ''); if (manual) error(search.error, ''); renderSearch(); renderSettings();
+        const count = Number(payload.summary?.failed) || 0;
+        if (state.managing && failures.expanded && !failures.loading && (count || failures.loaded) && (manual || !failures.loaded || (count !== failures.observedCount && !failures.selected.size && !failurePanel.contains(document.activeElement)))) loadFailures(failures.page);
         if (!payload.enabled) { cancelQuery(); clearResults(); }
       } catch (failure) { if (generation === state.generation && !request.signal.aborted && failure.status !== 401) { error(state.managing ? settings.error : search.error, failure.message || '无法读取图片搜索状态。'); } }
       finally { if (state.statusRequest === request) { state.statusRequest = null; scheduleStatus(); } }
     }
     async function mutate(path, body) {
-      if (!isAdmin() || state.busy) return;
+      if (!isAdmin() || state.busy || failures.busy) return;
+      cancelFailures(true);
       const generation = ++state.generation; state.statusRequest?.abort(); state.statusRequest = null; stopStatus(); state.busy = true; error(settings.error, ''); renderSettings();
       try { const payload = await post(path, body); if (generation !== state.generation) return; state.status = payload; if (!payload.enabled || body.action === 'clear') { cancelQuery(); clearResults(); } toast(body.action === 'clear' ? '图片索引已清理。' : body.action === 'rebuild' ? '已开始重建图片索引。' : '图片搜索设置已更新。'); }
       catch (failure) { if (generation === state.generation && failure.status !== 401) error(settings.error, failure.message || '操作失败，请重试。'); }
-      finally { if (generation === state.generation) { state.busy = false; renderSearch(); renderSettings(); scheduleStatus(); } }
+      finally { if (generation === state.generation) { state.busy = false; renderSearch(); renderSettings(); if (state.managing && Number(state.status?.summary?.failed)) loadFailures(1); scheduleStatus(); } }
     }
     renderSearch(); renderSettings();
     return {
       showSearch() { if (state.active) return; state.active = true; loadStatus(true); },
       hideSearch() { if (!state.active) return; state.active = false; cancelQuery(); if (!state.managing) { stopStatus(); state.statusRequest?.abort(); state.statusRequest = null; } },
       showSettings() { if (!isAdmin() || state.managing) return; state.managing = true; loadStatus(true); },
-      hideSettings() { if (!state.managing) return; state.managing = false; if (confirm.open) confirm.close(); if (!state.active) { stopStatus(); state.statusRequest?.abort(); state.statusRequest = null; } },
+      hideSettings() { if (!state.managing) return; state.managing = false; cancelFailures(true); if (confirm.open) confirm.close(); if (!state.active) { stopStatus(); state.statusRequest?.abort(); state.statusRequest = null; } },
       syncCatalog(signature) { if (state.catalog && state.catalog !== signature) { cancelQuery(); clearResults(); } state.catalog = signature; },
-      reset() { state.generation += 1; state.fileGeneration += 1; state.active = state.managing = state.busy = false; stopStatus(); state.statusRequest?.abort(); state.statusRequest = null; cancelQuery(); releasePreview(); Object.assign(state, { file: null, mime: '', status: null, catalog: '' }); clearResults(); error(search.error, ''); error(settings.error, ''); search.input.value = ''; if (confirm.open) confirm.close(); renderSearch(); renderSettings(); }
+      reset() { state.generation += 1; state.fileGeneration += 1; state.active = state.managing = state.busy = false; cancelFailures(true); stopStatus(); state.statusRequest?.abort(); state.statusRequest = null; cancelQuery(); releasePreview(); Object.assign(state, { file: null, mime: '', status: null, catalog: '' }); clearResults(); error(search.error, ''); error(settings.error, ''); search.input.value = ''; if (confirm.open) confirm.close(); renderSearch(); renderSettings(); }
     };
   }
-  return { maxBytes, fileError, imageType, statusMessage, indexProgress, normalizeResults, createRequestGate, create };
+  return { maxBytes, fileError, imageType, statusMessage, indexProgress, normalizeResults, normalizeFailures, failureKey, createRequestGate, create };
 });

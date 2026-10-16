@@ -46,11 +46,14 @@
   let transcodingUI = null;
   let imageSearchUI = null;
   let imageSearchSettings = null;
+  let cacheManagementUI = null;
+  let libraryCoverBusy = false;
+  let libraryCoverRequest = 0;
   let searchMode = 'text';
   const optimizationNotice = { tracker: window.GravelleTranscodingUI.createPendingTracker(), payload: null, count: 0, request: null, timer: null, deferred: null, waiting: new Set() };
   state.settingsSection = '';
   state.settingsTab = '';
-  reader.pageCache = Performance.createCache(Performance.get().imageCacheLimit, entry => entry.cancel?.());
+  reader.pageCache = Performance.createCache(Performance.get().imageCacheLimit, entry => entry.cancel?.(), { byteLimit: Performance.get().imageCacheMemoryMB * 1024 * 1024 });
   const librarySorts = readLibrarySorts();
   reader.endOverlay = null;
   reader.endSequence = null;
@@ -95,6 +98,7 @@
     stopCatalogFlow(); resetSelection(); selection.busy = false;
     transcodingUI?.reset();
     imageSearchUI?.reset(); searchMode = 'text';
+    cacheManagementUI?.reset(); libraryCoverRequest += 1; libraryCoverBusy = false;
     resetOptimizationReminders();
     state.books = []; state.libraries = []; state.models = []; state.bookmarks = [];
     state.loaded = false; state.loading = true; state.scanning = false; state.scanErrors = []; state.libraryError = null; state.lastScan = null; state.rootPath = '/library';
@@ -571,7 +575,7 @@
     }
     const libraryId = String(options.libraryId ?? state.libraryId);
     const modelId = String(options.modelId ?? state.modelId);
-    const settingsSection = view === 'settings' && ['interface', 'performance', 'reading', 'transcoding', 'image-search'].includes(options.section) && (!['transcoding', 'image-search'].includes(options.section) || isAdmin()) ? options.section : '';
+    const settingsSection = view === 'settings' && ['interface', 'performance', 'reading', 'transcoding', 'image-search', 'cache'].includes(options.section) && (!['transcoding', 'image-search', 'cache'].includes(options.section) || isAdmin()) ? options.section : '';
     const settingsTab = settingsSection === 'transcoding' && options.tab === 'rules' ? 'rules' : '';
     const nextSearchMode = options.image === undefined ? searchMode : options.image ? 'image' : 'text';
     const samePage = state.view === view && (view !== 'library' || libraryId === String(state.libraryId)) && (view !== 'model' || modelId === String(state.modelId)) && (view !== 'search' || searchMode === nextSearchMode) && (view !== 'settings' || state.settingsSection === settingsSection && state.settingsTab === settingsTab);
@@ -591,6 +595,7 @@
     if (options.fromRoute && view === 'settings' && options.section && options.section !== settingsSection) commitRoute(currentViewRoute(), { replace: true });
     if (view !== 'settings' || settingsSection !== 'transcoding') transcodingUI?.hide();
     if (view !== 'settings' || settingsSection !== 'image-search') imageSearchUI?.hideSettings();
+    if (view !== 'settings' || settingsSection !== 'cache') cacheManagementUI?.hide();
     if (options.libraryId !== undefined) state.libraryId = String(options.libraryId);
     if (view === 'library') { state.sort = librarySort(state.libraryId); $('#sort').value = state.sort; }
     if (options.sort) { state.sort = End.normalizeSort(options.sort); $('#sort').value = state.sort; }
@@ -666,7 +671,11 @@
       card.classList.toggle('is-selected', selection.enabled && selection.ids.has(String(library.id)));
       const button = node('button', 'library-tile'); button.type = 'button'; button.setAttribute('aria-label', `打开写真库 ${library.name}`);
       const books = state.books.filter(book => String(book.library_id) === String(library.id)); const montage = node('div', 'library-montage');
-      if (books.length) { montage.dataset.count = Math.min(books.length, 4); books.slice(0, 4).forEach(book => montage.append(makeCover(book, 'tile-cover'))); } else montage.append(icon('folder'));
+      if (library.cover?.url) {
+        montage.classList.add('is-composite'); const image = node('img'); image.alt = ''; image.decoding = 'async';
+        Performance.loadCover(image, library.cover.url + '?v=' + encodeURIComponent(library.cover.version || 'pending'));
+        image.addEventListener('error', () => { image.replaceWith(icon('folder')); }, { once: true }); montage.append(image);
+      } else if (books.length) { montage.dataset.count = Math.min(books.length, 4); books.slice(0, 4).forEach(book => montage.append(makeCover(book, 'tile-cover'))); } else montage.append(icon('folder'));
       const info = node('div', 'library-tile-info'); info.append(node('strong', '', library.name), node('span', '', `${typeLabels[library.media_type] || '日漫'} · ${books.length} 本作品`));
       button.append(montage, info); button.addEventListener('click', () => selection.enabled && state.view === 'libraries' ? toggleSelection(library.id) : selectLibrary(library.id)); card.append(button);
       if (state.view === 'libraries') card.append(selectionCheckbox(library.id, library.name, 'library-select'));
@@ -970,11 +979,11 @@
     settingsUpdateRequest = operation;
     return operation;
   }
-  const settingsSectionLabels = { service: '服务与数据', users: '用户管理', interface: '界面设置', performance: '性能设置', reading: '阅读偏好', transcoding: '图片优化', 'image-search': '图片搜索' };
+  const settingsSectionLabels = { service: '服务与数据', users: '用户管理', interface: '界面设置', performance: '性能设置', reading: '阅读偏好', transcoding: '图片优化', 'image-search': '图片搜索', cache: '缓存管理' };
   function ensureImageSearchUI() {
     if (imageSearchUI) return;
     imageSearchSettings = node('section'); imageSearchSettings.id = 'image-search-settings'; imageSearchSettings.hidden = true;
-    imageSearchUI = window.GravelleImageSearchUI.create({ searchHost: $('#image-search-panel'), settingsHost: imageSearchSettings, api, post, openBook, isAdmin, toast, onManage: () => navigate('settings', { section: 'image-search' }) });
+    imageSearchUI = window.GravelleImageSearchUI.create({ searchHost: $('#image-search-panel'), settingsHost: imageSearchSettings, api, post, openBook, isAdmin, toast, onManage: () => navigate('settings', { section: 'image-search' }), onOpenFailure: async (bookId, page) => { const generation = authGeneration; try { const book = await api(bookUrl(bookId)); if (generation === authGeneration && isAdmin()) await openBook(book, page); } catch (error) { if (generation === authGeneration && error.status !== 401) toast(error.message); } } });
   }
   function changeSearchMode(mode) {
     if (selection.busy) return;
@@ -990,13 +999,15 @@
     const items = {};
     Object.entries(settingsSectionLabels).filter(([section]) => !['service', 'users'].includes(section)).forEach(([section, title]) => {
       const entry = node('button', 'settings-menu-item'); entry.type = 'button'; entry.dataset.settingsSection = section;
-      const symbol = node('span', 'settings-menu-icon'); symbol.append(icon({ service: 'folder', users: 'person', interface: 'sun', performance: 'settings', reading: 'book', transcoding: 'refresh', 'image-search': 'search' }[section]));
+      const symbol = node('span', 'settings-menu-icon'); symbol.append(icon({ service: 'folder', users: 'person', interface: 'sun', performance: 'settings', reading: 'book', transcoding: 'refresh', 'image-search': 'search', cache: 'folder' }[section]));
       const content = node('span', 'settings-menu-content'); content.append(node('strong', '', title)); const detail = node('small'); content.append(detail); const badge = node('span', 'settings-menu-badge'); badge.hidden = true; entry.append(symbol, content, badge, icon('right')); entry.addEventListener('click', () => navigate('settings', { section })); index.append(entry); items[section] = { entry, detail, badge };
     });
     const transcode = node('section'); transcode.id = 'transcoding-settings'; transcode.hidden = true;
-    host.replaceChildren(back, panels[0], panels[1], index, ...panels.slice(2), transcode, imageSearchSettings);
-    settingsLayout = { index, back, items, panels: Object.fromEntries(sections.map((section, position) => [section, panels[position]])), transcode };
+    const cache = node('section'); cache.id = 'cache-management-settings'; cache.hidden = true;
+    host.replaceChildren(back, panels[0], panels[1], index, ...panels.slice(2), transcode, imageSearchSettings, cache);
+    settingsLayout = { index, back, items, panels: Object.fromEntries(sections.map((section, position) => [section, panels[position]])), transcode, cache };
     transcodingUI = window.GravelleTranscodingUI.create({ host: transcode, api, post, toast, onCatalogChange: () => refreshLibrary(), onFiltersChange: () => { cancelListRestoration(); saveListPosition(); }, onRender: restoreListPosition, onTabChange: tab => { state.settingsTab = tab === 'rules' ? 'rules' : ''; syncViewRoute(); } });
+    cacheManagementUI = window.GravelleCacheManagementUI.create({ host: cache, api, post, toast, onCatalogChange: () => refreshLibrary() });
   }
   function renderSettings() {
     ensureSettingsLayout();
@@ -1005,8 +1016,9 @@
     Object.entries(settingsLayout.panels).forEach(([key, panel]) => { panel.hidden = ['service', 'users'].includes(key) ? Boolean(section) || key === 'service' && !isAdmin() : key !== section; });
     settingsLayout.items.transcoding.entry.hidden = !isAdmin();
     settingsLayout.items['image-search'].entry.hidden = !isAdmin();
+    settingsLayout.items.cache.entry.hidden = !isAdmin();
     renderOptimizationReminders();
-    const subtitles = { service: '版本、连接与访问地址', users: state.session?.user?.username || '当前账户与子账户', interface: interfaceTheme() === 'light' ? '亮色主题' : '暗色主题', performance: '加载、缓存与列表', reading: '图片适配与阅读背景', transcoding: '规则、作品与后台任务', 'image-search': '图片索引与后台任务' };
+    const subtitles = { service: '版本、连接与访问地址', users: state.session?.user?.username || '当前账户与子账户', interface: interfaceTheme() === 'light' ? '亮色主题' : '暗色主题', performance: '加载、缓存与列表', reading: '图片适配与阅读背景', transcoding: '规则、作品与后台任务', 'image-search': '图片索引与后台任务', cache: '空间占用与缓存清理' };
     Object.entries(settingsLayout.items).forEach(([key, value]) => { value.detail.textContent = subtitles[key]; });
     $('#subaccounts-setting').hidden = !isAdmin();
     renderSubaccountSummary();
@@ -1021,6 +1033,8 @@
     if (section === 'transcoding' && isAdmin()) transcodingUI.show(state.settingsTab); else transcodingUI.hide();
     imageSearchSettings.hidden = section !== 'image-search' || !isAdmin();
     if (section === 'image-search' && isAdmin()) imageSearchUI.showSettings(); else imageSearchUI.hideSettings();
+    settingsLayout.cache.hidden = section !== 'cache' || !isAdmin();
+    if (section === 'cache' && isAdmin()) cacheManagementUI.show(); else cacheManagementUI.hide();
   }
   function renderSubaccountSummary() {
     const count = $('#subaccounts-count');
@@ -1279,7 +1293,8 @@
       if (generation !== authGeneration) return;
       state.loading = false;
       if (state.session?.authenticated && renderedLibraryData !== libraryDataSignature()) { renderLibraryNavigation(); renderSeries(); renderLibrary(); }
-      clearTimeout(state.poll); if (state.scanning && state.session?.authenticated) state.poll = setTimeout(() => refreshLibrary(), 1500);
+      if ($('#library-dialog').open) renderLibraryCoverEditor();
+      clearTimeout(state.poll); if ((state.scanning || ['home', 'libraries'].includes(state.view) && state.libraries.some(library => library.cover?.pending) || $('#library-dialog').open && state.libraries.some(library => library.id === state.editingLibrary && library.cover?.pending)) && state.session?.authenticated) state.poll = setTimeout(() => refreshLibrary(), 1500);
     } })();
     state.refreshPromise = operation; try { await operation; } finally { if (state.refreshPromise === operation) state.refreshPromise = null; }
     if (state.session?.authenticated && state.loaded && !routing.restoring) {
@@ -1331,17 +1346,48 @@
   function showLibraryForm(library = null) {
     if (!requireAccess()) return;
     libraryFormGeneration += 1; $('#library-create-author').disabled = false; $('#library-save').disabled = false;
+    libraryCoverRequest += 1; libraryCoverBusy = false;
     $('#library-remove').hidden = !library; $('#library-remove').disabled = false;
     const type = library?.media_type || 'photo'; const typeSelect = $('#library-type');
     typeSelect.replaceChildren(new Option('写真', 'photo'));
     if (type !== 'photo' && Object.hasOwn(typeLabels, type)) typeSelect.append(new Option(typeLabels[type] + '（已有类型）', type));
     typeSelect.value = type; typeSelect.disabled = type !== 'photo';
     state.editingLibrary = library?.id || null; $('#library-dialog-title').textContent = library ? '管理写真库' : '创建写真库'; $('#library-name').value = library?.name || ''; $('#library-mode').value = library?.reading_mode || 'single';
+    renderLibraryCoverEditor();
     const direction = $('#library-direction'); direction.dataset.pagedDirection = ['ltr', 'rtl', 'ttb'].includes(library?.reading_direction) ? library.reading_direction : 'ltr'; updateLibraryReadingDirection();
     libraryBrowseInput = null; libraryBrowseRequest += 1; $('#library-paths').replaceChildren(); const paths = library?.paths?.length ? library.paths : [library?.path || state.rootPath]; paths.forEach(path => addLibraryPath(path));
     $('#library-excludes').value = (library?.exclude_rules || []).join('\n'); const author = library?.default_author_id || state.models.find(model => model.name.normalize('NFKC').toLocaleLowerCase('zh-CN') === String(library?.default_author || '').normalize('NFKC').toLocaleLowerCase('zh-CN'))?.id || ''; renderLibraryAuthors(author); $('#library-author-new').hidden = true; $('#library-new-author').value = ''; $('#library-author-error').hidden = true;
     $('#library-hide-date').checked = Boolean(library?.hide_date_prefix); $('#library-apply-reading').checked = false; $('#library-apply-reading-field').hidden = !library; $('#library-save').textContent = library ? '保存并扫描' : '创建并扫描'; $('#library-form-error').hidden = true; $('#directory-picker').hidden = true; updateLibraryTypeFields(); if (!$('#library-dialog').open) $('#library-dialog').showModal(); $('#library-name').focus();
   }
+  function renderLibraryCoverEditor() {
+    const library = state.libraries.find(item => item.id === state.editingLibrary);
+    const host = $('#library-cover-editor'); host.hidden = !library || !isAdmin();
+    if (host.hidden) return;
+    const image = $('#library-cover-preview'); const cover = library.cover;
+    const url = cover?.url ? cover.url + '?v=' + encodeURIComponent(cover.version || 'pending') : '';
+    image.hidden = !url;
+    if (url && image.getAttribute('src') !== url) image.src = url;
+    const pending = libraryCoverBusy || Boolean(cover?.pending);
+    const button = $('#library-cover-shuffle'); button.disabled = pending || !library.book_count;
+    button.textContent = pending ? '正在生成…' : '换一组封面';
+    const status = $('#library-cover-status'); status.textContent = pending ? '正在生成封面…' : cover?.error || ''; status.hidden = !status.textContent; status.classList.toggle('form-error', Boolean(cover?.error));
+  }
+  $('#library-cover-shuffle').addEventListener('click', async () => {
+    const libraryId = state.editingLibrary; if (!libraryId || libraryCoverBusy || !isAdmin()) return;
+    const request = ++libraryCoverRequest; const auth = authGeneration; const form = libraryFormGeneration;
+    libraryCoverBusy = true; renderLibraryCoverEditor();
+    try {
+      const cover = await post('/api/libraries/' + encodeURIComponent(libraryId) + '/cover/shuffle', {});
+      if (request !== libraryCoverRequest || auth !== authGeneration || form !== libraryFormGeneration) return;
+      const library = state.libraries.find(item => item.id === libraryId); if (library) library.cover = cover;
+      await refreshLibrary();
+      if (request === libraryCoverRequest && auth === authGeneration) toast('已换一组封面，正在生成');
+    } catch (error) {
+      if (request === libraryCoverRequest && auth === authGeneration && error.status !== 401) toast(error.message);
+    } finally {
+      if (request === libraryCoverRequest && auth === authGeneration) { libraryCoverBusy = false; renderLibraryCoverEditor(); }
+    }
+  });
   function updateLibraryTypeFields() {
     const photo = $('#library-type').value === 'photo';
     $('#library-hide-date-field').hidden = !photo;
@@ -1934,7 +1980,7 @@
     if (!outgoing) $('#reader-viewport').scrollTop = 0;
     try {
       const pendingImages = spread.map(index => loadReaderImage(index));
-      reader.pageCache.setLimit(Performance.get().imageCacheLimit, [...spread, ...$$('img', wrap).map(image => Number(image.dataset.page))]);
+      configureReaderCache([...spread, ...$$('img', wrap).map(image => Number(image.dataset.page))]);
       const images = await Promise.all(pendingImages);
       if (!reader.open || token !== reader.token || epoch !== reader.epoch || state.prefs.mode === 'webtoon') return;
       rebuildSpreads();
@@ -1957,13 +2003,37 @@
     }
   }
 
+  function readerMemoryBudget() { return Performance.get().imageCacheMemoryMB * 1024 * 1024; }
+  function readerCacheProtection() { return [...currentSpread(), ...$$('#page-image-wrap img').map(image => Number(image.dataset.page))]; }
+  function configureReaderCache(protectedPages = readerCacheProtection()) {
+    reader.pageCache.setLimits(Performance.get().imageCacheLimit, readerMemoryBudget(), protectedPages);
+  }
+  function pageMemoryEstimate(index) {
+    const known = reader.sizes[index];
+    const nearby = state.prefs.mode === 'webtoon' ? reader.sizes[reader.index] : reader.sizes[currentSpread()[0]];
+    return Performance.decodedImageBytes(known, Performance.decodedImageBytes(nearby));
+  }
+  function reserveReaderPreload(index, protectedPages) {
+    if (reader.pageCache.peek(index)) return true;
+    const estimate = pageMemoryEstimate(index); const budget = readerMemoryBudget();
+    if (!budget) return true;
+    for (const key of reader.pageCache.keys()) {
+      if (reader.pageCache.availableBytes >= estimate) break;
+      if (!protectedPages.includes(key)) reader.pageCache.delete(key);
+    }
+    return reader.pageCache.availableBytes >= estimate;
+  }
   function preloadNeighbors(index) {
     if (!reader.book || state.prefs.mode === 'webtoon') return;
     const protectedPages = currentSpread(); const limit = Performance.get().imageCacheLimit;
     const candidates = [Math.max(...protectedPages) + 1, Math.min(...protectedPages) - 1].filter(value => value >= 0 && value < reader.book.page_count && !protectedPages.includes(value));
-    reader.preloads = candidates.slice(0, limit ? Math.max(0, limit - protectedPages.length) : candidates.length);
-    reader.preloads.forEach(value => loadReaderImage(value).catch(() => {}));
-    reader.pageCache.setLimit(limit, protectedPages);
+    configureReaderCache(protectedPages);
+    reader.preloads = [];
+    candidates.slice(0, limit ? Math.max(0, limit - protectedPages.length) : candidates.length).forEach(value => {
+      if (!reserveReaderPreload(value, [...protectedPages, ...reader.preloads])) return;
+      reader.preloads.push(value); loadReaderImage(value).catch(() => {});
+    });
+    configureReaderCache(protectedPages);
   }
 
   function clearReaderImages() {
@@ -1975,11 +2045,11 @@
     const existing = reader.pageCache.get(index); if (existing) return existing.promise;
     const book = reader.book; const image = node('img');
     image.alt = `${book.title}，第 ${index + 1} 页`; image.dataset.page = index; image.decoding = 'async'; image.draggable = false;
-    const entry = { image, promise: null, cancel: null };
+    const entry = { image, promise: null, cancel: null, bytes: pageMemoryEstimate(index) };
     entry.promise = new Promise((resolve, reject) => {
       let settled = false;
       entry.cancel = () => { image.onload = null; image.onerror = null; image.removeAttribute('src'); if (!settled) { settled = true; reject(new Error('图片加载已取消。')); } };
-      image.onload = () => { settled = true; if (reader.book?.id === book.id) reader.sizes[index] = { width: image.naturalWidth, height: image.naturalHeight }; resolve(image); };
+      image.onload = () => { settled = true; entry.bytes = Performance.decodedImageBytes({ width: image.naturalWidth, height: image.naturalHeight }); if (reader.book?.id === book.id) reader.sizes[index] = { width: image.naturalWidth, height: image.naturalHeight }; resolve(image); queueMicrotask(() => { if (reader.pageCache.peek(index) === entry) configureReaderCache(); }); };
       image.onerror = () => { settled = true; if (reader.pageCache.peek(index) === entry) reader.pageCache.delete(index); reject(new Error(`第 ${index + 1} 页加载失败。请检查网络，或确认图片文件仍在写真库中。`)); };
       image.src = pageUrl(book.id, index);
     });
@@ -1990,14 +2060,18 @@
     return new Set([...reader.visible, reader.index, ...(reader.restoring === null ? [] : [reader.restoring])]);
   }
 
-  function trimScrollImages() {
-    const limit = Performance.get().imageCacheLimit; if (!limit) return;
-    const protectedPages = scrollProtectedPages(); const retained = reader.rows.map((row, index) => ({ row, index })).filter(item => item.row.loaded || item.row.loading);
-    let count = retained.length;
+  function scrollRetainedBytes() {
+    return reader.rows.reduce((sum, row, index) => sum + (row.loaded || row.loading ? row.bytes || pageMemoryEstimate(index) : 0), 0);
+  }
+  function trimScrollImages(reserveBytes = 0, reserveCount = 0, additionalProtected = []) {
+    const limit = Performance.get().imageCacheLimit; const budget = readerMemoryBudget(); if (!limit && !budget) return;
+    const protectedPages = new Set([...scrollProtectedPages(), ...additionalProtected]); const retained = reader.rows.map((row, index) => ({ row, index })).filter(item => item.row.loaded || item.row.loading);
+    let count = retained.length; let bytes = scrollRetainedBytes();
     retained.sort((a, b) => Math.abs(b.index - reader.index) - Math.abs(a.index - reader.index)).forEach(({ row, index }) => {
-      if (count <= limit || protectedPages.has(index)) return;
+      if ((!limit || count + reserveCount <= limit) && (!budget || bytes + reserveBytes <= budget) || protectedPages.has(index)) return;
       const image = $('img', row.element);
       if (image?.naturalWidth && image.naturalHeight) row.ratio = image.naturalWidth / image.naturalHeight;
+      bytes -= row.bytes || pageMemoryEstimate(index); row.bytes = 0;
       row.cancel?.(); row.loaded = false; row.loading = false; row.failed = false; row.element.classList.remove('loaded');
       if (row.ratio) row.element.style.aspectRatio = String(row.ratio);
       row.element.replaceChildren(node('span', 'scroll-placeholder', `第 ${index + 1} 页`)); count -= 1;
@@ -2010,7 +2084,13 @@
     const candidates = [];
     for (let distance = 1; distance <= step; distance += 1) candidates.push(index + distance, index - distance);
     const available = limit ? Math.max(0, limit - protectedPages.size) : candidates.length;
-    candidates.filter(value => value >= 0 && value < reader.rows.length && !protectedPages.has(value)).slice(0, available).forEach(value => loadScrollPage(value));
+    const retainedCandidates = [];
+    candidates.filter(value => value >= 0 && value < reader.rows.length && !protectedPages.has(value)).slice(0, available).forEach(value => {
+      const row = reader.rows[value]; if (row.loaded || row.loading) { retainedCandidates.push(value); return; }
+      const estimate = pageMemoryEstimate(value); trimScrollImages(estimate, 1, retainedCandidates);
+      if (readerMemoryBudget() && scrollRetainedBytes() + estimate > readerMemoryBudget()) return;
+      loadScrollPage(value); retainedCandidates.push(value);
+    });
     trimScrollImages();
   }
 
@@ -2056,6 +2136,7 @@
     const epoch = reader.epoch;
     const book = reader.book;
     row.loading = true;
+    row.bytes = pageMemoryEstimate(index);
     row.failed = false;
     row.element.replaceChildren(node('span', 'scroll-placeholder', `正在加载第 ${index + 1} 页…`));
     const image = node('img');
@@ -2066,6 +2147,8 @@
       if (!reader.open || token !== reader.token || epoch !== reader.epoch || reader.rows[index] !== row || !row.loading) return;
       row.loaded = true;
       row.loading = false;
+      row.bytes = Performance.decodedImageBytes({ width: image.naturalWidth, height: image.naturalHeight });
+      reader.sizes[index] = { width: image.naturalWidth, height: image.naturalHeight };
       row.ratio = image.naturalWidth / image.naturalHeight;
       row.element.style.aspectRatio = '';
       row.element.classList.add('loaded');
@@ -2080,6 +2163,7 @@
     const onError = () => {
       if (!reader.open || token !== reader.token || epoch !== reader.epoch || reader.rows[index] !== row || !row.loading) return;
       row.loading = false;
+      row.bytes = 0;
       row.failed = true;
       row.element.replaceChildren(makePageError(`第 ${index + 1} 页加载失败`, () => loadScrollPage(index, true)));
     };
@@ -2914,7 +2998,7 @@
       renderChapters();
       if (state.prefs.mode === 'webtoon') loadScrollBuffer(reader.index);
       else preloadNeighbors(reader.index);
-    } else reader.pageCache.setLimit(Performance.get().imageCacheLimit);
+    } else configureReaderCache([]);
   });
 
   setupReaderChoices();

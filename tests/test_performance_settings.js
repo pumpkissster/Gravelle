@@ -7,7 +7,7 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
 
 test('device preferences accept bounded integers and reject invalid saved values', () => {
   assert.deepEqual(normalize(), defaults);
-  assert.deepEqual(normalize({ webtoonStep: 20, coverConcurrency: 12, imageCacheLimit: 999, bookPageSize: 1, chapterPageSize: 0 }), { webtoonStep: 20, coverConcurrency: 12, imageCacheLimit: 999, bookPageSize: 1, chapterPageSize: 0 });
+  assert.deepEqual(normalize({ webtoonStep: 20, coverConcurrency: 12, imageCacheLimit: 999, bookPageSize: 1, chapterPageSize: 0 }), { webtoonStep: 20, coverConcurrency: 12, imageCacheLimit: 999, imageCacheMemoryMB: 256, bookPageSize: 1, chapterPageSize: 0 });
   assert.deepEqual(normalize({ webtoonStep: 0, coverConcurrency: 13, imageCacheLimit: -1, bookPageSize: 1.5, chapterPageSize: '20' }), defaults);
   [null, false, 7, 'invalid', []].forEach(value => assert.deepEqual(normalize(value), defaults));
 });
@@ -40,7 +40,7 @@ test('valid number input saves immediately, keeps the same controls, and rejects
     Performance.render(); const originalChildren = panel.children.slice();
     const input = controls.find(element => element.id === 'performance-bookPageSize');
     input.value = '12'; input.handlers.input(); assert.equal(Performance.get().bookPageSize, 12); assert.deepEqual(panel.children, originalChildren);
-    global.document.activeElement = input; Performance.render(); assert.equal(controls.length, 4); assert.deepEqual(panel.children, originalChildren);
+    global.document.activeElement = input; Performance.render(); assert.equal(controls.length, 5); assert.deepEqual(panel.children, originalChildren);
     assert.equal(controls.some(element => element.id === 'performance-chapterPageSize'), false);
     input.value = ''; input.handlers.input(); assert.equal(Performance.get().bookPageSize, 12); input.handlers.blur(); assert.equal(input.value, 12);
     input.value = '1000'; input.handlers.change(); assert.equal(Performance.get().bookPageSize, 12); assert.equal(input.reported, true); assert.equal(input.value, 12);
@@ -72,13 +72,13 @@ async function withPerformanceFixture(run) {
   finally { Performance.setUser(null); Performance.configureServer(null); global.document = previousDocument; global.localStorage = previousStorage; }
 }
 
-test('child accounts see four device controls without requesting or rendering server task settings', async () => withPerformanceFixture(async fixture => {
+test('child accounts see device controls without requesting or rendering server task settings', async () => withPerformanceFixture(async fixture => {
   let reads = 0; let writes = 0;
   Performance.configureServer({ api: async () => { reads += 1; }, post: async () => { writes += 1; }, isAdmin: () => false });
   Performance.setUser({ id: 2, role: 'user' }); Performance.render(); Performance.render(); await tick();
   assert.equal(fixture.panel.children.length, 1);
   assert.equal(fixture.panel.children[0].children[0].textContent, '加载与列表');
-  assert.equal(fixture.controls().length, 4);
+  assert.equal(fixture.controls().length, 5);
   assert.equal(fixture.find(item => item.id === 'performance-taskConcurrency'), null);
   assert.equal(fixture.find(item => item.id === 'performance-chapterPageSize'), null);
   assert.equal(Performance.get().chapterPageSize, 0, 'the stored compatibility preference remains available');

@@ -9,7 +9,7 @@
   const views = { home: 'home', libraries: 'libraries', recent: 'recent', bookmarks: 'bookmarks', favorites: 'favorite', search: 'search', models: 'models', settings: 'settings' };
   const sorts = ['added', 'added_asc', 'title', 'updated', 'release', 'modified'];
   const listViews = ['library', 'recent', 'favorite', 'search', 'model'];
-  const settingsSections = ['service', 'users', 'interface', 'performance', 'reading', 'transcoding', 'image-search'];
+  const settingsSections = ['service', 'users', 'interface', 'performance', 'reading', 'transcoding', 'image-search', 'cache'];
   const home = () => ({ view: 'home' });
   function id(value) { return typeof value === 'string' && value.length > 0 && value.length <= 200 && !/[\x00-\x1f\x7f/\\]/.test(value) ? value : ''; }
   function normalize(input, depth = 0) {

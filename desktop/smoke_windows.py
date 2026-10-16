@@ -129,22 +129,24 @@ class Client:
         self.url = url.rstrip("/")
         self.cookies = http.cookiejar.CookieJar()
         self.opener = build_opener(ProxyHandler({}), HTTPCookieProcessor(self.cookies))
+        self.last_headers = {}
 
-    def request(self, path: str, body=None, *, image=None):
-        headers = {"Origin": self.url}
+    def request(self, path: str, body=None, *, image=None, headers=None):
+        request_headers = {"Origin": self.url, **(headers or {})}
         payload = None
         if image is not None:
             payload = image
-            headers["Content-Type"] = "image/jpeg" if image.startswith(b"\xff\xd8") else "image/png"
+            request_headers["Content-Type"] = "image/jpeg" if image.startswith(b"\xff\xd8") else "image/png"
         elif body is not None:
             payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
-            headers["Content-Type"] = "application/json"
-        request = Request(self.url + path, data=payload, headers=headers)
+            request_headers["Content-Type"] = "application/json"
+        request = Request(self.url + path, data=payload, headers=request_headers)
         try:
             response = self.opener.open(request, timeout=65 if path == "/api/image-search/query" else 5)
         except HTTPError as error:
             response = error
         with response:
+            self.last_headers = response.headers
             raw = response.read(8 * 1024 * 1024)
             content_type = response.headers.get_content_type()
             value = json.loads(raw) if content_type == "application/json" else raw
@@ -235,6 +237,25 @@ def run_smoke(executable: Path, work_root: Path) -> dict:
             require(status == 200 and b"GravellePageRouter" in helper,
                     "Frozen bundle is missing the page-router frontend module")
             passed("packaged_page_router_module")
+            status, helper, mime = client.request("/cache-management-ui.js")
+            require(status == 200 and mime == "text/javascript" and b"GravelleCacheManagementUI" in helper
+                    and b'/cache-management-ui.js' in index,
+                    "Frozen bundle is missing the cache-management frontend module/reference")
+            passed("packaged_cache_management_module")
+            status, cache, _ = client.request("/api/cache")
+            kinds = {item["kind"] for item in cache.get("categories", [])}
+            require(status == 200 and cache.get("settings", {}).get("cover_limit_mb") == 512
+                    and {"covers", "library_covers", "optimized"} <= kinds,
+                    "Frozen administrator cache inventory/default budget failed")
+            require(Client(url).request("/api/cache")[0] == 401, "Cache inventory must require a login")
+            status, changed_cache, _ = client.request("/api/cache/settings", {
+                "expected_revision": cache["settings"]["revision"], "cover_limit_mb": 64})
+            require(status == 200 and changed_cache["settings"]["cover_limit_mb"] == 64,
+                    "Frozen cover cache budget did not persist")
+            status, _, _ = client.request("/api/cache/settings", {
+                "expected_revision": changed_cache["settings"]["revision"], "cover_limit_mb": 512})
+            require(status == 200, "Disposable cache budget restoration failed")
+            passed("frozen_cache_inventory_settings_and_login")
 
             status, result, _ = client.request("/api/libraries", {
                 "name": "冻结包几何样例", "paths": [str(media)], "media_type": "photo",
@@ -280,6 +301,78 @@ def run_smoke(executable: Path, work_root: Path) -> dict:
             status, page, _ = client.request(f"/api/books/{second_book['id']}/pages/0")
             require(status == 200 and page == second_image, "Frozen reader served the wrong root's page")
             passed("second_root_scan_and_original_page")
+
+            # Exercise only the two existing generated books. One-book libraries
+            # may regenerate the same visual group but must advance its version.
+            def wait_library_cover(target_id):
+                deadline = time.monotonic() + 20
+                while time.monotonic() < deadline:
+                    status, libraries, _ = client.request("/api/libraries")
+                    item = next((item for item in libraries.get("libraries", []) if item["id"] == target_id), None)
+                    cover_state = item.get("cover", {}) if item else {}
+                    require(status == 200 and not cover_state.get("error"), "Frozen montage task failed")
+                    if cover_state.get("count") == 1 and cover_state.get("pending") is False:
+                        return cover_state
+                    time.sleep(.1)
+                raise AssertionError("Frozen montage background task did not become ready")
+
+            montage_state = wait_library_cover(library_id)
+            cover_route = f"/api/libraries/{library_id}/cover"
+            require(Client(url).request(cover_route)[0] == 401, "Library montage must require authentication")
+            status, montage, mime = client.request(cover_route)
+            require(status == 200 and mime == "image/jpeg" and montage.startswith(b"\xff\xd8"),
+                    "Frozen library montage did not serve a JPEG")
+            from PIL import Image
+            with Image.open(BytesIO(montage)) as decoded:
+                require(decoded.size == (960, 480), "Frozen montage cache has an unexpected size")
+            montage_etag = client.last_headers.get("ETag")
+            require(montage_etag and client.request(cover_route, headers={"If-None-Match": montage_etag})[0] == 304,
+                    "Frozen montage conditional request did not return 304")
+            status, shuffled, _ = client.request(cover_route + "/shuffle", {})
+            require(status == 200 and shuffled.get("version") != montage_state["version"],
+                    "Frozen administrator cover shuffle did not queue a new generation")
+            require(wait_library_cover(library_id)["version"] != montage_state["version"],
+                    "Frozen montage shuffle did not publish its new generation")
+            passed("frozen_library_montage_cache_shuffle_and_304", selected=1, width=960, height=480)
+
+            child_credentials = {"username": "frozen-smoke-child", "password": "disposable-child-smoke-only"}
+            status, created_child, _ = client.request("/api/users", {
+                **child_credentials, "enabled": True, "library_ids": [library_id]})
+            require(status == 201 and created_child.get("user", {}).get("id"), "Disposable child creation failed")
+            child_id = created_child["user"]["id"]
+            child_client = Client(url)
+            require(child_client.request("/api/login", child_credentials)[0] == 200, "Disposable child login failed")
+            require(child_client.request(cover_route)[0] == 200, "Authorized child could not view library montage")
+            child_etag = child_client.last_headers.get("ETag")
+            require(child_client.request(cover_route + "/shuffle", {})[0] == 403,
+                    "Child must not shuffle shared library covers")
+            require(child_client.request("/api/cache")[0] == 403, "Child must not view administrator cache paths")
+            require(child_client.request("/api/my-libraries", {"visible_library_ids": []})[0] == 200,
+                    "Disposable child could not hide its granted library")
+            require(child_client.request(cover_route, headers={"If-None-Match": child_etag})[0] == 404,
+                    "Hidden library montage must not return cached data or 304")
+            require(child_client.request("/api/my-libraries", {"visible_library_ids": [library_id]})[0] == 200
+                    and child_client.request(cover_route)[0] == 200,
+                    "Disposable child library visibility restoration failed")
+            require(client.request(f"/api/users/{child_id}", {"library_ids": []})[0] == 200,
+                    "Disposable child grant revocation failed")
+            require(child_client.request(cover_route, headers={"If-None-Match": child_etag})[0] in (401, 404),
+                    "Revoked library montage must not return cached data or 304")
+            require(child_client.request("/api/login", child_credentials)[0] == 200
+                    and child_client.request(cover_route, headers={"If-None-Match": child_etag})[0] == 404,
+                    "Relogged child must not regain revoked montage access")
+            passed("frozen_montage_child_hidden_revoked_and_admin_boundaries")
+
+            require(client.request("/api/cache/clear", {"kind": "covers", "confirm": False})[0] == 400,
+                    "Cache removal must require explicit confirmation")
+            status, cleared_cache, _ = client.request("/api/cache/clear", {"kind": "covers", "confirm": True})
+            require(status == 200 and cleared_cache.get("cleared", {}).get("kind") == "covers"
+                    and cleared_cache["cleared"].get("files", 0) >= 1,
+                    "Frozen disposable page-cover cleanup did not remove generated thumbnails")
+            require(client.request(f"/api/books/{book['id']}/cover")[0] == 200
+                    and source_image.read_bytes() == image and second_source.read_bytes() == second_image,
+                    "Frozen page-cover cleanup could not regenerate safely")
+            passed("frozen_cover_cache_confirmation_clear_and_regeneration")
 
             model_ids = []
             for name in ("冻结演示模特甲", "冻结演示模特乙"):
@@ -362,6 +455,30 @@ def run_smoke(executable: Path, work_root: Path) -> dict:
                     "Frozen transcoding changed source files")
             passed("frozen_isolated_transcode_worker", matched=1, outputs=record["output_count"],
                    actual_bytes=record["actual_bytes"])
+            details_route = f"/api/transcoding/books/{book['id']}/details"
+            status, details, _ = client.request(details_route + "?page=1&page_size=1")
+            require(status == 200 and details.get("pagination") == {"page": 1, "page_size": 1, "total": 2, "pages": 2},
+                    "Frozen optimization details pagination failed")
+            active_page = details["pages"][0]
+            require(details["book"]["pending_count"] == 0 and details["book"]["completed_at"] > 0
+                    and details["target_parameters"]["quality"] == rules["quality"]
+                    and details["target_parameters"]["rule_revision"] == details["target_rule_revision"]
+                    and len(details["active_profiles"]) == 1
+                    and details["active_profiles"][0]["parameters"]["quality"] == rules["quality"]
+                    and active_page["active_parameters"]["quality"] == rules["quality"]
+                    and active_page["active_created_at"] > 0 and active_page["output_created_at"] > 0
+                    and active_page["original_path"] == str(source_image)
+                    and active_page["active_path"].startswith(str(data / "transcoded"))
+                    and active_page["active_bytes"] == len(optimized),
+                    "Frozen completed-output parameters, dates or per-image paths are missing")
+            status, unmatched_details, _ = client.request(details_route + "?page=2&page_size=1")
+            require(status == 200 and unmatched_details["pages"][0]["status"] == "unmatched"
+                    and unmatched_details["pages"][0]["original_path"] == str(tiny_source),
+                    "Frozen optimization details missed the unmatched original page")
+            require(child_client.request(details_route)[0] == 403,
+                    "Child must not read administrator optimization paths")
+            passed("frozen_completed_optimization_details_parameters_dates_and_paths", total_pages=2,
+                   quality=rules["quality"], target_rule_revision=details["target_rule_revision"])
             status, snapshot, _ = client.request("/api/transcoding/actions", {
                 "ids": [second_book["id"]], "action": "original"})
             require(status == 200 and any(item["id"] == second_book["id"] and item["status"] == "original"
@@ -416,6 +533,15 @@ def run_smoke(executable: Path, work_root: Path) -> dict:
                 time.sleep(.1)
             require(summary.get("indexed") == summary.get("total") and summary.get("total", 0) >= 3,
                     f"Frozen image-search index worker failed: {search_status.get('error')}")
+            for failure_page in (1, 2):
+                status, failures, _ = client.request(f"/api/image-search/failures?page={failure_page}&page_size=1")
+                require(status == 200 and failures == {"items": [], "total": 0, "page": failure_page, "page_size": 1},
+                        "Frozen empty index-failure pagination was not readable")
+            require(client.request("/api/image-search/failures?page=0")[0] == 400,
+                    "Frozen index failure pagination must reject page zero")
+            require(child_client.request("/api/image-search/failures")[0] == 403,
+                    "Child must not read shared index failure records")
+            passed("frozen_empty_index_failure_pagination_and_admin_boundary")
             status, matches, _ = client.request("/api/image-search/query", image=image)
             match = next((item for item in matches.get("results", [])
                           if item["book"]["id"] == book["id"] and item["page"] == 0), None)

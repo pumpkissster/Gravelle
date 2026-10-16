@@ -7,6 +7,8 @@
 !image_search.py
 !image_search_features.py
 !task_scheduler.py
+!library_covers.py
+!cache_manager.py
 !requirements.txt
 !release.json
 !LICENSE

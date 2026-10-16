@@ -38,6 +38,14 @@
     const success = Math.max(0, Number(book.success_count) || 0);
     return total ? Math.min(100, Math.round(success / total * 100)) : 0;
   }
+  function formatParameters(value) {
+    if (!value || typeof value !== 'object' || !value.output_format || !Number.isFinite(Number(value.quality)) || !Number.isFinite(Number(value.max_output_side))) return '未记录';
+    return `${String(value.output_format).toUpperCase()} · 质量 ${value.quality} · 最长边 ${value.max_output_side}px`;
+  }
+  function formatTime(value) {
+    const time = Number(value); if (!(time > 0)) return '未记录';
+    const date = new Date(time * 1000); return Number.isFinite(date.getTime()) ? date.toLocaleString('zh-CN', { hour12: false }) : '未记录';
+  }
   function eligible(book, action) {
     if (action === 'pause') return ['queued', 'running'].includes(book.status);
     if (action === 'resume') return book.status === 'paused';
@@ -67,7 +75,7 @@
     };
   }
   function bookDisplaySignature(book) {
-    return JSON.stringify([book.id, book.title, book.library_id, book.library_name, book.status, book.matched_count, book.success_count, book.failed_count, book.output_count, book.actual_bytes, book.output_path, book.error, book.needs_retranscode, book.published, book.reasons, book.page_count]);
+    return JSON.stringify([book.id, book.title, book.library_id, book.library_name, book.status, book.matched_count, book.success_count, book.failed_count, book.pending_count, book.running_count, book.output_count, book.actual_bytes, book.output_path, book.error, book.needs_retranscode, book.published, book.reasons, book.page_count]);
   }
   function create({ host, api, post, toast, onCatalogChange = () => {}, onTabChange = () => {}, onFiltersChange = () => {}, onRender = () => {} }) {
     const document = host.ownerDocument;
@@ -152,6 +160,68 @@
       previousImage.disabled = previewIndex === 0; nextImage.disabled = Boolean(count && previewIndex >= count - 1); imageStatus.textContent = '正在加载原图…'; previewImage.src = '/api/transcoding/books/' + encodeURIComponent(previewBook.id) + '/pages/' + previewIndex;
     }
     function openPreview(book) { previewBook = book; imageTitle.textContent = book.title || '作品预览'; showPreviewPage(0); previewDialog.showModal(); }
+    const detailDialog = el('dialog', 'settings-dialog library-dialog transcode-details-dialog'); detailDialog.setAttribute('aria-labelledby', 'transcode-details-title');
+    const detailHeader = el('header', 'dialog-header'); const detailTitle = el('h2', '', '优化详情'); detailTitle.id = 'transcode-details-title'; const detailClose = button('×', 'icon-button', () => detailDialog.close()); detailClose.setAttribute('aria-label', '关闭优化详情'); detailHeader.append(detailTitle, detailClose);
+    const detailBody = el('div', 'dialog-body'); const detailTabs = el('div', 'transcode-tabs'); detailTabs.setAttribute('role', 'tablist'); detailTabs.setAttribute('aria-label', '优化详情');
+    const basicTab = button('基本信息', '', () => setDetailTab('basic')); const pagesTab = button('图片明细', '', () => setDetailTab('pages')); [basicTab, pagesTab].forEach((item, index) => { item.setAttribute('role', 'tab'); item.id = 'transcode-details-tab-' + (index ? 'pages' : 'basic'); item.setAttribute('aria-controls', 'transcode-details-content'); }); detailTabs.append(basicTab, pagesTab);
+    const detailError = el('p', 'form-error'); detailError.setAttribute('role', 'alert'); detailError.hidden = true; const detailContent = el('div', 'transcode-detail-content'); detailContent.id = 'transcode-details-content'; detailContent.setAttribute('role', 'tabpanel'); detailBody.append(detailTabs, detailError, detailContent);
+    detailTabs.addEventListener('keydown', event => { if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return; event.preventDefault(); setDetailTab(event.key === 'Home' || event.key === 'ArrowLeft' && detailTab === 'pages' || event.key === 'ArrowRight' && detailTab === 'pages' ? 'basic' : 'pages'); (detailTab === 'pages' ? pagesTab : basicTab).focus(); });
+    const detailFooter = el('footer', 'dialog-footer transcode-detail-footer'); const previousDetails = button('上一页', 'button button-secondary', () => loadDetails((detailData?.pagination?.page || 1) - 1)); const detailsPage = el('span', 'transcode-hint'); detailsPage.setAttribute('aria-live', 'polite'); const nextDetails = button('下一页', 'button button-secondary', () => loadDetails((detailData?.pagination?.page || 1) + 1)); const closeDetails = button('关闭', 'button button-secondary', () => detailDialog.close()); detailFooter.append(previousDetails, detailsPage, nextDetails, closeDetails); detailDialog.append(detailHeader, detailBody, detailFooter); document.body.append(detailDialog);
+    let detailBook = null; let detailData = null; let detailTab = 'basic'; let detailRequest = 0; let detailLoading = false;
+    detailDialog.addEventListener('close', () => { detailRequest += 1; detailBook = detailData = null; detailLoading = false; detailContent.replaceChildren(); });
+    async function copyPath(value) {
+      if (!value) return;
+      try {
+        const clipboard = document.defaultView?.navigator?.clipboard;
+        if (clipboard?.writeText) { try { await clipboard.writeText(value); toast('路径已复制'); return; } catch (_) {} }
+        const previousFocus = document.activeElement; const input = el('textarea', 'sr-only'); input.value = value; document.body.append(input); input.select(); let copied = false;
+        try { copied = document.execCommand?.('copy') === true; } finally { input.remove(); previousFocus?.focus?.({ preventScroll: true }); }
+        toast(copied ? '路径已复制' : '请选中路径后复制');
+      } catch (_) { toast('请选中路径后复制'); }
+    }
+    function pathRow(label, value) {
+      const row = el('div', 'transcode-detail-path'); row.append(el('span', '', label), el('code', '', value || '未生成'));
+      if (value) row.append(button('复制', 'button button-secondary button-small', () => copyPath(value)));
+      return row;
+    }
+    function detailFact(label, value) { const row = el('div', 'transcode-detail-fact'); row.append(el('dt', '', label), el('dd', '', value)); return row; }
+    function renderDetails() {
+      basicTab.setAttribute('aria-selected', String(detailTab === 'basic')); pagesTab.setAttribute('aria-selected', String(detailTab === 'pages'));
+      basicTab.tabIndex = detailTab === 'basic' ? 0 : -1; pagesTab.tabIndex = detailTab === 'pages' ? 0 : -1; detailContent.setAttribute('aria-labelledby', detailTab === 'basic' ? basicTab.id : pagesTab.id);
+      const paging = detailData?.pagination; previousDetails.hidden = nextDetails.hidden = detailsPage.hidden = detailTab !== 'pages'; previousDetails.disabled = detailLoading || !paging || paging.page <= 1; nextDetails.disabled = detailLoading || !paging || paging.page >= paging.pages;
+      detailsPage.textContent = paging ? `${paging.page} / ${paging.pages} · 共 ${paging.total} 张` : '';
+      if (!detailData) { detailContent.replaceChildren(el('p', 'transcode-hint', detailLoading ? '正在读取优化详情…' : '暂时无法读取详情。')); return; }
+      const book = detailData.book || {};
+      if (detailTab === 'basic') {
+        const facts = el('dl', 'transcode-detail-facts'); facts.append(detailFact('作品', book.title || '未命名作品'), detailFact('写真库', book.library_name || '写真库'), detailFact('状态', statusLabels[book.status] || '未记录'), detailFact('命中图片', `${book.matched_count || 0} 张`), detailFact('未处理', `${book.pending_count || 0} 张`), detailFact('处理中', `${book.running_count || 0} 张`), detailFact('成功 / 失败', `${book.success_count || 0} / ${book.failed_count || 0} 张`), detailFact('在用优化图', `${book.output_count || 0} 张 · ${bytes(book.actual_bytes)}`), detailFact('最近整批完成', formatTime(book.completed_at)), detailFact('当前规则版本', `#${detailData.current_rule_revision}`), detailFact('本次目标规则', `#${detailData.target_rule_revision}`), detailFact('目标输出参数', formatParameters(detailData.target_parameters)));
+        const profiles = el('section', 'transcode-detail-profiles'); profiles.append(el('h3', '', '当前使用的版本'));
+        const active = Array.isArray(detailData.active_profiles) ? detailData.active_profiles : [];
+        if (!active.length) profiles.append(el('p', 'transcode-hint', '当前使用原图，尚无在用优化版本。'));
+        active.forEach(item => { const entry = el('article', 'transcode-detail-profile'); entry.append(el('p', '', formatParameters(item.parameters)), el('p', 'transcode-hint', `规则版本 ${item.parameters?.rule_revision ? '#' + item.parameters.rule_revision : '未记录'} · ${item.count || 0} 张 · ${bytes(item.bytes)}`), el('code', '', item.profile || '未记录')); profiles.append(entry); });
+        detailContent.replaceChildren(facts, profiles);
+      } else {
+        const rows = (detailData.pages || []).map(item => {
+          const row = el('article', 'transcode-detail-page'); const heading = el('div', 'transcode-book-heading'); heading.append(el('h3', '', `第 ${Number(item.page_index) + 1} 页`), el('span', 'transcode-status', item.status === 'unmatched' ? '未命中规则' : ({ pending: '未处理', running: '处理中', success: '成功', failed: '失败' }[item.status] || '未处理')));
+          row.append(heading, el('p', 'transcode-hint', `原图 ${bytes(item.source_bytes)} · ${item.width || 0} × ${item.height || 0}`));
+          if (item.reasons?.length) row.append(el('p', 'transcode-hint', item.reasons.join(' · ')));
+          if (item.active_path) row.append(el('p', '', `在用 ${bytes(item.active_bytes)} · ${formatParameters(item.active_parameters)}`));
+          if (item.desired_path && item.desired_path !== item.active_path) row.append(el('p', '', `本次输出 ${bytes(item.desired_bytes)} · ${formatParameters(item.desired_parameters)}`));
+          row.append(pathRow('原图', item.original_path)); if (item.archive_entry) row.append(pathRow('压缩包内页', item.archive_entry));
+          if (item.active_path) row.append(pathRow('在用优化图', item.active_path));
+          if (item.desired_path && item.desired_path !== item.active_path) row.append(pathRow('本次优化图', item.desired_path));
+          if (item.error) row.append(el('p', 'form-error', item.error)); return row;
+        });
+        detailContent.replaceChildren(...rows); if (!rows.length) detailContent.append(el('p', 'transcode-hint', '没有图片记录。'));
+      }
+    }
+    function setDetailTab(tab) { detailTab = tab === 'pages' ? 'pages' : 'basic'; renderDetails(); detailBody.scrollTop = 0; }
+    async function loadDetails(page = 1) {
+      if (!detailBook || detailLoading) return; const request = ++detailRequest; const generation = state.generation; detailLoading = true; detailError.hidden = true; renderDetails();
+      try { const data = await api('/api/transcoding/books/' + encodeURIComponent(detailBook.id) + '/details?page=' + Math.max(1, page) + '&page_size=40'); if (request !== detailRequest || generation !== state.generation || !detailDialog.open) return; if (!data?.book || !Array.isArray(data.pages) || !data.pagination) throw new Error('优化详情格式不正确。'); detailData = data; detailBody.scrollTop = 0; }
+      catch (error) { if (request === detailRequest && generation === state.generation && error.status !== 401) { detailError.textContent = error.message; detailError.hidden = false; } }
+      finally { if (request === detailRequest && generation === state.generation) { detailLoading = false; renderDetails(); } }
+    }
+    function openDetails(book) { detailRequest += 1; detailBook = book; detailData = null; detailTab = 'basic'; detailLoading = false; detailTitle.textContent = (book.title || '作品') + ' · 优化详情'; detailDialog.showModal(); loadDetails(); }
     let confirmOperation = null;
     confirm.addEventListener('click', () => { if (confirmOperation && !state.busy) confirmOperation(); });
     function openConfirm(heading, content, confirmText, operation) { title.textContent = heading; body.replaceChildren(...content); confirm.textContent = confirmText; dialogError.hidden = true; dialogError.textContent = ''; confirmOperation = operation; dialog.showModal(); }
@@ -213,13 +283,14 @@
         const row = el('article', 'transcode-book'); row.classList.toggle('is-selected', state.selected.has(id));
         const select = el('label', 'transcode-book-select'); const input = el('input'); input.type = 'checkbox'; input.checked = state.selected.has(id); input.disabled = state.busy; input.dataset.transcodeId = id; input.setAttribute('aria-label', `选择《${book.title || '作品'}》`); input.addEventListener('change', () => { input.checked ? state.selected.add(id) : state.selected.delete(id); row.classList.toggle('is-selected', input.checked); renderSelection(); }); select.append(input);
         const main = el('div', 'transcode-book-main'); const heading = el('div', 'transcode-book-heading'); heading.append(el('h3', '', book.title || '未命名作品'), el('span', 'transcode-status transcode-status-' + String(book.status || 'pending').replace(/[^a-z]/g, ''), statusLabels[book.status] || '待选择'));
-        const counts = el('p', 'transcode-book-counts', `${book.library_name || '写真库'} · 命中 ${Number(book.matched_count) || 0} 张 · 成功 ${Number(book.success_count) || 0} 张 · 失败 ${Number(book.failed_count) || 0} 张`);
+        const counts = el('p', 'transcode-book-counts', `${book.library_name || '写真库'} · 命中 ${Number(book.matched_count) || 0} 张 · 未处理 ${Number(book.pending_count) || 0} 张 · 成功 ${Number(book.success_count) || 0} 张 · 失败 ${Number(book.failed_count) || 0} 张`);
         main.append(heading, counts);
         if (['queued', 'running', 'paused'].includes(book.status)) { const track = el('div', 'transcode-progress'); track.setAttribute('role', 'progressbar'); track.setAttribute('aria-label', '优化进度'); track.setAttribute('aria-valuemin', '0'); track.setAttribute('aria-valuemax', '100'); track.setAttribute('aria-valuenow', progress(book)); const fill = el('span'); fill.style.width = progress(book) + '%'; track.append(fill); main.append(track); }
         const meta = el('div', 'transcode-book-meta'); meta.append(el('span', '', book.published ? '已在写真库显示' : '暂未在写真库显示'));
         if (book.output_count || book.actual_bytes) meta.append(el('span', '', `优化图 ${Number(book.output_count) || 0} 张 · ${bytes(book.actual_bytes)}`));
         if (book.needs_retranscode) meta.append(el('span', 'transcode-rebuild', '有图片需要重新优化'));
         meta.append(button('预览作品', 'transcode-preview-button', () => openPreview(book)));
+        meta.append(button('优化详情', 'transcode-preview-button', () => openDetails(book)));
         main.append(meta);
         if (book.reasons?.length || book.output_path || book.error) { const details = el('details', 'transcode-book-details'); details.dataset.bookId = id; details.open = open.has(id); details.append(el('summary', '', '查看详情'));
           if (book.reasons?.length) { const reasons = el('p', '', (Array.isArray(book.reasons) ? book.reasons : [book.reasons]).map(value => typeof value === 'string' ? value : value?.message || value?.reason || '').filter(Boolean).join(' · ')); details.append(reasons); }
@@ -305,10 +376,10 @@
     fillRules(defaultRules); switchTab('tasks', false); renderBooks();
     return {
       show(tab = 'tasks') { state.active = true; host.hidden = false; switchTab(tab, false); load(); clearInterval(state.timer); state.timer = setInterval(() => { if (state.tab === 'tasks') load(); }, 5000); },
-      hide() { state.active = false; host.hidden = true; clearInterval(state.timer); state.timer = null; if (dialog.open && !state.busy) dialog.close(); if (previewDialog.open) previewDialog.close(); },
-      reset() { state.generation += 1; state.active = false; clearInterval(state.timer); state.timer = null; state.snapshot = null; state.loading = state.manualLoading = state.busy = state.dirty = false; state.draft = null; state.selected.clear(); state.rows.clear(); state.filter = state.library = state.query = state.signature = state.published = state.librarySignature = ''; controls.query.value = ''; controls.status.value = ''; controls.library.value = ''; if (dialog.open) dialog.close(); if (previewDialog.open) previewDialog.close(); setError(''); controls.retryLoad.hidden = true; fillRules(defaultRules); renderBooks(); host.hidden = true; },
+      hide() { state.active = false; host.hidden = true; clearInterval(state.timer); state.timer = null; if (dialog.open && !state.busy) dialog.close(); if (previewDialog.open) previewDialog.close(); if (detailDialog.open) detailDialog.close(); },
+      reset() { state.generation += 1; state.active = false; clearInterval(state.timer); state.timer = null; state.snapshot = null; state.loading = state.manualLoading = state.busy = state.dirty = false; state.draft = null; state.selected.clear(); state.rows.clear(); state.filter = state.library = state.query = state.signature = state.published = state.librarySignature = ''; controls.query.value = ''; controls.status.value = ''; controls.library.value = ''; if (dialog.open) dialog.close(); if (previewDialog.open) previewDialog.close(); if (detailDialog.open) detailDialog.close(); detailRequest += 1; setError(''); controls.retryLoad.hidden = true; fillRules(defaultRules); renderBooks(); host.hidden = true; },
       refresh: () => load(true), getFilters, restoreFilters, isLoaded: () => Boolean(state.snapshot)
     };
   }
-  return { create, bytes, progress, eligible, statusLabels, defaultRules, createPendingTracker, bookDisplaySignature, normalizeFilters };
+  return { create, bytes, progress, eligible, statusLabels, defaultRules, createPendingTracker, bookDisplaySignature, normalizeFilters, formatParameters, formatTime };
 });

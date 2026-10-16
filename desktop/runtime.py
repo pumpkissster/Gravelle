@@ -76,12 +76,18 @@ class ServerController:
         if self.command_prefix is not None:
             prefix = list(self.command_prefix)
         elif getattr(sys, "frozen", False):
-            companion = Path(sys.executable).resolve().with_name("GravelleServer.exe")
-            if not companion.is_file():
-                raise LauncherError("服务程序 GravelleServer.exe 缺失，请重新安装。")
-            prefix = [str(companion)]
+            if sys.platform == "darwin":
+                # macOS retains inherited pipe descriptors in a windowed bundle.
+                # Dispatch --serve before loading AppKit or the GUI instance lock.
+                prefix = [sys.executable]
+            else:
+                companion = Path(sys.executable).resolve().with_name("GravelleServer.exe")
+                if not companion.is_file():
+                    raise LauncherError("服务程序 GravelleServer.exe 缺失，请重新安装。")
+                prefix = [str(companion)]
         else:
-            prefix = [sys.executable, str(Path(__file__).resolve().parent / "launcher.py")]
+            entry = "macos_entry.py" if sys.platform == "darwin" else "launcher.py"
+            prefix = [sys.executable, str(Path(__file__).resolve().parent / entry)]
         libraries = [argument for path in config.library_paths for argument in ("--library", path)]
         return [*prefix, "--serve", *libraries, "--data", str(self.data_path),
                 "--host", config.host, "--port", str(config.port), "--instance", instance]

@@ -17,6 +17,11 @@ test('search and sorting round-trip without interpreting user input as a path', 
   assert.deepEqual(Routes.parse('#/search?q=a&password=secret&sort=bad'), { view: 'search', query: 'a' });
   assert.equal(Routes.hash(Routes.parse('#/search?username=person&password=secret')), '#/search');
 });
+test('cache settings use a stable second-level route', () => {
+  const route = { view: 'settings', section: 'cache' };
+  assert.equal(Routes.hash(route), '#/settings/cache');
+  assert.deepEqual(Routes.parse('#/settings/cache'), route);
+});
 test('reader keeps its page and detail return route with the original filtered page underneath', () => {
   const origin = { view: 'library', id: '2', query: '特集', sort: 'title' };
   const detail = { view: 'book', id: 'book-1', from: origin };

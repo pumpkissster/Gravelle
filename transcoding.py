@@ -142,8 +142,76 @@ def image_dimensions(handle):
             return image.size
 
 
+class _DarwinMemoryGuard:
+    """Sample only this decoder's resident peak; never terminate the server.
+
+    Darwin's dyld shared cache can make a small RLIMIT_AS fail before any
+    image is decoded. A sampling guard is intentionally not advertised as an
+    OS-enforced allocation ceiling. Existing pixel budgets and parent-owned
+    job timeouts still apply, including when a native call delays the sampler.
+    """
+    interval = 0.1
+    exceeded_exit_code = 86
+    unavailable_exit_code = 87
+
+    def __init__(self, memory_bytes, *, measure=None, exit_process=None):
+        if type(memory_bytes) is not int or memory_bytes <= 0:
+            raise ValueError("图片处理进程内存预算无效。")
+        if measure is None:
+            import resource
+            measure = lambda: resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        self.memory_bytes = memory_bytes
+        self.measure = measure
+        self.exit_process = exit_process or os._exit
+        self.stopped = threading.Event()
+        try:
+            initial = self._read_bytes()
+        except (OSError, ValueError, RuntimeError, MemoryError) as error:
+            raise ValueError("无法监测图片处理进程内存，请查看服务端运行环境。") from error
+        if initial > self.memory_bytes:
+            raise MemoryError("图片处理所需内存超过任务预算，请提高内存限制或缩小图片。")
+        self.thread = threading.Thread(target=self._watch, name="image-memory-guard", daemon=True)
+        self.thread.start()
+
+    def _read_bytes(self):
+        # Darwin reports ru_maxrss in bytes, unlike Linux's KiB value.
+        amount = self.measure()
+        if type(amount) is not int or amount <= 0:
+            raise RuntimeError("无法监测图片处理进程内存，请查看服务端运行环境。")
+        return amount
+
+    def _watch(self):
+        while not self.stopped.wait(self.interval):
+            try:
+                exceeded = self._read_bytes() > self.memory_bytes
+            except (OSError, ValueError, RuntimeError, MemoryError):
+                self.exit_process(self.unavailable_exit_code)
+                return
+            if exceeded:
+                # A private worker may be inside a native decoder with no safe
+                # unwinding path. Its parent owns cleanup of all partial files.
+                self.exit_process(self.exceeded_exit_code)
+                return
+
+    def close(self):
+        self.stopped.set()
+        if self.thread is not threading.current_thread():
+            self.thread.join(timeout=1)
+
+
+def _worker_exit_message(returncode):
+    """Private decoder exit codes have stable, platform-neutral explanations."""
+    if returncode == _DarwinMemoryGuard.exceeded_exit_code:
+        return "图片处理所需内存超过任务预算，请提高内存限制或缩小图片。"
+    if returncode == _DarwinMemoryGuard.unavailable_exit_code:
+        return "无法监测图片处理进程内存，请查看服务端运行环境。"
+    return None
+
+
 def _restrict_worker(memory_bytes):
-    """An isolated decoder has an OS enforced memory ceiling where available."""
+    """Bound an isolated decoder without applying limits to its parent."""
+    if sys.platform == "darwin":
+        return _DarwinMemoryGuard(memory_bytes)
     if os.name == "nt":
         import ctypes
         from ctypes import wintypes
@@ -338,6 +406,20 @@ class TranscodingManager:
                 CREATE INDEX IF NOT EXISTS tc_pages_desired_file ON tc_pages(desired_file);
             """)
             self._migrate_update_cascade(connection)
+            # Old derivative records have no reliable parameter snapshot. Keep
+            # them empty rather than attributing today's settings to old files.
+            columns = {row["name"] for row in connection.execute("PRAGMA table_info(tc_outputs)")}
+            if "output_parameters" not in columns:
+                connection.execute("ALTER TABLE tc_outputs ADD COLUMN output_parameters TEXT NOT NULL DEFAULT ''")
+            columns = {row["name"] for row in connection.execute("PRAGMA table_info(tc_books)")}
+            if "completed_fingerprint" not in columns:
+                connection.execute("ALTER TABLE tc_books ADD COLUMN completed_fingerprint TEXT NOT NULL DEFAULT ''")
+            for row in connection.execute("SELECT book_id FROM tc_books WHERE completed_at IS NOT NULL AND completed_fingerprint=''").fetchall():
+                active = connection.execute("""SELECT p.page_key,p.active_source,p.active_profile,p.active_file,o.created_at
+                    FROM tc_pages p LEFT JOIN tc_outputs o ON o.file=p.active_file
+                    WHERE p.book_id=? AND p.active_file<>'' ORDER BY p.page_key""", (row["book_id"],)).fetchall()
+                marker = hashlib.sha256(json.dumps([tuple(item) for item in active], ensure_ascii=False).encode()).hexdigest()
+                connection.execute("UPDATE tc_books SET completed_fingerprint=? WHERE book_id=?", (marker, row["book_id"]))
             connection.execute("INSERT OR IGNORE INTO tc_settings(id,enabled,revision,rules) VALUES(1,0,1,?)",
                                (json.dumps(DEFAULT_RULES),))
             # Process termination never means a partially converted book is ready.
@@ -637,12 +719,22 @@ class TranscodingManager:
         connection.execute("UPDATE tc_books SET status=?,published=?,generation=generation+?,error=CASE WHEN ? THEN '' ELSE error END WHERE book_id=?",
                            (status, int(published), int(changed), int(changed), book["id"]))
 
-    def _publish(self, connection, book_id):
+    def _publish(self, connection, book_id, new_output=False):
+        outputs = connection.execute("""SELECT p.page_key,p.source_version,p.desired_profile,p.desired_file,o.created_at
+            FROM tc_pages p LEFT JOIN tc_outputs o ON o.file=p.desired_file
+            WHERE p.book_id=? AND p.matched=1 ORDER BY p.page_key""", (book_id,)).fetchall()
+        fingerprint = hashlib.sha256(json.dumps([tuple(row) for row in outputs], ensure_ascii=False).encode()).hexdigest()
+        previous = connection.execute("SELECT completed_at,completed_fingerprint FROM tc_books WHERE book_id=?", (book_id,)).fetchone()
+        # Only the last successful conversion marks a batch completion. Scans,
+        # threshold changes, and selecting already generated files do not.
+        completed = previous["completed_at"]
+        if new_output:
+            completed = time.time()
         connection.execute("""UPDATE tc_pages SET active_file=CASE WHEN matched=1 THEN desired_file ELSE '' END,
             active_source=CASE WHEN matched=1 THEN source_version ELSE '' END,
             active_profile=CASE WHEN matched=1 THEN desired_profile ELSE '' END WHERE book_id=?""", (book_id,))
-        connection.execute("UPDATE tc_books SET status='ready',published=1,error='',completed_at=?,updated_at=? WHERE book_id=?",
-                           (time.time(), time.time(), book_id))
+        connection.execute("UPDATE tc_books SET status='ready',published=1,error='',completed_at=?,completed_fingerprint=?,updated_at=? WHERE book_id=?",
+                           (completed, fingerprint, time.time(), book_id))
 
     def _all_sources(self):
         with closing(self.library.connect()) as connection:
@@ -794,6 +886,7 @@ class TranscodingManager:
                 pages = list(connection.execute("SELECT * FROM tc_pages WHERE book_id=? AND matched=1", (row["book_id"],)))
                 successful = sum(page["status"] == "success" for page in pages)
                 failed = sum(page["status"] == "failed" for page in pages)
+                running = sum(page["status"] == "running" for page in pages)
                 active = list(connection.execute("""SELECT DISTINCT o.file,o.size FROM tc_pages p JOIN tc_outputs o
                     ON o.file=p.active_file WHERE p.book_id=?""", (row["book_id"],)))
                 needs = any(page["active_file"] and (page["active_profile"] != page["desired_profile"] or page["active_source"] != page["source_version"]) for page in pages)
@@ -801,7 +894,7 @@ class TranscodingManager:
                 output = dict(id=row["book_id"], title=row["display_title"], library_id=row["library_id"],
                               library_name=row["library_name"], status=row["status"], decision=row["decision"],
                               matched_count=len(pages), success_count=successful, failed_count=failed,
-                              pending_count=len(pages) - successful - failed, page_count=row["page_count"],
+                              pending_count=len(pages) - successful - failed - running, running_count=running, page_count=row["page_count"],
                               reasons=sorted({reason for page in pages for reason in json.loads(page["reasons"])}),
                               actual_bytes=sum(item["size"] for item in active), output_count=len(active),
                               output_path=str(self.root / row["book_id"]) if active else "",
@@ -823,6 +916,160 @@ class TranscodingManager:
                 WHERE NOT EXISTS(SELECT 1 FROM tc_pages p WHERE p.active_file=o.file OR p.desired_file=o.file)""").fetchone()
             summary["reclaimable_files"], summary["reclaimable_bytes"] = reclaimable[0], reclaimable[1]
         return dict(rules=rules, revision=revision, summary=summary, books=books)
+
+    @staticmethod
+    def _parameter_snapshot(record):
+        try:
+            value = json.loads(record or "")
+            keys = {"output_format", "quality", "max_output_side", "algorithm", "rule_revision"}
+            return value if isinstance(value, dict) and set(value) <= keys and all(
+                key in value for key in ("output_format", "quality", "max_output_side", "algorithm")) else None
+        except (ValueError, TypeError):
+            return None
+
+    def _display_output_path(self, name):
+        if not isinstance(name, str) or not re.fullmatch(r"[a-f0-9]{24}/[a-f0-9]{64}\.(?:webp|jpg)", name):
+            return ""
+        return str(self.root / name)
+
+    def details(self, book_id, page=1, page_size=40):
+        """Paginated administrator metadata; never decode or prefetch images."""
+        self.library.require_admin()
+        if not isinstance(book_id, str) or not re.fullmatch(r"[a-f0-9]{24}", book_id):
+            raise self._error("作品不存在。", 404)
+        if type(page) is not int or page < 1 or type(page_size) is not int or not 1 <= page_size <= 100:
+            raise self._error("图片明细页码或页面容量无效。")
+        with closing(self.library.connect()) as connection:
+            connection.execute("BEGIN")
+            record = connection.execute("""SELECT t.*,b.path,b.format,b.source_root,b.page_count,b.library_id,
+                COALESCE(m.title,b.title) AS title,l.name AS library_name FROM tc_books t JOIN books b ON b.id=t.book_id
+                JOIN media_libraries l ON l.id=b.library_id LEFT JOIN book_metadata m ON m.book_id=b.id
+                WHERE t.book_id=? AND b.active=1 AND b.removed=0""", (book_id,)).fetchone()
+            if record is None:
+                raise self._error("作品不存在，请刷新列表。", 404)
+            rules, revision = self.settings(connection)
+            counts = connection.execute("""SELECT COUNT(*) AS total,
+                COALESCE(SUM(matched),0) AS matched,
+                COALESCE(SUM(matched=1 AND status='success'),0) AS success,
+                COALESCE(SUM(matched=1 AND status='failed'),0) AS failed,
+                COALESCE(SUM(matched=1 AND status='running'),0) AS running
+                FROM tc_pages WHERE book_id=?""", (book_id,)).fetchone()
+            total = counts["total"]
+            pages_count = max(1, math.ceil(total / page_size))
+            page = min(page, pages_count)
+            used = connection.execute("""SELECT o.profile,o.output_parameters,COUNT(*) AS count,SUM(o.size) AS bytes
+                FROM tc_pages p JOIN tc_outputs o ON o.file=p.active_file WHERE p.book_id=?
+                GROUP BY o.profile,o.output_parameters ORDER BY o.profile""", (book_id,)).fetchall()
+            actual_profiles = [dict(profile=row["profile"], parameters=self._parameter_snapshot(row["output_parameters"]),
+                                    count=row["count"], bytes=row["bytes"]) for row in used]
+            rows = connection.execute("""SELECT p.*,a.size AS active_bytes,a.output_parameters AS active_parameters,
+                a.created_at AS active_created_at,d.output_parameters AS desired_parameters,d.created_at AS desired_created_at
+                FROM tc_pages p LEFT JOIN tc_outputs a ON a.file=p.active_file LEFT JOIN tc_outputs d ON d.file=p.desired_file
+                WHERE p.book_id=? ORDER BY p.page_index,p.page_key LIMIT ? OFFSET ?""",
+                (book_id, page_size, (page - 1) * page_size)).fetchall()
+            items = []
+            for row in rows:
+                original = str(Path(record["source_root"]) / (row["page_key"] if record["format"] == "folder" else record["path"]))
+                items.append(dict(page_key=row["page_key"], page_index=row["page_index"], matched=bool(row["matched"]),
+                    status=row["status"] if row["matched"] else "unmatched", reasons=json.loads(row["reasons"]),
+                    error=row["error"] or row["inspect_error"], source_bytes=row["size"], width=row["width"], height=row["height"],
+                    original_path=original, archive_entry=row["page_key"] if record["format"] != "folder" else "",
+                    active_path=self._display_output_path(row["active_file"]), active_bytes=row["active_bytes"] or 0,
+                    active_profile=row["active_profile"], active_parameters=self._parameter_snapshot(row["active_parameters"]),
+                    desired_path=self._display_output_path(row["desired_file"]), desired_bytes=row["desired_bytes"],
+                    desired_profile=row["desired_profile"], desired_parameters=self._parameter_snapshot(row["desired_parameters"]),
+                    output_created_at=row["desired_created_at"], active_created_at=row["active_created_at"]))
+        return dict(book=dict(id=book_id, title=record["title"], library_id=record["library_id"], library_name=record["library_name"],
+                    status=record["status"], published=bool(record["published"]), matched_count=counts["matched"],
+                    success_count=counts["success"], failed_count=counts["failed"], running_count=counts["running"],
+                    pending_count=counts["matched"] - counts["success"] - counts["failed"] - counts["running"],
+                    completed_at=record["completed_at"], actual_bytes=sum(item["bytes"] for item in actual_profiles),
+                    output_count=sum(item["count"] for item in actual_profiles)),
+                    current_rule_revision=revision, target_rule_revision=record["rule_revision"], target_profile=output_profile(rules),
+                    target_parameters={**{key: rules[key] for key in ("output_format", "quality", "max_output_side")},
+                                       "algorithm": ALGORITHM_VERSION, "rule_revision": record["rule_revision"]},
+                    active_profiles=actual_profiles, pages=items,
+                    pagination=dict(page=page, page_size=page_size, total=total, pages=pages_count))
+
+    def cache_stats(self):
+        self.library.require_admin()
+        with closing(self.library.connect()) as connection:
+            connection.execute("BEGIN")
+            total = connection.execute("SELECT COUNT(*),COALESCE(SUM(size),0) FROM tc_outputs").fetchone()
+            active = connection.execute("""SELECT COUNT(*),COALESCE(SUM(size),0) FROM tc_outputs o
+                WHERE EXISTS(SELECT 1 FROM tc_pages p WHERE p.active_file=o.file)""").fetchone()
+            waiting = connection.execute("""SELECT COUNT(*),COALESCE(SUM(size),0) FROM tc_outputs o
+                WHERE EXISTS(SELECT 1 FROM tc_pages p WHERE p.desired_file=o.file)
+                AND NOT EXISTS(SELECT 1 FROM tc_pages p WHERE p.active_file=o.file)""").fetchone()
+            old = connection.execute("""SELECT COUNT(*),COALESCE(SUM(size),0) FROM tc_outputs o
+                WHERE NOT EXISTS(SELECT 1 FROM tc_pages p WHERE p.active_file=o.file OR p.desired_file=o.file)""").fetchone()
+            clearable = connection.execute("""SELECT COUNT(*),COALESCE(SUM(o.size),0) FROM tc_outputs o
+                WHERE EXISTS(SELECT 1 FROM tc_pages p JOIN tc_books t ON t.book_id=p.book_id
+                    JOIN books b ON b.id=p.book_id WHERE p.active_file=o.file AND t.status='ready'
+                    AND t.published=1 AND b.active=1 AND b.removed=0
+                    AND NOT EXISTS(SELECT 1 FROM tc_pages q WHERE q.book_id=p.book_id AND q.matched=1
+                        AND (q.status<>'success' OR q.desired_file<>q.active_file)))""").fetchone()
+        return dict(files=total[0], bytes=total[1], active_files=active[0], active_bytes=active[1],
+                    waiting_files=waiting[0], waiting_bytes=waiting[1], reclaimable_files=old[0], reclaimable_bytes=old[1],
+                    clearable_files=clearable[0], clearable_bytes=clearable[1])
+
+    def clear_active(self, body):
+        """Explicitly switch completed works to originals before discarding files.
+
+        Pending publications and replacement generations are protected. Files
+        are unlinked only after the metadata switch commits, so a filesystem
+        failure cannot leave a live mapping pointing at a deleted derivative.
+        """
+        self.library.require_admin()
+        if not isinstance(body, dict) or set(body) - {"ids", "confirm"} or body.get("confirm") is not True:
+            raise self._error("清除正在使用的优化图片需要明确确认。")
+        ids = self.library._batch_ids(body["ids"]) if "ids" in body else None
+        if not self.run_lock.acquire(blocking=False):
+            raise self._error("有图片正在处理，请暂停任务后再清理。", 409)
+        removed_files = removed_bytes = skipped = 0
+        outputs = []
+        try:
+            with self.lock, self.library.state_lock, closing(self.library.connect()) as connection:
+                if self.active_books:
+                    raise self._error("有图片正在处理，请暂停任务后再清理。", 409)
+                with connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    eligible = {row[0] for row in connection.execute("""SELECT t.book_id FROM tc_books t JOIN books b ON b.id=t.book_id
+                        WHERE t.status='ready' AND t.published=1 AND b.active=1 AND b.removed=0
+                        AND EXISTS(SELECT 1 FROM tc_pages p WHERE p.book_id=t.book_id AND p.active_file<>'')
+                        AND NOT EXISTS(SELECT 1 FROM tc_pages p WHERE p.book_id=t.book_id AND p.matched=1
+                            AND (p.status<>'success' OR p.desired_file<>p.active_file))""")}
+                    selected = eligible if ids is None else set(ids)
+                    if not selected <= eligible:
+                        raise self._error("部分作品正在等待发布或重新优化，不能清除正在使用的版本。", 409)
+                    for book_id in sorted(selected):
+                        outputs.extend(dict(row) for row in connection.execute("SELECT file,size FROM tc_outputs WHERE book_id=?", (book_id,)))
+                        connection.execute("""UPDATE tc_books SET decision='original',status='original',published=1,
+                            generation=generation+1,error='',updated_at=? WHERE book_id=?""", (time.time(), book_id))
+                        connection.execute("""UPDATE tc_pages SET active_file='',active_source='',active_profile='',
+                            desired_file='',desired_bytes=0,status='pending',error='' WHERE book_id=?""", (book_id,))
+                discarded = []
+                for row in outputs:
+                    try:
+                        candidate = self._output_path(row["file"], allow_missing=True)
+                        if candidate.exists():
+                            size = candidate.stat().st_size
+                            candidate.unlink()
+                            removed_files += 1
+                            removed_bytes += size
+                        discarded.append(row["file"])
+                    except Exception:
+                        skipped += 1
+                # Failed deletions remain registered as old unreferenced files,
+                # visible to the existing cleanup operation and space accounting.
+                with connection:
+                    connection.executemany("DELETE FROM tc_outputs WHERE file=?", [(name,) for name in discarded])
+        finally:
+            self.run_lock.release()
+        self.wake.set()
+        self.library.task_scheduler.wake()
+        return dict(books=len(selected), removed_files=removed_files, removed_bytes=removed_bytes, skipped_files=skipped,
+                    switched_to_original=True)
 
     def cleanup(self, body):
         self.library.require_admin()
@@ -1016,7 +1263,7 @@ class TranscodingManager:
                     return None
                 excluded = sorted(self.active_books)
                 extra = " AND b.id NOT IN (" + ",".join("?" for _ in excluded) + ")" if excluded else ""
-                job = connection.execute("""SELECT t.generation,b.*,p.page_key,p.source_version,p.desired_profile,p.inspect_error
+                job = connection.execute("""SELECT t.generation,t.rule_revision,b.*,p.page_key,p.source_version,p.desired_profile,p.inspect_error
                     FROM tc_books t JOIN books b ON b.id=t.book_id JOIN tc_pages p ON p.book_id=b.id
                     WHERE t.status IN ('queued','running') AND t.decision='transcode' AND b.active=1 AND b.removed=0
                     AND p.matched=1 AND p.status='pending'""" + extra + " ORDER BY t.updated_at,b.id,p.page_index LIMIT 1", excluded).fetchone()
@@ -1062,9 +1309,11 @@ class TranscodingManager:
                 if not self._job_current(job["id"], job["generation"]):
                     self._discard_unreferenced(result["file"])
                     return True
-                connection.execute("""INSERT OR REPLACE INTO tc_outputs(book_id,page_key,source_version,profile,file,size,mime,digest,created_at)
-                    VALUES(?,?,?,?,?,?,?,?,?)""", (job["id"], job["page_key"], job["source_version"], job["desired_profile"],
-                                                  result["file"], result["size"], result["mime"], result["digest"], time.time()))
+                parameters = {key: rules[key] for key in ("output_format", "quality", "max_output_side")}
+                parameters.update(algorithm=ALGORITHM_VERSION, rule_revision=job.get("rule_revision"))
+                connection.execute("""INSERT OR REPLACE INTO tc_outputs(book_id,page_key,source_version,profile,file,size,mime,digest,created_at,output_parameters)
+                    VALUES(?,?,?,?,?,?,?,?,?,?)""", (job["id"], job["page_key"], job["source_version"], job["desired_profile"],
+                                                  result["file"], result["size"], result["mime"], result["digest"], time.time(), json.dumps(parameters)))
                 connection.execute("UPDATE tc_pages SET status='success',error='',desired_file=?,desired_bytes=? WHERE book_id=? AND page_key=?",
                                    (result["file"], result["size"], job["id"], job["page_key"]))
                 remaining = connection.execute("SELECT 1 FROM tc_pages WHERE book_id=? AND matched=1 AND status<>'success' LIMIT 1", (job["id"],)).fetchone()
@@ -1075,7 +1324,7 @@ class TranscodingManager:
                     current = {page["page_key"]: page["source_version"] for page in self.inspect_book(job)}
                     if expected != current:
                         raise self._error("源图片已变化，请重新扫描后再优化。", 422)
-                    self._publish(connection, job["id"])
+                    self._publish(connection, job["id"], new_output=True)
                 else:
                     connection.execute("UPDATE tc_books SET status='queued',updated_at=? WHERE book_id=?", (time.time(), job["id"]))
         except Exception as error:
@@ -1188,6 +1437,9 @@ class TranscodingManager:
                             raise self._error("图片优化超时，请调整任务限制后重试。", 422)
                         time.sleep(0.1)
                     if process.returncode:
+                        resource_error = _worker_exit_message(process.returncode)
+                        if resource_error:
+                            raise self._error(resource_error, 422)
                         log.seek(0)
                         message = log.read(4096).decode("utf-8", errors="replace").strip()
                         try:
