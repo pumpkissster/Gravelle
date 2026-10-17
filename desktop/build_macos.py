@@ -28,6 +28,8 @@ MINIMUM_MACOS = '15.0'
 ENTITLEMENTS = {'com.apple.security.cs.allow-jit': True}
 LICENSE_PACKAGES = ('Pillow', 'PyInstaller', 'numpy', 'opencv-python-headless',
                     'pyobjc-core', 'pyobjc-framework-Cocoa', 'pyobjc-framework-Quartz')
+PYOBJC_CORE_LICENSE_VERSION = '12.2.2'
+PYOBJC_CORE_LICENSE_SHA256 = '0ca04b07928d4872b9d9bb22187ca0426dd8bfab08f26eada0999a71dc81aaff'
 
 
 class BuildError(Exception):
@@ -91,6 +93,29 @@ def run(command: list[str], *, env: dict | None = None, capture: bool = False) -
     return result.stdout if capture else ''
 
 
+def copy_pinned_license_fallback(name: str, version: str, target: Path) -> bool:
+    """The official core 12.2.2 wheel omits its source distribution's license.
+
+    Do not turn a short SPDX/metadata field into a substitute license or extend
+    this exception to later versions without checking their upstream notices.
+    """
+    if name != 'pyobjc-core':
+        return False
+    if version != PYOBJC_CORE_LICENSE_VERSION:
+        raise BuildError('No verified license fallback for pyobjc-core ' + str(version) + '.')
+    source = ROOT / 'desktop' / 'licenses' / 'pyobjc-core-12.2.2-LICENSE.txt'
+    try:
+        content = source.read_bytes()
+    except OSError as error:
+        raise BuildError('The pinned pyobjc-core license notice is missing or unreadable.') from error
+    if hashlib.sha256(content).hexdigest() != PYOBJC_CORE_LICENSE_SHA256:
+        raise BuildError('The pinned pyobjc-core license notice failed SHA-256 verification.')
+    destination = target / name / 'License.txt'
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(content)
+    return True
+
+
 def collect_licenses(target: Path) -> None:
     target.mkdir(parents=True, exist_ok=True)
     python_candidates = (Path(sys.base_prefix) / 'LICENSE.txt', Path(sys.base_prefix) / 'LICENSE',
@@ -120,7 +145,7 @@ def collect_licenses(target: Path) -> None:
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copyfile(source, destination)
                     found = True
-        if not found:
+        if not found and not copy_pinned_license_fallback(name, dist.version, target):
             raise BuildError(f'License notices missing for {name}.')
 
 

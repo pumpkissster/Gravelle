@@ -5,6 +5,7 @@ import ast
 import contextlib
 import hashlib
 import io
+import importlib.metadata
 import json
 from pathlib import Path
 import shutil
@@ -210,6 +211,56 @@ class MacOSPackagingTests(unittest.TestCase):
         self.assertIn('NOT passed native validation', gui)
         self.assertIn('elif [ "$gui_status" -ne 0 ]; then\n            exit "$gui_status"', gui)
         self.assertIn('else\n            printf', gui)
+
+    def collect_core_wheel_fixture(self, *, version='12.2.2', notice='original'):
+        """Use real importlib metadata with the official wheel's missing-file layout."""
+        dist_info = self.root / f'pyobjc_core-{version}.dist-info'
+        dist_info.mkdir(exist_ok=True)
+        (dist_info / 'METADATA').write_text(
+            f'Metadata-Version: 2.1\nName: pyobjc-core\nVersion: {version}\nLicense: MIT\n\n', encoding='utf-8')
+        (dist_info / 'RECORD').write_text(
+            f'{dist_info.name}/METADATA,,\n{dist_info.name}/RECORD,,\n', encoding='utf-8')
+        distribution = importlib.metadata.PathDistribution(dist_info)
+        vendor = self.root / 'desktop/licenses/pyobjc-core-12.2.2-LICENSE.txt'
+        vendor.parent.mkdir(parents=True, exist_ok=True)
+        if notice == 'original':
+            content = (build_macos.ROOT / 'desktop/licenses/pyobjc-core-12.2.2-LICENSE.txt').read_bytes()
+            vendor.write_bytes(content)
+        elif notice is not None:
+            vendor.write_bytes(notice)
+        else:
+            vendor.unlink(missing_ok=True)
+        python_prefix = self.root / 'python'
+        python_prefix.mkdir(exist_ok=True)
+        (python_prefix / 'LICENSE.txt').write_text('generated Python license fixture', encoding='utf-8')
+        target = self.root / 'collected-licenses'
+        with patch.object(build_macos, 'ROOT', self.root), \
+                patch.object(build_macos, 'LICENSE_PACKAGES', ('pyobjc-core',)), \
+                patch.object(build_macos.sys, 'base_prefix', str(python_prefix)), \
+                patch.object(build_macos.importlib.metadata, 'distribution', return_value=distribution):
+            build_macos.collect_licenses(target)
+        return target
+
+    def test_core_wheel_missing_license_uses_complete_verified_source_notice(self):
+        target = self.collect_core_wheel_fixture()
+        content = (target / 'pyobjc-core/License.txt').read_bytes()
+        self.assertEqual(len(content), 1249)
+        self.assertEqual(hashlib.sha256(content).hexdigest(), build_macos.PYOBJC_CORE_LICENSE_SHA256)
+        self.assertIn(b'Copyright 2003-2025 - Ronald Oussoren', content)
+        self.assertIn(b'Permission is hereby granted', content)
+        self.assertNotEqual(content.strip(), b'MIT')
+
+    def test_changed_core_version_does_not_reuse_an_older_notice(self):
+        with self.assertRaisesRegex(build_macos.BuildError, 'No verified license fallback'):
+            self.collect_core_wheel_fixture(version='12.2.3')
+        self.assertFalse((self.root / 'collected-licenses/pyobjc-core/License.txt').exists())
+
+    def test_corrupted_or_missing_core_notice_still_blocks_the_build(self):
+        for content, error in ((b'MIT', 'SHA-256'), (None, 'missing or unreadable')):
+            with self.subTest(content=content):
+                with self.assertRaisesRegex(build_macos.BuildError, error):
+                    self.collect_core_wheel_fixture(notice=content)
+        self.assertFalse((self.root / 'collected-licenses/pyobjc-core/License.txt').exists())
 
 
 if __name__ == '__main__':

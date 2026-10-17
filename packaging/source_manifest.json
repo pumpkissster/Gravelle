@@ -16,6 +16,7 @@
   "desktop/__init__.py", "desktop/core.py", "desktop/runtime.py", "desktop/launcher.py",
   "desktop/platforms.py", "desktop/macos_entry.py", "desktop/macos_launcher.py",
   "desktop/build_macos.py", "desktop/gravelle-macos.spec", "desktop/requirements-macos-build.txt", "desktop/smoke_macos.py",
+  "desktop/licenses/pyobjc-core-12.2.2-LICENSE.txt", "desktop/licenses/README.md",
   "tests/test_macos_updates.py", "tests/test_macos_runtime.py", "tests/test_macos_launcher.py", "tests/test_macos_packaging.py", "tests/test_macos_smoke.py", "docs/macos.md",
   "desktop/release.json", "desktop/requirements-build.txt", "desktop/gravelle.spec", "desktop/gravelle.ico",
   "desktop/installer.iss", "desktop/build_windows.ps1", "desktop/smoke_windows.py", "desktop/THIRD_PARTY_NOTICES.md",
