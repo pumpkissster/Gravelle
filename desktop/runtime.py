@@ -17,13 +17,39 @@ from urllib.request import ProxyHandler, build_opener
 from desktop.core import LauncherConfig, LauncherError, check_port
 
 
+def _startup_trace(stage: str, *, stream=None, **details) -> None:
+    """Opt-in diagnostics contain flags only, never protocol lines or paths."""
+    if os.environ.get("GRAVELLE_STARTUP_TRACE") != "1":
+        return
+    record = {"gravelle_startup_trace": stage}
+    for key in ("json", "ready", "instance_matches", "has_error", "alive"):
+        if type(details.get(key)) is bool:
+            record[key] = details[key]
+    for key in ("line_chars", "first_codepoint", "returncode"):
+        if type(details.get(key)) is int or key in details and details[key] is None:
+            record[key] = details[key]
+    elapsed = details.get("elapsed_seconds")
+    if type(elapsed) in (int, float):
+        record["elapsed_seconds"] = elapsed
+    error_type = details.get("error_type")
+    if isinstance(error_type, str) and error_type.isascii() and error_type.isidentifier():
+        record["error_type"] = error_type[:80]
+    try:
+        print(json.dumps(record, separators=(",", ":")), file=stream or sys.stderr, flush=True)
+    except (OSError, ValueError, AttributeError):
+        # Debug output must not affect startup, shutdown or success decisions.
+        pass
+
+
 def resource_root() -> Path:
     return Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
 
 
 def serve(config: LauncherConfig, data_path: Path, instance: str = "") -> int:
     """Private child mode: stdin stop/EOF owns shutdown, never an HTTP route."""
+    _startup_trace("service.import_server.begin")
     from server import Library, ReaderServer
+    _startup_trace("service.import_server.end")
     config.validate()
     data_path.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -31,11 +57,17 @@ def serve(config: LauncherConfig, data_path: Path, instance: str = "") -> int:
     server = None
     try:
         roots = [Path(path) for path in config.library_paths]
+        _startup_trace("service.library_init.begin")
         library = Library(roots[0], data_path, "", 300, roots=roots)
+        _startup_trace("service.library_init.end")
+        _startup_trace("service.bind.begin")
         server = ReaderServer((config.host, config.port), library)
+        _startup_trace("service.bind.end")
         # With PyInstaller --onedir the static directory is in _internal.
         server.static = resource_root() / "static"
+        _startup_trace("service.library_start.begin")
         library.start()
+        _startup_trace("service.library_start.end")
         def watch_parent():
             try:
                 for line in sys.stdin:
@@ -46,6 +78,7 @@ def serve(config: LauncherConfig, data_path: Path, instance: str = "") -> int:
                 server.shutdown()
         threading.Thread(target=watch_parent, name="launcher-control", daemon=True).start()
         print(json.dumps({"ready": True, "instance": instance, "port": server.server_address[1]}), flush=True)
+        _startup_trace("service.ready_written")
         server.serve_forever(poll_interval=0.2)
         return 0
     except (OSError, ValueError, RuntimeError, LauncherError) as error:
@@ -110,19 +143,35 @@ class ServerController:
             try:
                 environment = os.environ.copy()
                 environment["PYTHONIOENCODING"] = "utf-8"
+                _startup_trace("parent.spawn.begin", stream=self.log_stream)
                 self.process = subprocess.Popen(self.command(config, instance), stdin=subprocess.PIPE,
                                                 stdout=subprocess.PIPE, stderr=self.log_stream,
                                                 encoding="utf-8", errors="replace", text=True,
                                                 creationflags=creationflags, cwd=resource_root(), env=environment)
+                _startup_trace("parent.spawn.end", stream=self.log_stream)
                 self.config = config
                 messages = queue.Queue()
                 child = self.process
+                trace_stream = self.log_stream
                 def read_output():
-                    for line in child.stdout:
-                        try:
-                            messages.put(json.loads(line))
-                        except ValueError:
-                            pass
+                    try:
+                        for line in child.stdout:
+                            try:
+                                message = json.loads(line)
+                                mapping = isinstance(message, dict)
+                                _startup_trace("parent.stdout.line", stream=trace_stream, json=True,
+                                               line_chars=len(line), ready=bool(message.get("ready")) if mapping else False,
+                                               instance_matches=message.get("instance") == instance if mapping else False,
+                                               has_error=bool(message.get("error")) if mapping else False)
+                                messages.put(message)
+                            except ValueError:
+                                _startup_trace("parent.stdout.line", stream=trace_stream, json=False,
+                                               line_chars=len(line), first_codepoint=ord(line[0]) if line else None)
+                        _startup_trace("parent.stdout.eof", stream=trace_stream)
+                    except BaseException as error:
+                        _startup_trace("parent.stdout.error", stream=trace_stream,
+                                       error_type=type(error).__name__)
+                        raise
                 threading.Thread(target=read_output, name="server-ready", daemon=True).start()
                 deadline = time.monotonic() + timeout
                 ready = False
@@ -138,9 +187,11 @@ class ServerController:
                     if message.get("error"):
                         raise LauncherError("阅读器启动失败：" + str(message["error"]))
                     if message.get("ready") and message.get("instance") == instance:
+                        _startup_trace("parent.ready_accepted", stream=self.log_stream)
                         ready = True
                         break
                 if not ready:
+                    _startup_trace("parent.ready_timeout", stream=self.log_stream)
                     raise LauncherError("启动超时，请查看服务日志后重试。")
                 # Binding success comes from our child's private stdout first;
                 # an unrelated web server can never satisfy this handshake.
@@ -154,6 +205,7 @@ class ServerController:
                         with local_client.open(config.local_url + "api/health", timeout=1) as response:
                             health = json.loads(response.read(16384))
                             if health.get("status") == "ok":
+                                _startup_trace("parent.health_ok", stream=self.log_stream)
                                 return config.local_url
                     except (OSError, ValueError, URLError):
                         time.sleep(0.1)
@@ -165,28 +217,36 @@ class ServerController:
     def stop(self, timeout: float = 15) -> None:
         with self.lock:
             process = self.process
-            if process is not None:
-                if process.poll() is None:
-                    try:
-                        process.stdin.write("stop\n")
-                        process.stdin.flush()
-                    except (OSError, ValueError, AttributeError):
-                        pass
-                    try:
-                        process.wait(timeout=timeout)
-                    except subprocess.TimeoutExpired:
-                        # Only our exact Popen handle is terminated. Never look
-                        # up PIDs by port/name or stop an existing reader.
-                        process.terminate()
+            trace_started = time.monotonic()
+            _startup_trace("parent.stop.enter", stream=self.log_stream,
+                           returncode=getattr(process, "returncode", None))
+            try:
+                if process is not None:
+                    if process.poll() is None:
                         try:
-                            process.wait(timeout=3)
+                            process.stdin.write("stop\n")
+                            process.stdin.flush()
+                        except (OSError, ValueError, AttributeError):
+                            pass
+                        try:
+                            process.wait(timeout=timeout)
                         except subprocess.TimeoutExpired:
-                            process.kill()
-                            process.wait(timeout=3)
-                for stream in (process.stdin, process.stdout):
-                    if stream is not None:
-                        stream.close()
-                self.process = None
+                            # Only our exact Popen handle is terminated. Never look
+                            # up PIDs by port/name or stop an existing reader.
+                            process.terminate()
+                            try:
+                                process.wait(timeout=3)
+                            except subprocess.TimeoutExpired:
+                                process.kill()
+                                process.wait(timeout=3)
+                    for stream in (process.stdin, process.stdout):
+                        if stream is not None:
+                            stream.close()
+                    self.process = None
+            finally:
+                _startup_trace("parent.stop.exit", stream=self.log_stream,
+                               returncode=getattr(process, "returncode", None),
+                               elapsed_seconds=round(time.monotonic() - trace_started, 3))
             if self.log_stream is not None:
                 self.log_stream.close()
                 self.log_stream = None

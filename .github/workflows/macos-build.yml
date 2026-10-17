@@ -105,9 +105,12 @@ jobs:
           BUILD_REPOSITORY: ${{ github.repository }}
         run: python desktop/build_macos.py --repository "$BUILD_REPOSITORY" --arch '${{ matrix.arch }}' --output-dir 'dist/macos-${{ matrix.arch }}'
       - name: Smoke test frozen server and image workers
+        env:
+          GRAVELLE_STARTUP_TRACE: "1"
         run: |
           executable=$(python -c 'import json; print(json.load(open("dist/macos-${{ matrix.arch }}/build-report.json"))["app"] + "/Contents/MacOS/Gravelle")')
-          python desktop/smoke_macos.py --executable "$executable" --work-root 'work/macos-smoke-${{ matrix.arch }}' --report 'work/macos-smoke-${{ matrix.arch }}/report.json' --skip-gui
+          python desktop/smoke_macos.py --executable "$executable" --work-root 'work/macos-smoke-${{ matrix.arch }}' --report 'work/macos-smoke-${{ matrix.arch }}/trace-report.json' --skip-gui
+          env -u GRAVELLE_STARTUP_TRACE python desktop/smoke_macos.py --executable "$executable" --work-root 'work/macos-smoke-${{ matrix.arch }}' --report 'work/macos-smoke-${{ matrix.arch }}/report.json' --skip-gui
       - name: Verify artifact checksums
         run: cd 'dist/macos-${{ matrix.arch }}' && shasum -a 256 -c SHA256SUMS.txt
       - name: Smoke test native launcher window and menu bar
@@ -148,7 +151,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: macos-${{ matrix.arch }}-smoke-report
-          path: work/macos-smoke-${{ matrix.arch }}/report.json
+          path: work/macos-smoke-${{ matrix.arch }}/*.json
           if-no-files-found: warn
           retention-days: 14
       - name: Preserve native launcher report

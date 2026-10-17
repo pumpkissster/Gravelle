@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 from contextlib import contextmanager
 from io import BytesIO
+from io import StringIO
 import json
 import os
 from pathlib import Path
@@ -26,6 +27,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from desktop.core import LauncherConfig, LauncherError, ReleaseConfig, download_update, load_release_config
 from desktop.platforms import mac_architecture, macos_update_asset, user_directory
 from desktop.runtime import ServerController
+import desktop.runtime as launcher_runtime
+import desktop.macos_entry as macos_entry
 from image_search import ImageSearchManager
 import server
 from server import ReaderError
@@ -317,6 +320,146 @@ class MacOSDecoderBudgetContracts(unittest.TestCase):
                 self.assertEqual(str(caught.exception), _worker_exit_message(code))
                 self.assertEqual(manager.processes, set())
                 self.assertEqual(list(root.iterdir()), [])
+
+
+class MacOSStartupTraceContracts(unittest.TestCase):
+    def options(self):
+        return SimpleNamespace(port=19491, host="127.0.0.1", library=[str(Path.cwd())],
+                               data=Path.cwd() / "work" / "unused-trace-fixture", instance="private-instance-token")
+
+    def test_diagnostics_are_off_by_default_and_only_explicit_one_enables_them(self):
+        for value in (None, "0", "true", "yes", ""):
+            environment = {} if value is None else {"GRAVELLE_STARTUP_TRACE": value}
+            stream = StringIO()
+            timer = MagicMock()
+            with self.subTest(value=value), patch.dict(os.environ, environment, clear=True), \
+                    patch("desktop.macos_entry.restore_private_stdio"), \
+                    patch("desktop.macos_entry.sys.stderr", stream), \
+                    patch("desktop.runtime.serve", return_value=0) as serve, \
+                    patch.dict(sys.modules, {"faulthandler": timer}):
+                launcher_runtime._startup_trace("parent.example", stream=stream, ready=True)
+                self.assertEqual(macos_entry.serve_private(self.options()), 0)
+                self.assertEqual(stream.getvalue(), "")
+                timer.dump_traceback_later.assert_not_called()
+                timer.cancel_dump_traceback_later.assert_not_called()
+                serve.assert_called_once()
+
+    def test_trace_masks_private_values_and_tolerates_closed_logs(self):
+        stream = StringIO()
+        with patch.dict(os.environ, {"GRAVELLE_STARTUP_TRACE": "1"}):
+            launcher_runtime._startup_trace("parent.stdout.line", stream=stream, json=True, ready=True,
+                                           instance_matches=False, has_error=True, line_chars=78,
+                                           returncode=None, elapsed_seconds=.125, error_type="OSError",
+                                           instance="secret-instance", password="secret-password",
+                                           path="/private/library/secret", line="secret-protocol-body")
+            record = json.loads(stream.getvalue())
+            self.assertEqual(set(record), {"gravelle_startup_trace", "json", "ready", "instance_matches",
+                                           "has_error", "line_chars", "returncode", "elapsed_seconds", "error_type"})
+            self.assertFalse(record["instance_matches"])
+            self.assertNotIn("secret", stream.getvalue())
+            stream.close()
+            launcher_runtime._startup_trace("parent.stdout.eof", stream=stream)
+
+    def test_early_child_traceback_timer_is_cancelled_on_startup_error(self):
+        stream = StringIO()
+        timer = MagicMock()
+        with patch.dict(os.environ, {"GRAVELLE_STARTUP_TRACE": "1"}), \
+                patch("desktop.macos_entry.restore_private_stdio") as restore, \
+                patch("desktop.macos_entry.sys.stderr", stream), \
+                patch("desktop.runtime.serve", side_effect=ReaderError("generated failure", 422)), \
+                patch.dict(sys.modules, {"faulthandler": timer}):
+            with self.assertRaises(ReaderError):
+                macos_entry.serve_private(self.options())
+        restore.assert_called_once_with()
+        timer.dump_traceback_later.assert_called_once_with(15, repeat=True, file=stream)
+        timer.cancel_dump_traceback_later.assert_called_once_with()
+        stages = [json.loads(line)["gravelle_startup_trace"] for line in stream.getvalue().splitlines()]
+        self.assertEqual(stages, ["entry.stdio_ready", "entry.import_core.begin", "entry.import_core.end",
+                                  "entry.import_runtime.begin", "entry.import_runtime.end",
+                                  "entry.serve.begin", "entry.serve.end"])
+        self.assertNotIn("private-instance-token", stream.getvalue())
+        self.assertNotIn(str(Path.cwd()), stream.getvalue())
+
+    def test_child_service_stages_preserve_private_ready_payload_and_cleanup(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            stderr, stdout = StringIO(), StringIO()
+            library, http = MagicMock(), MagicMock()
+            http.server_address = ("127.0.0.1", 19491)
+            config = LauncherConfig(str(root), 19491)
+            with patch.dict(os.environ, {"GRAVELLE_STARTUP_TRACE": "1"}), \
+                    patch("server.Library", return_value=library), \
+                    patch("server.ReaderServer", return_value=http), \
+                    patch("desktop.runtime.threading.Thread"), \
+                    patch("desktop.runtime.sys.stderr", stderr), patch("desktop.runtime.sys.stdout", stdout):
+                self.assertEqual(launcher_runtime.serve(config, root / "data", "private-instance-token"), 0)
+            stages = [json.loads(line)["gravelle_startup_trace"] for line in stderr.getvalue().splitlines()]
+            self.assertEqual(stages, ["service.import_server.begin", "service.import_server.end",
+                                      "service.library_init.begin", "service.library_init.end",
+                                      "service.bind.begin", "service.bind.end",
+                                      "service.library_start.begin", "service.library_start.end", "service.ready_written"])
+            self.assertEqual(json.loads(stdout.getvalue()), {"ready": True, "instance": "private-instance-token", "port": 19491})
+            self.assertNotIn("private-instance-token", stderr.getvalue())
+            self.assertNotIn(str(root), stderr.getvalue())
+            library.close.assert_called_once_with()
+            http.server_close.assert_called_once_with()
+
+    def test_parent_reader_has_no_controller_lock_and_logs_flags_eof_and_stop(self):
+        script = '''import json,os,sys
+token = sys.argv[sys.argv.index("--instance") + 1]
+print("\\ufeff" + json.dumps({"password":"private-protocol-secret"}), flush=True)
+print(json.dumps({"ready":True,"instance":"wrong-instance","path":"/private/source/root"}), flush=True)
+print(json.dumps({"ready":True,"instance":token}), flush=True)
+os.close(1)
+for line in sys.stdin:
+    if line.strip() == "stop":
+        break
+'''
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            child_script = root / "owned-trace-child.py"
+            child_script.write_text(script, encoding="utf-8")
+            config = LauncherConfig(str(root), 19491)
+            for enabled in (False, True):
+                log = root / ("trace-on.log" if enabled else "trace-off.log")
+                controller = ServerController(root / "data", log, [sys.executable, str(child_script)])
+                client = MagicMock()
+                client.open.return_value.__enter__.return_value.read.return_value = b'{"status":"ok"}'
+                with self.subTest(enabled=enabled), \
+                        patch.dict(os.environ, {"GRAVELLE_STARTUP_TRACE": "1" if enabled else "0"}), \
+                        patch("desktop.runtime.check_port", return_value={"available": True}), \
+                        patch("desktop.runtime.build_opener", return_value=client), \
+                        patch("desktop.runtime.secrets.token_hex", return_value="private-instance-token"):
+                    try:
+                        # start holds controller.lock throughout. A reader that
+                        # acquired that lock could never accept this handshake.
+                        self.assertEqual(controller.start(config, timeout=3), config.local_url)
+                        if enabled:
+                            deadline = time.monotonic() + 1
+                            while "parent.stdout.eof" not in log.read_text(encoding="utf-8") and time.monotonic() < deadline:
+                                time.sleep(.01)
+                        child = controller.process
+                    finally:
+                        controller.stop()
+                self.assertEqual(child.returncode, 0)
+                output = log.read_text(encoding="utf-8")
+                if not enabled:
+                    self.assertEqual(output, "")
+                    continue
+                self.assertNotIn("private-instance-token", output)
+                self.assertNotIn("private-protocol-secret", output)
+                self.assertNotIn("/private/source/root", output)
+                records = [json.loads(line) for line in output.splitlines()]
+                lines = [row for row in records if row["gravelle_startup_trace"] == "parent.stdout.line"]
+                self.assertEqual([row["json"] for row in lines], [False, True, True])
+                self.assertEqual(lines[0]["first_codepoint"], 65279)
+                self.assertEqual([row["instance_matches"] for row in lines[1:]], [False, True])
+                stages = [row["gravelle_startup_trace"] for row in records]
+                for stage in ("parent.ready_accepted", "parent.health_ok", "parent.stdout.eof", "parent.stop.enter", "parent.stop.exit"):
+                    self.assertIn(stage, stages)
+                stopped = next(row for row in records if row["gravelle_startup_trace"] == "parent.stop.exit")
+                self.assertEqual(stopped["returncode"], 0)
+                self.assertGreaterEqual(stopped["elapsed_seconds"], 0)
 
 
 if __name__ == "__main__":

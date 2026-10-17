@@ -24,6 +24,45 @@ def restore_private_stdio() -> None:
             setattr(sys, name, io.TextIOWrapper(stream, encoding="utf-8", errors="replace", line_buffering=True))
 
 
+def startup_trace(stage: str) -> None:
+    if os.environ.get("GRAVELLE_STARTUP_TRACE") == "1":
+        try:
+            print(json.dumps({"gravelle_startup_trace": stage}), file=sys.stderr, flush=True)
+        except (OSError, ValueError, AttributeError):
+            pass
+
+
+def serve_private(options) -> int:
+    """Trace startup only on request; no paths or private handshake values."""
+    restore_private_stdio()
+    startup_trace("entry.stdio_ready")
+    timer = None
+    if os.environ.get("GRAVELLE_STARTUP_TRACE") == "1":
+        try:
+            import faulthandler
+            faulthandler.dump_traceback_later(15, repeat=True, file=sys.stderr)
+            timer = faulthandler
+        except (ImportError, OSError, RuntimeError, ValueError):
+            startup_trace("entry.traceback_unavailable")
+    try:
+        startup_trace("entry.import_core.begin")
+        from desktop.core import LauncherConfig
+        startup_trace("entry.import_core.end")
+        startup_trace("entry.import_runtime.begin")
+        from desktop.runtime import serve
+        startup_trace("entry.import_runtime.end")
+        startup_trace("entry.serve.begin")
+        return serve(LauncherConfig(port=options.port, lan_enabled=options.host == "0.0.0.0",
+                                    library_paths=options.library), options.data, options.instance)
+    finally:
+        if timer is not None:
+            try:
+                timer.cancel_dump_traceback_later()
+            except (OSError, RuntimeError, ValueError):
+                pass
+        startup_trace("entry.serve.end")
+
+
 def validate_smoke_paths(storage: Path, config: Path, report: Path) -> tuple[Path, Path, Path]:
     """Native GUI QA requires explicit isolated storage; never uses account data."""
     from desktop.core import user_directory
@@ -73,11 +112,7 @@ def main(argv=None) -> int:
     if options.serve:
         if not options.library or not options.data:
             parser.error("--serve requires --library and --data")
-        restore_private_stdio()
-        from desktop.core import LauncherConfig
-        from desktop.runtime import serve
-        return serve(LauncherConfig(port=options.port, lan_enabled=options.host == "0.0.0.0",
-                                    library_paths=options.library), options.data, options.instance)
+        return serve_private(options)
     if options.reset_admin_password:
         if not options.data:
             parser.error("--reset-admin-password requires --data")
