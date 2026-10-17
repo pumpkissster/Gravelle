@@ -1,6 +1,12 @@
 # macOS 开发版
 
-当前正在准备 macOS 启动器和独立安装包，尚未发布 macOS 版本。现有公开版本仍为 0.8.6。Windows 本地的静态检查不代表 `.app`、DMG 或 macOS 界面已在真机通过验证。
+此分支提供 macOS 开发构建，尚未正式发版，版本号暂沿用 0.8.6。安装包由原生 Mac runner 生成，具体可用架构和检查结果见对应的构建报告。自动服务及界面检查不替代真实 Mac 上的 Finder 安装、完整点击操作、Retina 显示和外部磁盘访问验收。
+
+## 获取开发测试包
+
+打开仓库的 [Mac 开发构建](https://github.com/pumpkissster/Gravelle/actions/workflows/macos-build.yml)，选择 `dev/macos-preview` 分支的构建记录。在 Artifacts 中下载 `gravelle-macos-arm64-development`（M 系列）或 `gravelle-macos-x64-development`（Intel）；仅通过检查的架构会保留安装包。
+
+解压下载的归档后，打开其中的 `.dmg`；另附的 `.zip` 是同一应用的备用格式，`SHA256SUMS.txt` 可核对两个文件。开发产物在 Actions 保留 14 天，不会改变正式 Release 或 Docker 镜像。默认开发包使用 ad-hoc 签名，未完成 Apple 公证。
 
 ## 安装与使用
 
