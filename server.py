@@ -30,6 +30,7 @@ import re
 import secrets
 import signal
 import socket
+from socketserver import TCPServer
 import sqlite3
 import stat
 import struct
@@ -2667,6 +2668,12 @@ def access_urls(host, secure, server_address):
 class ReaderServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+
+    def server_bind(self):
+        # HTTPServer's reverse DNS lookup can block startup on offline networks.
+        # The reader only needs the bound address and actual port, not a FQDN.
+        TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
     def __init__(self, address, library):
         self.library = library

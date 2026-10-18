@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 from queue import Queue
+import socket
 import subprocess
 import sys
 import tempfile
@@ -33,6 +34,42 @@ from image_search import ImageSearchManager
 import server
 from server import ReaderError
 from transcoding import DEFAULT_RULES, TranscodingManager, _DarwinMemoryGuard, _restrict_worker, _worker_exit_message
+
+
+class ReaderServerBindingContracts(unittest.TestCase):
+    def test_loopback_and_lan_bind_without_reverse_dns_and_keep_actual_port(self):
+        with patch("socket.getfqdn", side_effect=AssertionError("Reverse DNS must not block startup")) as lookup:
+            for host in ("127.0.0.1", "0.0.0.0"):
+                with self.subTest(host=host), server.ReaderServer((host, 0), None) as http:
+                    self.assertEqual(http.server_address[0], host)
+                    self.assertGreater(http.server_port, 0)
+                    self.assertEqual(http.server_address, http.socket.getsockname())
+                    self.assertEqual((http.server_name, http.server_port), http.server_address[:2])
+                    self.assertTrue(http.allow_reuse_address)
+            lookup.assert_not_called()
+
+    def test_occupied_port_still_fails_and_closes_failed_listener(self):
+        closed = []
+        original_close = server.ReaderServer.server_close
+        def track_close(http):
+            original_close(http)
+            closed.append(http.socket.fileno())
+        with socket.socket() as occupied:
+            # Windows permits multiple SO_REUSEADDR listeners unless the first
+            # socket explicitly owns the port; retain the OS-specific contract.
+            if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+                occupied.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            occupied.bind(("127.0.0.1", 0))
+            occupied.listen()
+            with patch("socket.getfqdn", side_effect=AssertionError("Unexpected DNS")), \
+                    patch.object(server.ReaderServer, "server_close", track_close):
+                with self.assertRaises(OSError):
+                    with server.ReaderServer(occupied.getsockname(), None):
+                        pass
+                self.assertEqual(closed, [-1])
+                # Failure did not close or replace the original listener.
+                with socket.create_connection(occupied.getsockname(), timeout=1):
+                    self.assertGreaterEqual(occupied.fileno(), 0)
 
 
 class MacOSRuntimeContracts(unittest.TestCase):
