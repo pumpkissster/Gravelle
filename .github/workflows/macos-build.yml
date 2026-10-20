@@ -114,12 +114,12 @@ jobs:
       - name: Verify artifact checksums
         run: cd 'dist/macos-${{ matrix.arch }}' && shasum -a 256 -c SHA256SUMS.txt
       - name: Smoke test native launcher window and menu bar
-        timeout-minutes: 3
+        timeout-minutes: 8
         run: |
           executable=$(python -c 'import json; print(json.load(open("dist/macos-${{ matrix.arch }}/build-report.json"))["app"] + "/Contents/MacOS/Gravelle")')
           storage="$PWD/work/macos-gui-${{ matrix.arch }}"
           set +e
-          "$executable" --smoke-launcher --data "$storage" --config "$storage/launcher.json" --report "$storage/gui-report.json"
+          python desktop/smoke_macos.py --executable "$executable" --work-root "$storage" --report "$storage/gui-report.json" --gui-only
           gui_status=$?
           set -e
           if [ "$gui_status" -eq 77 ]; then
@@ -133,7 +133,7 @@ jobs:
           elif [ "$gui_status" -ne 0 ]; then
             exit "$gui_status"
           else
-            printf '\nNative launcher GUI smoke: passed.\n' >> "$GITHUB_STEP_SUMMARY"
+            printf '\nNative launcher GUI and application Quit smoke: passed (idle, service running, window hidden). Owned service exit and port release verified.\n' >> "$GITHUB_STEP_SUMMARY"
           fi
       - name: Preserve development artifacts
         uses: actions/upload-artifact@v7

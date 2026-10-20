@@ -107,7 +107,11 @@ def main(argv=None) -> int:
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--instance", default="")
     parser.add_argument("--report", type=Path)
+    parser.add_argument("--smoke-scenario", choices=("idle", "running", "hidden"))
     options = parser.parse_args(arguments)
+
+    if options.smoke_scenario and not options.smoke_launcher:
+        parser.error("--smoke-scenario requires --smoke-launcher")
 
     if options.serve:
         if not options.library or not options.data:
@@ -133,7 +137,8 @@ def main(argv=None) -> int:
             parser.error("Native GUI smoke requires macOS; no AppKit rendering was performed")
         from server import VERSION
         from desktop.macos_launcher import run_gui
-        return run_gui(storage, config_path, VERSION, smoke_report=report_path)
+        return run_gui(storage, config_path, VERSION, smoke_report=report_path,
+                       smoke_scenario=options.smoke_scenario or "idle")
     if options.report:
         parser.error("--report requires --smoke-launcher")
 

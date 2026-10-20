@@ -2,13 +2,16 @@
 from __future__ import annotations
 
 import hashlib
+import ast
 import importlib
 import io
 import json
+import queue
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from unittest.mock import MagicMock, patch
@@ -28,6 +31,39 @@ class OwnedController:
         self.starts.append(config)
         self.config, self.running = config, True
         return config.local_url
+
+
+def termination_contract():
+    """Execute the shipped lifecycle methods with a portable AppKit host.
+
+    Only event routing is mocked; this does not exercise native rendering or
+    claim that a macOS run loop was started on another operating system.
+    """
+    from desktop import macos_launcher
+    source = ast.parse(Path(macos_launcher.__file__).read_text(encoding="utf-8"))
+    delegate = next(node for node in ast.walk(source)
+                    if isinstance(node, ast.ClassDef) and node.name == "GravelleMacDelegate")
+    selected = {"quit_", "wake_for_worker", "begin_exit", "poll_", "applicationShouldTerminate_"}
+    methods = [node for node in delegate.body if isinstance(node, ast.FunctionDef) and node.name in selected]
+    for method in methods:
+        method.decorator_list = []
+    state = types.SimpleNamespace(events=queue.Queue(), worker=MagicMock(),
+                                  controller=types.SimpleNamespace(stop=MagicMock(), process=None, running=False))
+    app = MagicMock()
+    namespace = {"queue": queue, "state": state, "app": app, "tr": lambda key, **values: key,
+                 "A": types.SimpleNamespace(NSTerminateLater=2, NSTerminateCancel=0,
+                                             NSModalPanelRunLoopMode="NSModalPanelRunLoopMode"),
+                 "F": types.SimpleNamespace(NSRunLoopCommonModes="NSRunLoopCommonModes")}
+    module = ast.fix_missing_locations(ast.Module(body=methods, type_ignores=[]))
+    exec(compile(module, str(macos_launcher.__file__), "exec"), namespace)
+    subject = types.SimpleNamespace(busy=False, quitting=False, exit_started=False, updating=False,
+                                    status=MagicMock(), update_button=MagicMock(), restore_=MagicMock(),
+                                    openBrowser_=MagicMock(), window=MagicMock(), address=MagicMock(),
+                                    performSelectorOnMainThread_withObject_waitUntilDone_modes_=MagicMock())
+    subject.set_busy = lambda busy: setattr(subject, "busy", busy)
+    for name in selected:
+        setattr(subject, name, types.MethodType(namespace[name], subject))
+    return subject, state, app
 
 
 class MacLauncherTests(unittest.TestCase):
@@ -125,6 +161,82 @@ class MacLauncherTests(unittest.TestCase):
         state.worker("test", failed)
         self.assertEqual(state.events.get(timeout=2), ("test", False, "generated failure"))
 
+    def test_worker_notifies_after_queuing_success_and_failure(self):
+        for succeeds in (True, False):
+            with self.subTest(succeeds=succeeds):
+                state = self.state()
+                delivered, woke = [], threading.Event()
+                def completed():
+                    delivered.append(state.events.get_nowait())
+                    woke.set()
+                def action():
+                    if not succeeds:
+                        raise LauncherError("generated failure")
+                    return "generated result"
+                state.worker_completed = completed
+                state.worker("test", action)
+                self.assertTrue(woke.wait(2), "A completion must wake the termination run loop")
+                self.assertEqual(delivered, [("test", succeeds, "generated result" if succeeds else "generated failure")])
+
+    def test_worker_completion_targets_termination_and_normal_run_loop_modes(self):
+        subject, _, _ = termination_contract()
+        subject.wake_for_worker()
+        subject.performSelectorOnMainThread_withObject_waitUntilDone_modes_.assert_called_once_with(
+            "poll:", None, False, ["NSModalPanelRunLoopMode", "NSRunLoopCommonModes"])
+
+    def test_menu_quit_uses_application_termination_path(self):
+        subject, _, app = termination_contract()
+        subject.quit_(None)
+        app.terminate_.assert_called_once_with(None)
+
+    def test_idle_quit_waits_for_owned_stop_completion_and_runs_only_once(self):
+        subject, state, app = termination_contract()
+        self.assertEqual(subject.applicationShouldTerminate_(app), 2)
+        self.assertEqual(subject.applicationShouldTerminate_(app), 2)
+        self.assertTrue(subject.quitting)
+        self.assertTrue(subject.busy)
+        state.worker.assert_called_once_with("exit", state.controller.stop)
+        state.controller.stop.assert_not_called()
+        app.replyToApplicationShouldTerminate_.assert_not_called()
+        state.events.put(("exit", True, None))
+        subject.poll_(None)
+        app.replyToApplicationShouldTerminate_.assert_called_once_with(True)
+
+    def test_busy_quit_is_retained_until_foreground_operation_completes(self):
+        for operation in ("start", "stop", "reset", "diagnose", "smoke-start"):
+            for succeeds in (True, False):
+                with self.subTest(operation=operation, succeeds=succeeds):
+                    subject, state, app = termination_contract()
+                    subject.busy, subject.updating = True, True
+                    self.assertEqual(subject.applicationShouldTerminate_(app), 2)
+                    state.worker.assert_not_called()
+                    subject.status.setStringValue_.assert_called_with("quitting_after_operation")
+                    state.events.put(("update", True, {"available": False}))
+                    state.events.put(("background-diagnose", True, {}))
+                    subject.poll_(None)
+                    state.worker.assert_not_called()
+                    state.events.put((operation, succeeds, "generated result"))
+                    subject.poll_(None)
+                    state.worker.assert_called_once_with("exit", state.controller.stop)
+                    self.assertTrue(subject.busy)
+                    self.assertTrue(subject.quitting)
+                    subject.openBrowser_.assert_not_called()
+                    subject.window.orderOut_.assert_not_called()
+                    app.replyToApplicationShouldTerminate_.assert_not_called()
+
+    def test_shutdown_failure_cancels_pending_termination_and_can_be_retried(self):
+        subject, state, app = termination_contract()
+        subject.applicationShouldTerminate_(app)
+        state.events.put(("exit", False, "generated shutdown failure"))
+        subject.poll_(None)
+        self.assertFalse(subject.quitting)
+        self.assertFalse(subject.exit_started)
+        self.assertFalse(subject.busy)
+        subject.status.setStringValue_.assert_called_with("generated shutdown failure")
+        app.replyToApplicationShouldTerminate_.assert_called_once_with(False)
+        self.assertEqual(subject.applicationShouldTerminate_(app), 2)
+        self.assertEqual(state.worker.call_count, 2)
+
     def test_corrupt_config_is_visible_and_does_not_overwrite_it(self):
         self.storage.mkdir()
         self.config.write_text("{broken", encoding="utf-8")
@@ -197,6 +309,17 @@ class MacLauncherTests(unittest.TestCase):
         with patch("sys.stderr", new=io.StringIO()), self.assertRaises(SystemExit) as caught:
             main(["--smoke-launcher"])
         self.assertEqual(caught.exception.code, 2)
+
+    def test_smoke_scenarios_are_forwarded_only_in_explicit_isolated_smoke_mode(self):
+        for scenario in ("idle", "running", "hidden"):
+            with self.subTest(scenario=scenario), patch("sys.stderr", new=io.StringIO()), self.assertRaises(SystemExit) as caught:
+                main(["--smoke-scenario", scenario])
+            self.assertEqual(caught.exception.code, 2)
+            report = self.storage / "gui-report.json"
+            with self.subTest(scenario=scenario), patch("sys.platform", "darwin"), patch("desktop.macos_launcher.run_gui", return_value=0) as gui:
+                self.assertEqual(main(["--smoke-launcher", "--data", str(self.storage), "--config", str(self.config),
+                                       "--report", str(report), "--smoke-scenario", scenario]), 0)
+                self.assertEqual(gui.call_args.kwargs, {"smoke_report": report, "smoke_scenario": scenario})
 
     @unittest.skipIf(sys.platform == "darwin", "Requires a non-macOS host to verify honest unsupported behavior")
     def test_gui_smoke_on_windows_does_not_claim_native_validation(self):

@@ -7,6 +7,7 @@ from pathlib import Path
 import queue
 import stat
 import threading
+import time
 
 from desktop.core import (LauncherConfig, LauncherError, SingleInstanceLock, check_update,
                           download_update, load_config, load_release_config, network_diagnostics,
@@ -58,6 +59,7 @@ _TEXT = {
     "save_password": ("保存新密码", "Save Password"),
     "cancel": ("取消", "Cancel"),
     "working": ("操作进行中，请稍候…", "An operation is in progress. Please wait…"),
+    "quitting_after_operation": ("正在完成当前操作，随后退出…", "Finishing the current operation before quitting…"),
     "address": ("访问地址", "Reader Address"),
     "local": ("本机", "This Mac"),
     "lan_address": ("局域网", "Local Network"),
@@ -109,6 +111,7 @@ class LauncherState:
         self.storage, self.config_path, self.version = Path(storage), Path(config_path), version
         self.controller = controller or ServerController(self.storage / "data", self.storage / "logs" / "server.log")
         self.events = queue.Queue()
+        self.worker_completed = None
         self.configuration_error = None
         try:
             config = load_config(self.config_path)
@@ -161,13 +164,18 @@ class LauncherState:
     def worker(self, kind: str, action) -> None:
         def execute():
             try:
-                self.events.put((kind, True, action()))
+                result = (kind, True, action())
             except Exception as error:
-                self.events.put((kind, False, str(error)))
+                result = (kind, False, str(error))
+            self.events.put(result)
+            completed = self.worker_completed
+            if completed is not None:
+                completed()
         threading.Thread(target=execute, name="mac-launcher-" + kind, daemon=True).start()
 
 
-def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Path | None = None) -> int:
+def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Path | None = None,
+            smoke_scenario: str = 'idle') -> int:
     """Create native controls only in the GUI process, on the AppKit main thread."""
     import AppKit as A
     import Foundation as F
@@ -222,6 +230,7 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
         @objc.python_method
         def build(self):
             self.busy, self.updating, self.quitting = False, False, False
+            self.exit_started = False
             self.folder_controls = []
             screen = A.NSScreen.mainScreen().visibleFrame().size
             width, height = window_size(screen.width, screen.height)
@@ -289,6 +298,10 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
             self.window.center()
             self.window.makeKeyAndOrderFront_(None)
             app.activateIgnoringOtherApps_(True)
+            # NSTerminateLater runs AppKit's modal loop. The normal polling
+            # timer does not run there, so every completion explicitly wakes
+            # the main thread in both the normal and termination modes.
+            state.worker_completed = self.wake_for_worker
             self.timer = F.NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
                 0.15, self, "poll:", None, True)
             F.NSDistributedNotificationCenter.defaultCenter().addObserver_selector_name_object_suspensionBehavior_(
@@ -299,8 +312,13 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
                 self.update_button.setEnabled_(False)
             else:
                 self.update_status.setStringValue_("Native GUI smoke; no update network request.")
+                self.smoke_phase = 'views'
+                self.smoke_result = None
+                self.smoke_start_done = False
+                self.smoke_start_error = None
+                self.smoke_deadline = time.monotonic() + 55
                 self.smoke_timer = F.NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-                    1.5, self, "finishSmoke:", None, False)
+                    0.25, self, "finishSmoke:", None, True)
 
         @objc.python_method
         def label(self, value, parent, size=14, bold=False, color=None, wrap=False):
@@ -538,7 +556,7 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
                 self.status.setStringValue_(str(error))
 
         def openBrowser_(self, sender):
-            if state.controller.running:
+            if not self.quitting and state.controller.running:
                 A.NSWorkspace.sharedWorkspace().openURL_(F.NSURL.URLWithString_(state.controller.config.local_url))
 
         def update_(self, sender):
@@ -623,6 +641,19 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
         def quit_(self, sender):
             app.terminate_(None)
 
+        @objc.python_method
+        def wake_for_worker(self):
+            self.performSelectorOnMainThread_withObject_waitUntilDone_modes_(
+                "poll:", None, False, [A.NSModalPanelRunLoopMode, F.NSRunLoopCommonModes])
+
+        @objc.python_method
+        def begin_exit(self):
+            if self.exit_started:
+                return
+            self.exit_started = True
+            self.status.setStringValue_(tr("stopping"))
+            state.worker("exit", state.controller.stop)
+
         def poll_(self, timer):
             while True:
                 try:
@@ -631,6 +662,8 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
                     break
                 if kind in ("update", "download"):
                     self.updating = False
+                    if self.quitting:
+                        continue
                     self.update_button.setEnabled_(not self.quitting)
                     if kind == "update":
                         state.release = value if success else None
@@ -652,9 +685,19 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
                         app.replyToApplicationShouldTerminate_(True)
                     else:
                         self.quitting = False
+                        self.exit_started = False
+                        self.restore_(None)
                         self.status.setStringValue_(str(value))
                         self.set_busy(False)
+                        self.update_button.setEnabled_(not self.updating)
                         app.replyToApplicationShouldTerminate_(False)
+                    continue
+                if self.quitting:
+                    # A start/reset worker may not have acquired its service
+                    # lock when Quit arrives. Wait for its completion before
+                    # stopping, so it cannot start an orphan after shutdown.
+                    if kind in ("start", "stop", "reset", "diagnose", "smoke-start"):
+                        self.begin_exit()
                     continue
                 if kind == "background-diagnose":
                     # Automatic checks must not unlock controls belonging to
@@ -693,35 +736,78 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
                 self.layout_window()
 
         def finishSmoke_(self, timer):
-            # Exercise the small-window frame path while native views exist.
-            self.window.setContentSize_(A.NSMakeSize(600, 480))
-            self.layout_window()
-            body_height = self.root.bounds().size.height
-            footer = self.start_button.frame()
-            checks = {"window_visible": bool(self.window.isVisible()),
-                      "wordmark_loaded": self.brand.image() is not None,
-                      "status_menu_present": self.status_item.menu() is not None,
-                      "native_buttons": isinstance(self.start_button, A.NSButton),
-                      "port_field": isinstance(self.port, A.NSTextField),
-                      "small_window_footer_visible": footer.origin.y >= 0 and footer.origin.y + footer.size.height <= body_height,
-                      "body_scrolls_independently": self.scroll.documentView() == self.document,
-                      "labels_at_least_12pt": min(self.version.font().pointSize(), self.status.font().pointSize(),
-                                                  self.update_status.font().pointSize()) >= 12,
-                      "service_not_started": not state.controller.running}
-            result = {"status": "passed" if all(checks.values()) else "failed", "checks": checks,
-                      "platform": "macos", "native_event_loop": True,
-                      "isolated_storage": str(state.storage)}
-            smoke_report.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-            # stop: returns control to Python, so a failed native check can
-            # return nonzero instead of NSApplication's normal exit(0).
-            self.timer.invalidate()
-            F.NSDistributedNotificationCenter.defaultCenter().removeObserver_(self)
-            A.NSStatusBar.systemStatusBar().removeStatusItem_(self.status_item)
-            self.window.orderOut_(None)
-            app.stop_(None)
-            wake = A.NSEvent.otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2_(
-                A.NSEventTypeApplicationDefined, A.NSMakePoint(0, 0), 0, 0, 0, None, 0, 0, 0)
-            app.postEvent_atStart_(wake, True)
+            if smoke_report is None or self.smoke_phase == 'terminating':
+                return
+            if self.smoke_phase == 'views':
+                # Exercise actual native controls before using the same
+                # terminate event as Dock Quit. No mock or app.stop() pass.
+                self.window.setContentSize_(A.NSMakeSize(600, 480))
+                self.layout_window()
+                body_height = self.root.bounds().size.height
+                footer = self.start_button.frame()
+                checks = {"window_visible": bool(self.window.isVisible()),
+                          "wordmark_loaded": self.brand.image() is not None,
+                          "status_menu_present": self.status_item.menu() is not None,
+                          "native_buttons": isinstance(self.start_button, A.NSButton),
+                          "port_field": isinstance(self.port, A.NSTextField),
+                          "small_window_footer_visible": footer.origin.y >= 0 and footer.origin.y + footer.size.height <= body_height,
+                          "body_scrolls_independently": self.scroll.documentView() == self.document,
+                          "labels_at_least_12pt": min(self.version.font().pointSize(), self.status.font().pointSize(),
+                                                      self.update_status.font().pointSize()) >= 12,
+                          "service_initially_stopped": not state.controller.running}
+                self.smoke_result = {"status": "running", "checks": checks,
+                                     "platform": "macos", "native_event_loop": True,
+                                     "scenario": smoke_scenario,
+                                     "termination_requested": False,
+                                     "application_will_terminate": False,
+                                     "service_pid": None, "service_port": None,
+                                     "isolated_storage": str(state.storage)}
+                if smoke_scenario != 'idle':
+                    import socket
+                    media = state.storage / 'media'
+                    media.mkdir()
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                        probe.bind(('127.0.0.1', 0))
+                        port = probe.getsockname()[1]
+                    config = LauncherConfig(port=port, lan_enabled=False, library_paths=[str(media)])
+                    self.smoke_result['service_port'] = port
+                    self.smoke_phase = 'starting'
+                    self.set_busy(True)
+                    def start_isolated_service():
+                        try:
+                            return state.start_reader(config)
+                        except Exception as error:
+                            self.smoke_start_error = str(error)
+                            raise
+                        finally:
+                            self.smoke_start_done = True
+                    state.worker('smoke-start', start_isolated_service)
+                    return
+            if self.smoke_phase == 'starting':
+                process = state.controller.process
+                if process is not None:
+                    self.smoke_result['service_pid'] = process.pid
+                smoke_report.write_text(json.dumps(self.smoke_result, ensure_ascii=False, indent=2) + '\n', encoding='utf8')
+                if not self.smoke_start_done and time.monotonic() < self.smoke_deadline:
+                    return
+                self.smoke_result['checks']['service_running_before_quit'] = bool(
+                    self.smoke_start_done and self.smoke_start_error is None and state.controller.running)
+                if self.smoke_start_error:
+                    self.smoke_result['error'] = self.smoke_start_error
+                # The service handshake is complete before this flag; no
+                # browser is opened and no foreground operation remains.
+                if self.smoke_start_done:
+                    self.set_busy(False)
+                if smoke_scenario == 'hidden':
+                    self.window.orderOut_(None)
+                    self.smoke_result['checks']['window_hidden_before_quit'] = not self.window.isVisible()
+                else:
+                    self.smoke_result['checks']['window_visible_before_quit'] = bool(self.window.isVisible())
+            self.smoke_phase = 'terminating'
+            self.smoke_timer.invalidate()
+            self.smoke_result['termination_requested'] = True
+            smoke_report.write_text(json.dumps(self.smoke_result, ensure_ascii=False, indent=2) + '\n', encoding='utf8')
+            app.terminate_(None)
 
         def windowShouldClose_(self, window):
             window.orderOut_(None)
@@ -737,15 +823,15 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
         def applicationShouldTerminate_(self, sender):
             if self.quitting:
                 return A.NSTerminateLater
-            if self.busy:
-                self.restore_(None)
-                self.status.setStringValue_(tr("working"))
-                return A.NSTerminateCancel
+            waiting = self.busy
             self.quitting = True
             self.set_busy(True)
             self.update_button.setEnabled_(False)
-            self.status.setStringValue_(tr("stopping"))
-            state.worker("exit", state.controller.stop)
+            self.restore_(None)
+            if waiting:
+                self.status.setStringValue_(tr("quitting_after_operation"))
+            else:
+                self.begin_exit()
             return A.NSTerminateLater
 
         def applicationWillTerminate_(self, notification):
@@ -754,6 +840,13 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
             A.NSStatusBar.systemStatusBar().removeStatusItem_(self.status_item)
             state.controller.stop()
             lock.release()
+            if smoke_report is not None and self.smoke_result is not None:
+                self.smoke_result['application_will_terminate'] = True
+                self.smoke_result['checks']['service_stopped_on_termination'] = (
+                    state.controller.process is None and not state.controller.running)
+                self.smoke_result['status'] = ('passed' if self.smoke_result['termination_requested']
+                                                and all(self.smoke_result['checks'].values()) else 'failed')
+                smoke_report.write_text(json.dumps(self.smoke_result, ensure_ascii=False, indent=2) + '\n', encoding='utf8')
 
     delegate = GravelleMacDelegate.alloc().init()
     app.setDelegate_(delegate)
@@ -761,6 +854,7 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
         delegate.build()
         app.run()
     finally:
+        state.worker_completed = None
         state.controller.stop()
         lock.release()
     if smoke_report is not None:

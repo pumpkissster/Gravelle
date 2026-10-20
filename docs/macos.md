@@ -14,7 +14,7 @@
 
 DMG 包含 `Gravelle.app` 和 `Applications` 入口。将应用拖到“应用程序”后，从那里打开。ZIP 是同一应用的另一种分发形式，保留应用包的符号链接和文件权限，不是源码压缩包。
 
-启动器配置写真根文件夹、端口和局域网访问，然后启动服务并打开浏览器。文件夹可以添加多个。启动器管理其自身创建的服务进程，不会结束占用同一端口的其他程序。关闭配置窗口后，服务可继续由菜单栏入口管理；退出应用时停止其服务进程。
+启动器配置写真根文件夹、端口和局域网访问，然后启动服务并打开浏览器。文件夹可以添加多个。启动器管理其自身创建的服务进程，不会结束占用同一端口的其他程序。关闭配置窗口后，服务可继续由菜单栏入口管理；Dock 和菜单栏的“退出”都会停止其服务后退出应用。正在启动、停止或诊断时，会完成当前操作后继续退出；停止失败会恢复窗口并显示原因。
 
 账户、阅读记录、缓存等数据保存于当前用户的 `~/Library/Application Support/Gravelle`，独立于 `.app`，应用更新不会覆盖数据。配置文件为该目录下的 `launcher.json`，数据库为 `data/library.sqlite3`，优化副本位于 `data/transcoded`。原始写真图片仍保存在用户选择的文件夹内。
 
@@ -65,6 +65,6 @@ python desktop/build_macos.py --arch arm64 \
 
 选择签名和公证时需预先配置这些 GitHub Actions secrets：`APPLE_CERTIFICATE_P12_BASE64`、`APPLE_CERTIFICATE_PASSWORD`、`APPLE_CODESIGN_IDENTITY`、`APPLE_ID`、`APPLE_TEAM_ID`、`APPLE_APP_SPECIFIC_PASSWORD`。只在签名步骤使用这些值；临时证书以受限权限存储，临时钥匙串及证书在任务结束时清理。不要将任何密码、令牌或 `.p12` 文件提交到源码。
 
-工作流运行冻结服务与图片 worker 的 smoke 检查，验证架构及校验和。原生界面 smoke 若检测到 runner 没有图形会话，会以退出码 77 和 `status: unsupported` 生成报告，明确发出 warning；此时保留开发包供真机测试，不能视为界面验证通过。普通非零退出码仍使构建失败。仍需真实 Mac 上检查 Finder 启动、Retina 清晰度、文件夹选择、菜单栏、外部磁盘访问和局域网连接。自动更新会检查 GitHub Releases 并提供匹配架构的 DMG，暂不静默覆盖正在运行的应用。
+工作流运行冻结服务与图片 worker 的 smoke 检查，验证架构及校验和。原生界面 smoke 分别在空闲、服务运行和窗口隐藏时请求应用退出，检查退出回调、应用结束、所属服务结束及端口释放。若检测到 runner 没有图形会话，会以退出码 77 和 `status: unsupported` 生成报告，明确发出 warning；此时保留开发包供真机测试，不能视为界面验证通过。普通非零退出码仍使构建失败。仍需真实 Mac 上检查 Finder 启动、Retina 清晰度、文件夹选择、菜单栏、外部磁盘访问和局域网连接。自动更新会检查 GitHub Releases 并提供匹配架构的 DMG，暂不静默覆盖正在运行的应用。
 
 构建与分发依据：[GitHub runner 架构表](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)、[PyInstaller macOS 打包及签名选项](https://www.pyinstaller.org/en/stable/usage.html#macos-specific-options)、[PyObjC 支持的平台](https://pyobjc.readthedocs.io/en/latest/supported-platforms.html)、[Apple 公证流程](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution)。
