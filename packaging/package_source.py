@@ -55,7 +55,8 @@ def main():
     archive(args.output_dir / f'Gravelle-Source-{version}.zip', names, 'gravelle-reader/')
     archive(args.output_dir / f'Gravelle-Docker-{version}.zip',
             ['compose.yaml', 'compose.optimization.yaml', '.env.example', 'docs/docker-release.md'])
-    artifacts = sorted(args.output_dir.glob('Gravelle-*.exe')) + sorted(args.output_dir.glob('Gravelle-*.zip'))
+    artifacts = sorted(path for pattern in ('Gravelle-*.exe', 'Gravelle-*.dmg', 'Gravelle-*.zip')
+                       for path in args.output_dir.glob(pattern))
     checksums = '\n'.join(hashlib.sha256(path.read_bytes()).hexdigest() + '  ' + path.name for path in artifacts)
     (args.output_dir / 'SHA256SUMS.txt').write_text(checksums + '\n', encoding='utf-8')
     print(json.dumps({'version': version, 'source_files': len(names), 'assets': [path.name for path in artifacts]}))

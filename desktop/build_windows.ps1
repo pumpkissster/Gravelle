@@ -87,6 +87,8 @@ print('Preparing Gravelle '+version+' for '+repo)
     $licenseCode = @'
 from pathlib import Path
 import importlib.metadata, shutil, sys
+from desktop.pdf_packaging import collect_pdfium_licenses
+from desktop.share_packaging import collect_share_licenses
 target=Path(sys.argv[1])/'licenses'
 target.mkdir(exist_ok=True)
 python_license=Path(sys.base_prefix)/'LICENSE.txt'
@@ -101,6 +103,8 @@ for name in ('Pillow','PyInstaller','numpy','opencv-python-headless'):
                 destination=target/name/relative
                 destination.parent.mkdir(parents=True,exist_ok=True)
                 shutil.copyfile(source,destination)
+collect_pdfium_licenses(target)
+collect_share_licenses(target)
 '@
     & $Python -c $licenseCode $bundleDirectory
     if ($LASTEXITCODE -ne 0) { throw 'Unable to collect license notices.' }

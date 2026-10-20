@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Exercise the actual frozen server using disposable data and random ports.
 
-The test driver requires Pillow for generated screenshot/crop fixtures. CI runs
-it with the build environment's Python; the service itself runs only from the EXE.
+The test driver requires Pillow for generated screenshot/crop fixtures and
+cryptography for independent share-response decryption. CI runs it with the
+build environment's Python; the service itself runs only from the EXE.
 
 Example: python desktop/smoke_windows.py --executable
 dist/windows/portable/Gravelle/GravelleServer.exe --work-root work/windows-smoke
@@ -10,6 +11,7 @@ dist/windows/portable/Gravelle/GravelleServer.exe --work-root work/windows-smoke
 from __future__ import annotations
 
 import argparse
+import base64
 from contextlib import closing
 from datetime import datetime, timezone
 import hashlib
@@ -19,6 +21,7 @@ import json
 import math
 from pathlib import Path
 import random
+import re
 import socket
 import sqlite3
 import struct
@@ -28,6 +31,7 @@ import time
 from urllib.error import HTTPError
 from urllib.request import HTTPCookieProcessor, ProxyHandler, Request, build_opener
 import zlib
+import zipfile
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -118,6 +122,67 @@ def screenshot_and_crop_fixtures() -> tuple[bytes, bytes, bytes]:
             encoded(crop, "JPEG", quality=57))
 
 
+def sample_pdf() -> bytes:
+    """Three generated pages; no personal file, network content, or PDF parser."""
+    from PIL import Image, ImageDraw
+    pages = []
+    try:
+        for index, color in enumerate(((234, 80, 152), (80, 120, 160), (160, 180, 90))):
+            image = Image.new('RGB', (240, 360), color)
+            draw = ImageDraw.Draw(image)
+            draw.rectangle((20, 30, 220, 330), outline='white', width=8)
+            draw.text((45, 130), f'Generated PDF page {index + 1}', fill='black')
+            pages.append(image)
+        output = BytesIO()
+        pages[0].save(output, format='PDF', resolution=72, save_all=True, append_images=pages[1:])
+        return output.getvalue()
+    finally:
+        for image in pages:
+            image.close()
+
+
+def sample_epub() -> bytes:
+    """Three pictures across two spine documents, including an SVG wrapper."""
+    output = BytesIO()
+    with zipfile.ZipFile(output, 'w', zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr('mimetype', 'application/epub+zip', compress_type=zipfile.ZIP_STORED)
+        archive.writestr('META-INF/container.xml',
+                        '<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container">'
+                        '<rootfiles><rootfile full-path="OPS/book.opf" '
+                        'media-type="application/oebps-package+xml"/></rootfiles></container>')
+        archive.writestr('OPS/book.opf',
+                        '<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id">'
+                        '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">'
+                        '<dc:identifier id="id">generated-frozen-epub-smoke</dc:identifier>'
+                        '<dc:title>Generated EPUB reader fixture</dc:title>'
+                        '<dc:creator>Gravelle smoke fixture</dc:creator><dc:language>en</dc:language>'
+                        '</metadata><manifest>'
+                        '<item id="first" href="first.xhtml" media-type="application/xhtml+xml"/>'
+                        '<item id="second" href="second.xhtml" media-type="application/xhtml+xml"/>'
+                        '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>'
+                        '<item id="cover" href="cover.png" media-type="image/png" properties="cover-image"/>'
+                        '<item id="green" href="green.png" media-type="image/png"/>'
+                        '<item id="blue" href="blue.png" media-type="image/png"/>'
+                        '</manifest><spine><itemref idref="second"/><itemref idref="first"/></spine></package>')
+        archive.writestr('OPS/nav.xhtml',
+                        '<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">'
+                        '<body><nav epub:type="toc"><ol><li><a href="first.xhtml#start">First chapter</a></li>'
+                        '<li><a href="second.xhtml#start">Second chapter</a></li></ol></nav></body></html>')
+        archive.writestr('OPS/cover.png', sample_png((214, 73, 139), (200, 300)))
+        archive.writestr('OPS/green.png', sample_png((20, 160, 70), (180, 270)))
+        archive.writestr('OPS/blue.png', sample_png((30, 60, 210), (220, 330)))
+        for filename, title, target in (('first.xhtml', 'First chapter', 'second.xhtml'),
+                                        ('second.xhtml', 'Second chapter', 'first.xhtml')):
+            archive.writestr('OPS/' + filename,
+                            '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>' + title + '</title>'
+                            '<script>smokeScriptMustBeRemoved()</script></head><body><h1 id="start">' + title + '</h1>'
+                            '<p>Generated local EPUB reading text.</p>' +
+                            ('<svg xmlns="http://www.w3.org/2000/svg"><image xlink:href="blue.png"/></svg>'
+                             if filename == 'second.xhtml' else '<img src="cover.png"/><img src="green.png"/>') +
+                            '<a href="' + target + '#start">Next chapter</a></body></html>')
+    return output.getvalue()
+
+
 def random_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as candidate:
         candidate.bind(("127.0.0.1", 0))
@@ -129,22 +194,24 @@ class Client:
         self.url = url.rstrip("/")
         self.cookies = http.cookiejar.CookieJar()
         self.opener = build_opener(ProxyHandler({}), HTTPCookieProcessor(self.cookies))
+        self.last_headers = {}
 
-    def request(self, path: str, body=None, *, image=None):
-        headers = {"Origin": self.url}
+    def request(self, path: str, body=None, *, image=None, headers=None):
+        request_headers = {"Origin": self.url, **(headers or {})}
         payload = None
         if image is not None:
             payload = image
-            headers["Content-Type"] = "image/jpeg" if image.startswith(b"\xff\xd8") else "image/png"
+            request_headers["Content-Type"] = "image/jpeg" if image.startswith(b"\xff\xd8") else "image/png"
         elif body is not None:
             payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
-            headers["Content-Type"] = "application/json"
-        request = Request(self.url + path, data=payload, headers=headers)
+            request_headers["Content-Type"] = "application/json"
+        request = Request(self.url + path, data=payload, headers=request_headers)
         try:
             response = self.opener.open(request, timeout=65 if path == "/api/image-search/query" else 5)
         except HTTPError as error:
             response = error
         with response:
+            self.last_headers = response.headers
             raw = response.read(8 * 1024 * 1024)
             content_type = response.headers.get_content_type()
             value = json.loads(raw) if content_type == "application/json" else raw
@@ -154,6 +221,223 @@ class Client:
 def require(condition, message):
     if not condition:
         raise AssertionError(message)
+
+
+def sharing_smoke(client: Client, url: str, book_id: str, expected_image: bytes) -> dict:
+    """Decrypt a real service response using only the driver's external library.
+
+    This intentionally does not import sharing.py or share_crypto.py. The frozen
+    service must load its own native crypto and the driver checks its wire data.
+    Credentials, capability tokens, and keys must never enter the smoke report.
+    """
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    status, created, _ = client.request('/api/shares', {
+        'book_id': book_id, 'mode': 'time', 'days': 3})
+    require(status == 201 and isinstance(created.get('password'), str)
+            and len(created['password']) >= 8, 'Frozen share creation did not return a generated access password')
+    share = created.get('share', {})
+    token, share_id = share.get('token'), share.get('id')
+    require(isinstance(token, str) and re.fullmatch(r'[A-Za-z0-9_-]{43}', token)
+            and isinstance(share_id, str) and re.fullmatch(r'[a-f0-9]{32}', share_id),
+            'Frozen share creation did not return usable share identifiers')
+    require(share.get('mode') == 'time' and 'max_visits' not in share
+            and isinstance(share.get('created_at'), (int, float))
+            and isinstance(share.get('expires_at'), (int, float))
+            and abs(share['expires_at'] - share['created_at'] - 3 * 86400) < 1,
+            'Frozen share did not retain the three-day deadline')
+    require(share.get('visits') == 0 and share.get('password_available') is True,
+            'Frozen new share did not start at zero visits with a recoverable password')
+    private_values = [created['password']]
+
+    def listed_share(identifier, expected_visits):
+        status, payload, _ = client.request('/api/shares')
+        require(status == 200 and isinstance(payload.get('shares'), list),
+                'Frozen administrator could not read share visit statistics')
+        serialized = json.dumps(payload, ensure_ascii=False)
+        require(not any(value in serialized for value in private_values),
+                'Frozen share listing disclosed an access password or visitor key')
+        forbidden = {'password', 'password_hash', 'password_encrypted', 'encryption_key', 'session', 'session_hash', 'key', 'master_key'}
+        for row in payload['shares']:
+            require(not forbidden.intersection(row),
+                    'Frozen share listing disclosed private credential fields')
+        row = next((row for row in payload['shares'] if row.get('id') == identifier), None)
+        require(row is not None and type(row.get('visits')) is int and row['visits'] == expected_visits,
+                'Frozen share visit statistics counted an unsuccessful or reused session incorrectly')
+        require(row.get('password_available') is True,
+                'Frozen share password could not be made available to its creator')
+        return row
+
+    def reveal(identifier, password):
+        status, payload, _ = client.request('/api/shares/' + identifier + '/password', {})
+        require(status == 200 and payload == {'password': password},
+                'Frozen share creator could not reveal the saved access password')
+        require('no-store' in client.last_headers.get('Cache-Control', '').lower(),
+                'Frozen revealed share passwords must not be cached')
+
+    listed_share(share_id, 0)
+    reveal(share_id, created['password'])
+    listed_share(share_id, 0)
+    require(client.request('/api/shares/' + share_id + '/delete', {})[0] == 409,
+            'Frozen share allowed deletion of an active share record')
+    base = '/api/share/' + token
+    page_route = base + '/pages/0'
+    guest = Client(url)
+    require(guest.request(page_route)[0] == 401
+            and guest.request(base + '/manifest')[0] == 401,
+            'Frozen share exposed a page or its manifest before password verification')
+    status, shell, mime = guest.request('/share/' + token)
+    require(status == 200 and mime == 'text/html' and b'/share-reader.js' in shell
+            and b'/app.js' not in shell and guest.last_headers.get('Cache-Control') == 'no-store',
+            'Frozen anonymous share shell is missing or exposes the signed-in application')
+    for route, expected_mime, marker in (
+            ('/share-reader.js', 'text/javascript', b'GravelleShareReader'),
+            ('/share-reader.css', 'text/css', b'.share-reader'),
+            ('/share-crypto.js', 'text/javascript', b'GravelleShareCrypto'),
+            ('/vendor/noble-gcm.js', 'text/javascript', b'GravelleNobleGCM'),
+            ('/vendor/noble-ciphers-LICENSE.txt', 'text/plain', b'Paul Miller')):
+        status, resource, mime = guest.request(route)
+        require(status == 200 and mime == expected_mime and marker in resource,
+                'Frozen anonymous share is missing a local browser component or notice: ' + route)
+    require(guest.request(base + '/unlock', {'password': 'wrong-disposable-password'})[0] == 403,
+            'Frozen share accepted an incorrect access password')
+    listed_share(share_id, 0)
+    status, visitor, _ = guest.request(base + '/unlock', {'password': created['password']})
+    require(status == 200 and isinstance(visitor.get('key'), str)
+            and re.fullmatch(r'[A-Za-z0-9_-]{43}', visitor['key'])
+            and visitor.get('manifest', {}).get('page_count', 0) > 0,
+            'Frozen guest could not unlock the single shared work')
+    cookie = guest.last_headers.get('Set-Cookie', '')
+    require('HttpOnly' in cookie and 'SameSite=Strict' in cookie and 'Path=' + base in cookie,
+            'Frozen guest session cookie did not retain its isolated share scope')
+    private_values.append(visitor['key'])
+    listed_share(share_id, 1)
+    require(guest.request('/api/library')[0] == 401 and guest.request('/api/shares')[0] == 401
+            and guest.request(f'/api/books/{book_id}/pages/0')[0] == 401
+            and guest.request('/api/shares/' + share_id + '/password', {})[0] == 401,
+            'Frozen guest cookie incorrectly authenticated a normal account route')
+    status, reused, _ = guest.request(base + '/unlock', {'password': created['password']})
+    require(status == 200 and reused.get('key') == visitor['key'],
+            'Frozen same-cookie unlock did not reuse its existing valid visitor session')
+    listed_share(share_id, 1)
+    status, packet, mime = guest.request(page_route)
+    require(status == 200 and mime == 'application/octet-stream' and isinstance(packet, bytes)
+            and packet.startswith(b'GSH1') and len(packet) == len(expected_image) + 33
+            and packet[16] == 2 and expected_image not in packet,
+            'Frozen share did not return the authenticated PNG ciphertext envelope')
+    require('no-store' in guest.last_headers.get('Cache-Control', '').lower().split(', ')
+            and not guest.last_headers.get('ETag'),
+            'Frozen shared images must not be cached or bypass authorization through an ETag')
+    key = base64.urlsafe_b64decode(visitor['key'] + '=')
+    plaintext = AESGCM(key).decrypt(packet[4:16], packet[17:], packet[:17] +
+                                   ('gravelle-share-v1:' + token + ':0').encode('utf-8'))
+    require(plaintext == expected_image,
+            'Frozen AES-GCM response did not decrypt to the original generated page bytes')
+    status, second_packet, _ = guest.request(page_route)
+    require(status == 200 and second_packet != packet and second_packet[4:16] != packet[4:16],
+            'Frozen share reused the same nonce/ciphertext for a later image response')
+    require(guest.request(base + '/manifest')[0] == 200,
+            'Frozen share visitor could not refresh its existing manifest')
+    listed_share(share_id, 1)
+    fresh_guest = Client(url)
+    require(fresh_guest.request(page_route)[0] == 401
+            and fresh_guest.request(base + '/unlock', {'password': created['password']})[0] == 200,
+            'Frozen time share did not isolate image access or allow a new authorized visitor')
+    listed_share(share_id, 2)
+    require(guest.request(base + '/manifest')[0] == 200,
+            'Frozen time share discarded an existing valid session')
+    # Keep the old cookie independently: clearing a browser cookie alone is not
+    # enough, because the service must also invalidate the old server session.
+    saved_cookie = cookie.split(';', 1)[0]
+    status, logged_out, _ = guest.request(base + '/logout', {})
+    expired_cookie = guest.last_headers.get('Set-Cookie', '')
+    require(status == 200 and logged_out == {'logged_out': True}
+            and 'Max-Age=0' in expired_cookie and 'Path=' + base in expired_cookie
+            and 'HttpOnly' in expired_cookie and 'SameSite=Strict' in expired_cookie
+            and 'no-store' in guest.last_headers.get('Cache-Control', '').lower(),
+            'Frozen guest logout did not clear its isolated session cookie')
+    require(guest.request(base + '/manifest')[0] == 401
+            and guest.request(page_route)[0] == 401,
+            'Frozen logged-out guest still returned to its reader without a password')
+    replay = Client(url)
+    require(replay.request(base + '/manifest', headers={'Cookie': saved_cookie})[0] == 401
+            and replay.request(page_route, headers={'Cookie': saved_cookie})[0] == 401,
+            'Frozen logout left the old server session usable through its saved cookie')
+    require(guest.request(base + '/logout', {})[0] == 200,
+            'Frozen guest logout was not idempotent')
+    listed_share(share_id, 2)
+    require(fresh_guest.request(base + '/manifest')[0] == 200
+            and fresh_guest.request(page_route)[0] == 200,
+            'Frozen guest logout interrupted another visitor session')
+    require(guest.request(base + '/unlock', {'password': 'wrong-disposable-password'})[0] == 403
+            and guest.request(base + '/manifest')[0] == 401,
+            'Frozen logged-out guest recovered access with an incorrect password')
+    listed_share(share_id, 2)
+    status, returned, _ = guest.request(base + '/unlock', {'password': created['password']})
+    require(status == 200 and isinstance(returned.get('key'), str)
+            and returned['key'] != visitor['key']
+            and guest.request(base + '/manifest')[0] == 200 and guest.request(page_route)[0] == 200,
+            'Frozen guest could not establish a fresh session after logout')
+    private_values.append(returned['key'])
+    listed_share(share_id, 3)
+    require(fresh_guest.request(base + '/manifest')[0] == 200,
+            'Frozen guest return interrupted another visitor session')
+    require(client.request('/api/shares/' + share_id + '/close', {})[0] == 200,
+            'Frozen administrator could not close the share')
+    require(guest.request(page_route, headers={'If-None-Match': '*'})[0] == 410
+            and guest.request(base + '/manifest')[0] == 410,
+            'Frozen closed share still allowed an old guest to read images or the manifest')
+    reveal(share_id, created['password'])
+    listed_share(share_id, 3)
+
+    # Sharing the same work again creates a separate capability. Closing or
+    # deleting the old record must neither revive it nor close the new one.
+    status, recreated, _ = client.request('/api/shares', {
+        'book_id': book_id, 'mode': 'time', 'days': 3})
+    renewed = recreated.get('share', {})
+    new_token, new_id = renewed.get('token'), renewed.get('id')
+    require(status == 201 and isinstance(new_token, str)
+            and re.fullmatch(r'[A-Za-z0-9_-]{43}', new_token) and new_token != token
+            and isinstance(new_id, str) and re.fullmatch(r'[a-f0-9]{32}', new_id) and new_id != share_id
+            and isinstance(recreated.get('password'), str) and len(recreated['password']) >= 8
+            and recreated['password'] != created['password'],
+            'Frozen share recreation reused an old link, identifier, or generated password')
+    private_values.append(recreated['password'])
+    require(renewed.get('visits') == 0 and renewed.get('password_available') is True,
+            'Frozen recreated share inherited visits or lost its separately saved password')
+    listed_share(new_id, 0)
+    reveal(new_id, recreated['password'])
+    new_base = '/api/share/' + new_token
+    renewed_guest = Client(url)
+    status, new_visitor, _ = renewed_guest.request(new_base + '/unlock', {'password': recreated['password']})
+    require(status == 200 and isinstance(new_visitor.get('key'), str)
+            and new_visitor['key'] != visitor['key'],
+            'Frozen recreated share could not issue an independent visitor session')
+    private_values.append(new_visitor['key'])
+    listed_share(new_id, 1)
+    listed_share(share_id, 3)
+    require(guest.request(page_route)[0] == 410,
+            'Frozen share recreation incorrectly restored the old closed link')
+    require(client.request('/api/shares/' + share_id + '/delete', {})[0] == 200,
+            'Frozen administrator could not delete the closed share record')
+    require(guest.request(page_route)[0] == 404 and guest.request(base)[0] == 404,
+            'Frozen deleted share record still resolved through its old link')
+    require(client.request('/api/shares/' + share_id + '/password', {})[0] == 404,
+            'Frozen deleted share still exposed its stored access password')
+    require(renewed_guest.request(new_base + '/manifest')[0] == 200
+            and renewed_guest.request(new_base + '/pages/0')[0] == 200,
+            'Frozen old-record deletion interrupted the separately recreated share')
+    listed_share(new_id, 1)
+    reveal(new_id, recreated['password'])
+    return {'ciphertext_bytes': len(packet), 'plaintext_bytes': len(plaintext),
+            'cipher': 'AES-256-GCM', 'authenticated_header': True,
+            'valid_days': 3, 'copied_url_requires_session': True, 'closed_images_rejected': True,
+            'reshare_uses_new_capability': True, 'active_delete_rejected': True,
+            'closed_record_deleted': True, 'new_share_remains_readable': True,
+            'creator_password_reveal': True, 'listing_excludes_credentials': True,
+            'visits_count_new_sessions_only': True, 'independent_visit_counts': True,
+            'logout_revokes_server_session': True, 'logout_preserves_other_visitors': True,
+            'logout_requires_password_again': True, 'logout_preserves_visit_statistics': True}
 
 
 def run_smoke(executable: Path, work_root: Path) -> dict:
@@ -235,6 +519,25 @@ def run_smoke(executable: Path, work_root: Path) -> dict:
             require(status == 200 and b"GravellePageRouter" in helper,
                     "Frozen bundle is missing the page-router frontend module")
             passed("packaged_page_router_module")
+            status, helper, mime = client.request("/cache-management-ui.js")
+            require(status == 200 and mime == "text/javascript" and b"GravelleCacheManagementUI" in helper
+                    and b'/cache-management-ui.js' in index,
+                    "Frozen bundle is missing the cache-management frontend module/reference")
+            passed("packaged_cache_management_module")
+            status, cache, _ = client.request("/api/cache")
+            kinds = {item["kind"] for item in cache.get("categories", [])}
+            require(status == 200 and cache.get("settings", {}).get("cover_limit_mb") == 512
+                    and {"covers", "library_covers", "optimized"} <= kinds,
+                    "Frozen administrator cache inventory/default budget failed")
+            require(Client(url).request("/api/cache")[0] == 401, "Cache inventory must require a login")
+            status, changed_cache, _ = client.request("/api/cache/settings", {
+                "expected_revision": cache["settings"]["revision"], "cover_limit_mb": 64})
+            require(status == 200 and changed_cache["settings"]["cover_limit_mb"] == 64,
+                    "Frozen cover cache budget did not persist")
+            status, _, _ = client.request("/api/cache/settings", {
+                "expected_revision": changed_cache["settings"]["revision"], "cover_limit_mb": 512})
+            require(status == 200, "Disposable cache budget restoration failed")
+            passed("frozen_cache_inventory_settings_and_login")
 
             status, result, _ = client.request("/api/libraries", {
                 "name": "冻结包几何样例", "paths": [str(media)], "media_type": "photo",
@@ -280,6 +583,78 @@ def run_smoke(executable: Path, work_root: Path) -> dict:
             status, page, _ = client.request(f"/api/books/{second_book['id']}/pages/0")
             require(status == 200 and page == second_image, "Frozen reader served the wrong root's page")
             passed("second_root_scan_and_original_page")
+
+            # Exercise only the two existing generated books. One-book libraries
+            # may regenerate the same visual group but must advance its version.
+            def wait_library_cover(target_id):
+                deadline = time.monotonic() + 20
+                while time.monotonic() < deadline:
+                    status, libraries, _ = client.request("/api/libraries")
+                    item = next((item for item in libraries.get("libraries", []) if item["id"] == target_id), None)
+                    cover_state = item.get("cover", {}) if item else {}
+                    require(status == 200 and not cover_state.get("error"), "Frozen montage task failed")
+                    if cover_state.get("count") == 1 and cover_state.get("pending") is False:
+                        return cover_state
+                    time.sleep(.1)
+                raise AssertionError("Frozen montage background task did not become ready")
+
+            montage_state = wait_library_cover(library_id)
+            cover_route = f"/api/libraries/{library_id}/cover"
+            require(Client(url).request(cover_route)[0] == 401, "Library montage must require authentication")
+            status, montage, mime = client.request(cover_route)
+            require(status == 200 and mime == "image/jpeg" and montage.startswith(b"\xff\xd8"),
+                    "Frozen library montage did not serve a JPEG")
+            from PIL import Image
+            with Image.open(BytesIO(montage)) as decoded:
+                require(decoded.size == (960, 480), "Frozen montage cache has an unexpected size")
+            montage_etag = client.last_headers.get("ETag")
+            require(montage_etag and client.request(cover_route, headers={"If-None-Match": montage_etag})[0] == 304,
+                    "Frozen montage conditional request did not return 304")
+            status, shuffled, _ = client.request(cover_route + "/shuffle", {})
+            require(status == 200 and shuffled.get("version") != montage_state["version"],
+                    "Frozen administrator cover shuffle did not queue a new generation")
+            require(wait_library_cover(library_id)["version"] != montage_state["version"],
+                    "Frozen montage shuffle did not publish its new generation")
+            passed("frozen_library_montage_cache_shuffle_and_304", selected=1, width=960, height=480)
+
+            child_credentials = {"username": "frozen-smoke-child", "password": "disposable-child-smoke-only"}
+            status, created_child, _ = client.request("/api/users", {
+                **child_credentials, "enabled": True, "library_ids": [library_id]})
+            require(status == 201 and created_child.get("user", {}).get("id"), "Disposable child creation failed")
+            child_id = created_child["user"]["id"]
+            child_client = Client(url)
+            require(child_client.request("/api/login", child_credentials)[0] == 200, "Disposable child login failed")
+            require(child_client.request(cover_route)[0] == 200, "Authorized child could not view library montage")
+            child_etag = child_client.last_headers.get("ETag")
+            require(child_client.request(cover_route + "/shuffle", {})[0] == 403,
+                    "Child must not shuffle shared library covers")
+            require(child_client.request("/api/cache")[0] == 403, "Child must not view administrator cache paths")
+            require(child_client.request("/api/my-libraries", {"visible_library_ids": []})[0] == 200,
+                    "Disposable child could not hide its granted library")
+            require(child_client.request(cover_route, headers={"If-None-Match": child_etag})[0] == 404,
+                    "Hidden library montage must not return cached data or 304")
+            require(child_client.request("/api/my-libraries", {"visible_library_ids": [library_id]})[0] == 200
+                    and child_client.request(cover_route)[0] == 200,
+                    "Disposable child library visibility restoration failed")
+            require(client.request(f"/api/users/{child_id}", {"library_ids": []})[0] == 200,
+                    "Disposable child grant revocation failed")
+            require(child_client.request(cover_route, headers={"If-None-Match": child_etag})[0] in (401, 404),
+                    "Revoked library montage must not return cached data or 304")
+            require(child_client.request("/api/login", child_credentials)[0] == 200
+                    and child_client.request(cover_route, headers={"If-None-Match": child_etag})[0] == 404,
+                    "Relogged child must not regain revoked montage access")
+            passed("frozen_montage_child_hidden_revoked_and_admin_boundaries")
+
+            require(client.request("/api/cache/clear", {"kind": "covers", "confirm": False})[0] == 400,
+                    "Cache removal must require explicit confirmation")
+            status, cleared_cache, _ = client.request("/api/cache/clear", {"kind": "covers", "confirm": True})
+            require(status == 200 and cleared_cache.get("cleared", {}).get("kind") == "covers"
+                    and cleared_cache["cleared"].get("files", 0) >= 1,
+                    "Frozen disposable page-cover cleanup did not remove generated thumbnails")
+            require(client.request(f"/api/books/{book['id']}/cover")[0] == 200
+                    and source_image.read_bytes() == image and second_source.read_bytes() == second_image,
+                    "Frozen page-cover cleanup could not regenerate safely")
+            passed("frozen_cover_cache_confirmation_clear_and_regeneration")
 
             model_ids = []
             for name in ("冻结演示模特甲", "冻结演示模特乙"):
@@ -362,6 +737,30 @@ def run_smoke(executable: Path, work_root: Path) -> dict:
                     "Frozen transcoding changed source files")
             passed("frozen_isolated_transcode_worker", matched=1, outputs=record["output_count"],
                    actual_bytes=record["actual_bytes"])
+            details_route = f"/api/transcoding/books/{book['id']}/details"
+            status, details, _ = client.request(details_route + "?page=1&page_size=1")
+            require(status == 200 and details.get("pagination") == {"page": 1, "page_size": 1, "total": 2, "pages": 2},
+                    "Frozen optimization details pagination failed")
+            active_page = details["pages"][0]
+            require(details["book"]["pending_count"] == 0 and details["book"]["completed_at"] > 0
+                    and details["target_parameters"]["quality"] == rules["quality"]
+                    and details["target_parameters"]["rule_revision"] == details["target_rule_revision"]
+                    and len(details["active_profiles"]) == 1
+                    and details["active_profiles"][0]["parameters"]["quality"] == rules["quality"]
+                    and active_page["active_parameters"]["quality"] == rules["quality"]
+                    and active_page["active_created_at"] > 0 and active_page["output_created_at"] > 0
+                    and active_page["original_path"] == str(source_image)
+                    and active_page["active_path"].startswith(str(data / "transcoded"))
+                    and active_page["active_bytes"] == len(optimized),
+                    "Frozen completed-output parameters, dates or per-image paths are missing")
+            status, unmatched_details, _ = client.request(details_route + "?page=2&page_size=1")
+            require(status == 200 and unmatched_details["pages"][0]["status"] == "unmatched"
+                    and unmatched_details["pages"][0]["original_path"] == str(tiny_source),
+                    "Frozen optimization details missed the unmatched original page")
+            require(child_client.request(details_route)[0] == 403,
+                    "Child must not read administrator optimization paths")
+            passed("frozen_completed_optimization_details_parameters_dates_and_paths", total_pages=2,
+                   quality=rules["quality"], target_rule_revision=details["target_rule_revision"])
             status, snapshot, _ = client.request("/api/transcoding/actions", {
                 "ids": [second_book["id"]], "action": "original"})
             require(status == 200 and any(item["id"] == second_book["id"] and item["status"] == "original"
@@ -416,6 +815,15 @@ def run_smoke(executable: Path, work_root: Path) -> dict:
                 time.sleep(.1)
             require(summary.get("indexed") == summary.get("total") and summary.get("total", 0) >= 3,
                     f"Frozen image-search index worker failed: {search_status.get('error')}")
+            for failure_page in (1, 2):
+                status, failures, _ = client.request(f"/api/image-search/failures?page={failure_page}&page_size=1")
+                require(status == 200 and failures == {"items": [], "total": 0, "page": failure_page, "page_size": 1},
+                        "Frozen empty index-failure pagination was not readable")
+            require(client.request("/api/image-search/failures?page=0")[0] == 400,
+                    "Frozen index failure pagination must reject page zero")
+            require(child_client.request("/api/image-search/failures")[0] == 403,
+                    "Child must not read shared index failure records")
+            passed("frozen_empty_index_failure_pagination_and_admin_boundary")
             status, matches, _ = client.request("/api/image-search/query", image=image)
             match = next((item for item in matches.get("results", [])
                           if item["book"]["id"] == book["id"] and item["page"] == 0), None)
@@ -449,6 +857,154 @@ def run_smoke(executable: Path, work_root: Path) -> dict:
                         and hashlib.sha256(detailed_source.read_bytes()).hexdigest() == detailed_digest,
                         "Screenshot/crop search modified an original source file")
                 passed(name, match_page=results[0]["page"], query_bytes=len(query), **details)
+
+            # Keep PDFs separate until the existing exact-count photo/search
+            # checks finish. The frozen executable alone must render these pages;
+            # the smoke driver's Pillow is used only to generate this fixture.
+            pdf_folder = second_media / 'PDF 测试'
+            pdf_folder.mkdir()
+            pdf_source = pdf_folder / '分页样例.pdf'
+            pdf_bytes = sample_pdf()
+            pdf_source.write_bytes(pdf_bytes)
+            pdf_digest = hashlib.sha256(pdf_bytes).hexdigest()
+            status, created, _ = client.request('/api/libraries', {
+                'name': '冻结包 PDF 样例', 'paths': [str(pdf_folder)], 'media_type': 'photo'})
+            require(status == 201 and created.get('library', {}).get('id'), 'Frozen PDF library creation failed')
+            pdf_library_id = created['library']['id']
+            deadline = time.monotonic() + 35
+            while time.monotonic() < deadline:
+                status, pdf_listing, _ = client.request('/api/library?library_id=' + pdf_library_id)
+                if status == 200 and not pdf_listing.get('scanning'):
+                    break
+                time.sleep(.1)
+            require(status == 200 and not pdf_listing.get('scanning') and len(pdf_listing.get('books', [])) == 1,
+                    'Frozen scanner did not catalogue the disposable PDF')
+            pdf_book = pdf_listing['books'][0]
+            require(pdf_book.get('format') == 'pdf' and pdf_book.get('page_count') == 3,
+                    'Frozen isolated PDF probe did not report its three pages')
+            status, pdf_detail, _ = client.request(f"/api/books/{pdf_book['id']}")
+            require(status == 200 and len(pdf_detail.get('page_sizes', [])) == 3
+                    and len(pdf_detail.get('page_revision', '')) == 24,
+                    'Frozen PDF detail is missing page sizes or its source revision')
+            pdf_page_route = f"/api/books/{pdf_book['id']}/pages/0?width=800&v={pdf_detail['page_revision']}"
+            status, pdf_page, mime = client.request(pdf_page_route)
+            require(status == 200 and mime == 'image/jpeg' and pdf_page.startswith(b'\xff\xd8'),
+                    'Frozen PDF worker did not render a reading JPEG')
+            with Image.open(BytesIO(pdf_page)) as decoded:
+                require(decoded.width == 800 and decoded.height == 1200,
+                        'Frozen PDF worker produced the wrong page dimensions')
+            pdf_etag = client.last_headers.get('ETag')
+            require(pdf_etag and client.request(pdf_page_route, headers={'If-None-Match': pdf_etag})[0] == 304,
+                    'Frozen PDF conditional page request did not return 304')
+            require(Client(url).request(pdf_page_route)[0] == 401
+                    and child_client.request(pdf_page_route, headers={'If-None-Match': pdf_etag})[0] == 404,
+                    'Frozen PDF page cache bypassed login or library access checks')
+            status, pdf_cover, mime = client.request(f"/api/books/{pdf_book['id']}/cover")
+            require(status == 200 and mime == 'image/jpeg' and pdf_cover.startswith(b'\xff\xd8'),
+                    'Frozen PDF first-page cover generation failed')
+            require(client.request(f"/api/books/{pdf_book['id']}/progress", {'page': 1, 'completed': False})[0] == 200,
+                    'Frozen PDF reading progress could not be saved')
+            require(client.request(f"/api/books/{pdf_book['id']}")[1].get('progress', {}).get('page') == 1,
+                    'Frozen PDF reading progress did not persist')
+            status, pdf_cache, _ = client.request('/api/cache')
+            category = next((item for item in pdf_cache.get('categories', []) if item.get('kind') == 'pdf'), {})
+            require(status == 200 and category.get('files', 0) >= 1 and category.get('bytes', 0) > 0,
+                    'Frozen PDF rendered-page cache is missing from cache management')
+            require(client.request('/api/cache/clear', {'kind': 'pdf', 'confirm': False})[0] == 400,
+                    'Frozen PDF cache removal did not require confirmation')
+            require(client.request('/api/cache/clear', {'kind': 'pdf', 'confirm': True})[0] == 200
+                    and client.request(pdf_page_route)[0] == 200,
+                    'Frozen PDF page could not regenerate after cache removal')
+            require(hashlib.sha256(pdf_source.read_bytes()).hexdigest() == pdf_digest,
+                    'PDF scanning, reading, or cache removal changed the source PDF')
+            with closing(sqlite3.connect(data / 'library.sqlite3')) as connection:
+                require(connection.execute('SELECT COUNT(*) FROM tc_pages WHERE book_id=?', (pdf_book['id'],)).fetchone()[0] == 0
+                        and connection.execute('SELECT COUNT(*) FROM is_pages WHERE book_id=?', (pdf_book['id'],)).fetchone()[0] == 0,
+                        'PDF pages were incorrectly queued for image optimization or image search')
+            passed('frozen_pdf_probe_render_cover_progress_and_cache', pages=3, width=800, height=1200,
+                   rendered_bytes=len(pdf_page), source_unmodified=True)
+
+            # Append an independent EPUB library after exact-count image/search
+            # checks. The driver creates data, while only the frozen application
+            # parses the package, sanitizes text and authorizes resource reads.
+            epub_folder = second_media / 'EPUB 测试'
+            epub_folder.mkdir()
+            epub_source = epub_folder / '图片样例.epub'
+            epub_bytes = sample_epub()
+            epub_source.write_bytes(epub_bytes)
+            epub_digest = hashlib.sha256(epub_bytes).hexdigest()
+            for route, mime_expected, marker in (('/epub-reader.js', 'text/javascript', b'GravelleEpubReader'),
+                                                 ('/epub-reader.css', 'text/css', b'.epub-reader')):
+                status, helper, mime = client.request(route)
+                require(status == 200 and mime == mime_expected and marker in helper
+                        and route.encode() in index,
+                        'Frozen bundle is missing an EPUB browser resource: ' + route)
+            status, created, _ = client.request('/api/libraries', {
+                'name': '冻结包 EPUB 样例', 'paths': [str(epub_folder)], 'media_type': 'photo'})
+            require(status == 201 and created.get('library', {}).get('id'), 'Frozen EPUB library creation failed')
+            epub_library_id = created['library']['id']
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                status, epub_listing, _ = client.request('/api/library?library_id=' + epub_library_id)
+                if status == 200 and not epub_listing.get('scanning'):
+                    break
+                time.sleep(.1)
+            require(status == 200 and not epub_listing.get('scanning') and len(epub_listing.get('books', [])) == 1,
+                    'Frozen scanner did not catalogue the disposable EPUB')
+            epub_book = epub_listing['books'][0]
+            require(epub_book.get('format') == 'epub' and epub_book.get('page_count') == 3,
+                    'Frozen EPUB scanner did not report its three picture pages')
+            epub_base = f"/api/books/{epub_book['id']}"
+            status, epub_detail, _ = client.request(epub_base)
+            require(status == 200 and epub_detail.get('reader_kind') == 'images'
+                    and epub_detail.get('document_author') == 'Gravelle smoke fixture'
+                    and len(epub_detail.get('page_revision', '')) == 24,
+                    'Frozen EPUB detail is missing its picture reading metadata')
+            expected_images = (sample_png((30, 60, 210), (220, 330)),
+                               sample_png((214, 73, 139), (200, 300)),
+                               sample_png((20, 160, 70), (180, 270)))
+            for number, expected_image in enumerate(expected_images):
+                epub_page_route = epub_base + '/pages/' + str(number)
+                status, epub_image, mime = client.request(epub_page_route)
+                require(status == 200 and mime == 'image/png' and epub_image == expected_image,
+                        'Frozen EPUB page order or source bytes changed')
+                epub_etag = client.last_headers.get('ETag')
+                require(epub_etag and client.request(epub_page_route, headers={'If-None-Match': epub_etag})[0] == 304,
+                        'Frozen EPUB page conditional request did not return 304')
+                require(Client(url).request(epub_page_route)[0] == 401
+                        and child_client.request(epub_page_route, headers={'If-None-Match': epub_etag})[0] == 404,
+                        'Frozen EPUB picture bypassed authentication or child grants')
+            status, epub_cover, mime = client.request(epub_base + '/cover')
+            require(status == 200 and mime == 'image/jpeg' and epub_cover.startswith(b'\xff\xd8'),
+                    'Frozen EPUB picture could not generate a reading thumbnail')
+            require(client.request(epub_base + '/progress', {'page': 2, 'completed': False})[0] == 200,
+                    'Frozen EPUB picture position could not be saved')
+            epub_saved = client.request(epub_base)[1].get('progress', {})
+            require(epub_saved.get('page') == 2 and 'position' not in epub_saved,
+                    'Frozen EPUB picture progress did not persist')
+            status, epub_mark, _ = client.request(epub_base + '/bookmarks', {
+                'page': 2, 'note': 'Generated EPUB picture bookmark'})
+            require(status == 201 and epub_mark.get('bookmark', {}).get('page') == 2,
+                    'Frozen EPUB bookmark lost its picture page')
+            require(client.request(epub_base + '/document')[0] == 404,
+                    'Frozen EPUB must not expose a raw document download route')
+            require(hashlib.sha256(epub_source.read_bytes()).hexdigest() == epub_digest,
+                    'EPUB scanning, reading, cover or location saving changed the original EPUB')
+            with closing(sqlite3.connect(data / 'library.sqlite3')) as connection:
+                require(connection.execute('SELECT COUNT(*) FROM tc_pages WHERE book_id=?', (epub_book['id'],)).fetchone()[0] == 0
+                        and connection.execute('SELECT COUNT(*) FROM is_pages WHERE book_id=?', (epub_book['id'],)).fetchone()[0] == 0,
+                        'EPUB chapters were incorrectly queued for image optimization or image search')
+            passed('frozen_epub_picture_order_svg_pages_cover_locations_and_grants', pages=3,
+                   image_bytes=len(epub_image), source_unmodified=True)
+
+            # Run capability tests after all exact-count library/search checks.
+            # Reuse the generated photo and leave its source unchanged; crypto
+            # runs inside the frozen service and is checked independently here.
+            share_checks = sharing_smoke(client, url, book['id'], image)
+            require(source_image.read_bytes() == image,
+                    'Frozen share creation or reading changed the generated source image')
+            passed('frozen_encrypted_share_create_unlock_decrypt_and_close',
+                   source_unmodified=True, **share_checks)
 
             child = controller.process
             controller.stop()

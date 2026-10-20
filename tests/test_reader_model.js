@@ -3,7 +3,7 @@
 // Run with: node --test tests/test_reader_model.js
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { buildSpreads, spreadForPage, visualPages, effectiveMode, effectiveDirection, canScrollPage, createWheelPager, swipePageDelta } = require('../static/reader-model.js');
+const { buildSpreads, spreadForPage, visualPages, effectiveMode, effectiveDirection, canScrollPage, createWheelPager, swipePageDelta, pageDimensions, pdfPageWidth, pageSource } = require('../static/reader-model.js');
 
 test('default spreads preserve a standalone cover and logical page order', () => {
   assert.deepEqual(buildSpreads(0), []);
@@ -145,4 +145,31 @@ test('vertical swipes distinguish a page turn from horizontal movement, panning 
   assert.equal(swipePageDelta({ dx: 0, dy: -100, vertical: true, blocked: true }), 0);
   assert.equal(swipePageDelta({ dx: -100, dy: 5, direction: 'rtl' }), -1);
   assert.equal(swipePageDelta({ dx: -100, dy: 5, direction: 'ltr' }), 1);
+});
+
+test('PDF resolution follows the displayed page on phones, HiDPI desktops and double spreads', () => {
+  const portrait = [595, 842];
+  assert.equal(pdfPageWidth({ width: 390, height: 680, pixelRatio: 3, size: portrait }), 1600);
+  assert.equal(pdfPageWidth({ width: 390, height: 680, pixelRatio: 1, size: portrait }), 800);
+  assert.equal(pdfPageWidth({ width: 1920, height: 1000, pixelRatio: 2, size: portrait }), 1600);
+  assert.equal(pdfPageWidth({ width: 1920, height: 1000, pixelRatio: 2, size: portrait, fit: 'width' }), 4096);
+  assert.equal(pdfPageWidth({ width: 1920, height: 1000, pixelRatio: 2, pages: 2, size: portrait, fit: 'width' }), 2400);
+  assert.equal(pdfPageWidth({ width: 390, height: 680, pixelRatio: 3, size: portrait, scroll: true }), 1600);
+  assert.equal(pdfPageWidth({ width: 9000, height: 9000, pixelRatio: 10, fit: 'width' }), 4096);
+});
+
+test('PDF page metadata gives double-page grouping before any image is downloaded', () => {
+  const sizes = [[595, 842], [1190, 842], [595, 842], [595, 842]];
+  assert.deepEqual(buildSpreads(sizes.map(pageDimensions)), [[0], [1], [2, 3]]);
+  for (const input of [null, [], [0, 40], [Infinity, 40], { width: 10, height: NaN }]) assert.equal(pageDimensions(input), null);
+});
+
+test('PDF dimensions and source revisions use distinct browser cache URLs while image URLs stay unchanged', () => {
+  const pdf = { id: 'one/two', format: 'pdf', page_revision: 'a'.repeat(24) };
+  assert.equal(pageSource(pdf, 5), '/api/books/one%2Ftwo/pages/5?width=1600&v=' + 'a'.repeat(24));
+  assert.notEqual(pageSource(pdf, 5, 800), pageSource(pdf, 5, 2400));
+  assert.notEqual(pageSource(pdf, 5, 800), pageSource({ ...pdf, page_revision: 'b'.repeat(24) }, 5, 800));
+  for (const format of ['folder', 'zip', 'cbz']) assert.equal(pageSource({ ...pdf, format }, 5, 2400), '/api/books/one%2Ftwo/pages/5');
+  assert.equal(pageSource({ id: 'list-pdf', format: 'pdf', modified: 10, size: 500 }, 1, 800), '/api/books/list-pdf/pages/1?width=800');
+  assert.equal(pageSource({ ...pdf, page_revision: 'bad:old' }, 1, 800), '/api/books/one%2Ftwo/pages/1?width=800');
 });

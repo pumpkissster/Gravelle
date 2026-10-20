@@ -88,7 +88,7 @@ test('settings update existing controls while catalogue progress changes', async
   assert.strictEqual(fixture.find(fixture.settingsHost, item => item.tagName === 'progress'), progress);
   assert.strictEqual(fixture.find(fixture.settingsHost, item => item.textContent === '刷新'), refresh);
   assert.equal(progress.value, 60);
-  assert.match(fixture.find(fixture.settingsHost, item => item.className === 'image-search-index-counts').textContent, /已索引 0/);
+  assert.match(fixture.find(fixture.settingsHost, item => item.className === 'image-search-index-counts').children[0].textContent, /已索引 0/);
   ui.reset();
 });
 

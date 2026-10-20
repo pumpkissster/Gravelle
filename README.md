@@ -1,135 +1,92 @@
 # Gravelle
 
-> 当前版本为 **0.8.6**，支持 Windows 安装包、便携版和 Docker 双架构镜像。[查看更新说明](docs/releases/0.8.6.md)。升级前停止服务并备份数据目录，沿用原数据目录。
+Gravelle 是属于你自己的写真库阅读器，支持 Windows、macOS 和 Docker。电脑、手机和平板通过浏览器阅读，同一账号共用进度、书签和收藏。
 
-Gravelle 是支持 Windows、Docker 和 NAS 的个人写真阅读器，也能读取图片漫画。电脑、手机和平板通过浏览器连接同一个服务，同一账号共用进度、书签和收藏；作品资料由服务统一保存。使用 SQLite 保存资料，无需额外数据库服务。
+当前版本 **0.9.0** · [下载与更新说明](https://github.com/pumpkissster/Gravelle/releases/latest)
 
-[下载与发行说明](https://github.com/pumpkissster/Gravelle/releases) · [Windows 使用说明](docs/windows.md) · [Docker 部署说明](docs/docker-release.md)
+## 主要功能
 
-支持[独立页面地址](docs/routing.md)，可复制写真库、作品或阅读页码链接，刷新及浏览器前进／后退会恢复对应内容。
+- 读取图片文件夹、ZIP／CBZ、PDF 和图片型 EPUB，支持单页、双页、连续滚动及单页上下翻页。
+- 多个写真库与多个根文件夹，支持搜索、模特关联、收藏及批量整理。
+- 管理员与子账号、写真库访问授权，各账号独立保存阅读记录和库的显示偏好。
+- 按规则优化大图，各设备共用优化副本，保留原图。
+- 在自己的写真库中以图搜图，支持完整截图和轻中度裁剪匹配。
+- 管理员创建带密码的单本分享，有效期可选 1／3／7 天，在设置中管理链接与查看访问统计。
+- 图片索引失败列表、写真库合成封面和缓存管理。
 
-## 能做什么
+EPUB 面向图片写真集，不支持纯文字书或 DRM；PDF 不支持加密文档。PDF、EPUB 暂不参加图片优化和以图搜图。扫描、编辑资料和移除作品不会删除或改写原文件。
 
-- 读取 JPG/JPEG、PNG、WebP、GIF、AVIF 散装图片，以及 CBZ/ZIP 图片作品。压缩包无需预先解压；不支持 CBR/RAR、PDF。图片能否显示也取决于浏览器支持。
-- 创建多个写真库，每个库可选择多个目录，分别设置默认阅读方式、方向、排除规则和默认模特。
-- 单页、双页、条漫阅读，支持全屏、页码跳转、图片适配和页码书签。单页支持左右及[上下翻页](docs/users.md#单页上下翻页)，双页支持封面独页、跨页图独页与配对调整。
-- 编辑名称、日期、封面、阅读设置和模特关联；支持排序、搜索、收藏和连续阅读下一本。
-- 支持管理员和子账号、写真库访问授权与个人显隐；各账号的进度、收藏和书签独立，同一账号跨设备同步。管理员可在模特作品列表及搜索结果中批量替换模特、移除作品。详见[用户与权限](docs/users.md)。
-- 管理员可按文件大小、像素或最长边设置[图片优化](docs/transcoding.md)，仅处理命中规则的页面，各设备共用副本，原图保持不变。
-- [以图搜图](docs/image-search.md)可通过原图、完整截图及轻中度裁剪找到写真库内的作品和页码；索引在自己的服务端建立，无需 GPU 或下载模型。图片优化和图片索引默认关闭。
+## 下载与安装
 
-新建写真库按单本作品浏览，已有漫画类型继续兼容。扫描、编辑资料和移除作品都不会删除或改写原图。
+从 [GitHub Releases](https://github.com/pumpkissster/Gravelle/releases/latest) 选择对应平台：
 
-## Windows 安装
+| 平台 | 安装方式 |
+| --- | --- |
+| Windows 10（1809+）／11 x64 | 下载安装程序，或解压便携 ZIP 后运行 `Gravelle/Gravelle.exe`。详见 [Windows 使用说明](docs/windows.md)。 |
+| macOS 15 及以上 | Apple 芯片选 `arm64`，Intel 选 `x64`；打开 DMG，将 Gravelle 拖入“应用程序”。详见 [Mac 使用说明](docs/macos.md)。 |
+| Docker | 拉取 [Docker Hub 镜像](https://hub.docker.com/r/pumpkissster/gravelle)，支持 amd64 和 arm64。详见 [部署说明](docs/docker-release.md)。 |
 
-支持 Windows 10（1809 或更新）／Windows 11 x64，无需安装 Python 或 Docker。
+桌面版打开启动器后，添加写真根文件夹，设置端口并启动阅读器；浏览器会自动打开。首次访问注册管理员账号，然后创建写真库。子账号由管理员在设置中创建。
 
-安装程序按系统界面语言选择简体中文或 English，启动器采用项目 SVG 字标生成的品牌图，支持高 DPI 和圆角操作按钮。
+需要手机或平板访问时，开启局域网访问，使用启动器显示的局域网地址；Docker 使用宿主机 IP 和映射端口。
 
-安装步骤：
+Windows 安装程序未做代码签名，macOS 包未完成 Apple 公证，系统可能显示安全提示。请从项目发行页下载，并核对 `SHA256SUMS.txt`。
 
-1. 在 [GitHub Releases](https://github.com/pumpkissster/Gravelle/releases/latest) 下载 `Gravelle-Setup-0.8.6-x64.exe` 并安装。
-2. 打开 Gravelle，选择写真根文件夹，可添加多个，设置端口（默认 `8080`）。需要手机、平板访问时勾选「允许局域网访问」。
-3. 点击「检查目录与网络」，再点击「启动阅读器」。浏览器会自动打开，启动器最小化到任务栏。
-4. 首次访问注册账户，在网页创建写真库，选择根文件夹内的目录，保存后自动扫描。
+## Docker 快速部署
 
-启动器可查看地址、打开网页和停止服务。关闭浏览器不会停止服务；关闭启动器会提示停止服务。便携 ZIP 解压后运行 `Gravelle/Gravelle.exe`，整个文件夹需一起保留。
+可将以下内容保存为 `compose.yaml`，将 `/path/to/...` 替换为实际宿主机目录。默认访问端口为 8080，可自行修改。群晖用户也可直接填入 Container Manager 的“项目”配置。
 
-安装程序尚未做代码签名，Windows 可能提示“未知发布者”。请从项目的 GitHub Releases 获取安装包，并核对发行页提供的 SHA-256 校验值。
-
-## Docker / NAS 部署
-
-Docker Hub 仓库为 [`pumpkissster/gravelle`](https://hub.docker.com/r/pumpkissster/gravelle)，镜像支持 `linux/amd64`、`linux/arm64`，可使用固定版本 `0.8.6` 或 `latest`。
-
-将仓库中的 [compose.yaml](compose.yaml) 和 [.env.example](.env.example) 保存到同一项目目录，或下载发行页中的 Docker 配置包；复制 `.env.example` 为 `.env`，填写宿主机路径和运行用户：
-
-```dotenv
-GRAVELLE_IMAGE=pumpkissster/gravelle:0.8.6
-COMICS_PATH=/volume1/photosets
-DATA_PATH=/volume1/docker/sumi-reader/data
-PUID=1000
-PGID=1000
-WEB_PORT=8080
+```yaml
+services:
+  gravelle:
+    image: pumpkissster/gravelle:latest  # 使用最新版本镜像
+    container_name: gravelle            # 容器名称
+    user: "0:0"                        # 运行用户 UID:GID，按目录权限调整
+    ports:
+      - "8080:8080"                    # 左侧为宿主机访问端口，可自行修改；右侧保持 8080
+    restart: unless-stopped            # 除非手动停止，否则自动重启
+    environment:
+      SCAN_INTERVAL: "300"             # 定时扫描间隔，单位秒；设为 0 关闭定时扫描
+    volumes:
+      # 资料目录：保存账号、作品信息、阅读记录及缓存
+      - "/path/to/data:/data"
+      # 写真目录：只读挂载，不会修改原始文件；可继续添加 /library 的其他子目录
+      - "/path/to/photos:/library/photos:ro"
+      # 可选：把图片优化副本单独保存到其他文件夹或磁盘
+      # 不启用时，副本默认保存在上方资料目录的 transcoded 子目录
+      # 启用时取消下一行开头的 #，并修改左侧宿主机路径
+      # - "/path/to/transcoded:/data/transcoded"
 ```
 
-创建目录，确保运行用户可读写真、可读写资料。UID/GID 用 `id 你的用户名` 查询，然后运行：
+创建对应的宿主机文件夹后，在配置文件所在目录执行：
 
 ```sh
 docker compose pull
 docker compose up -d
 ```
 
-打开 `http://服务器局域网IP:8080`，注册并创建写真库。群晖 Container Manager 可在「项目」中使用配置目录的 `compose.yaml` 与 `.env`；UID/GID 填实际具有目录权限的用户，不要直接套用示例数值。
+镜像可选 `pumpkissster/gravelle:latest`。写真目录只读映射到 `/library` 或 `/library` 的子目录，资料目录映射到 `/data`；网页创建库时选择 `/library` 或其子目录。
 
-宿主机 `COMICS_PATH` 只读挂载到 **`/library`**，网页目录请选择 `/library` 或其子目录；`DATA_PATH` 挂载到 **`/data`**。其他磁盘需先挂载到 `/library/子目录` 才能在网页选择。已有安装保留原数据路径、运行用户与项目名称。
+按默认端口配置，打开 `http://服务器IP:8080`；修改了左侧端口时使用对应端口。网页创建库时选择 `/library/photos`。也可使用发行页的 Docker 配置包；其他路径与权限设置见 [Docker／NAS 部署说明](docs/docker-release.md)。
 
-也可下载完整源码，执行 `docker compose -f compose.build.yaml up -d --build` 自行构建。详细权限、更新与排查见 [Docker 部署说明](docs/docker-release.md)。
+图片优化副本默认位于 `/data/transcoded`。如果已有优化副本，启用独立映射前先按 [迁移说明](docs/docker-release.md#图片优化目录单独映射) 移动已有副本，再切换挂载。
 
-图片优化副本默认保存于 Docker 容器 `/data/transcoded`，即宿主机 `DATA_PATH/transcoded`，无需单独映射。也可选用 [compose.optimization.yaml](compose.optimization.yaml) 将同一个容器路径单独映射到其他文件夹或磁盘；仅填写 `OPTIMIZED_PATH` 不会生效，还需加载覆盖文件或手动添加挂载。使用方法及已有副本的迁移步骤见 [独立优化目录](docs/docker-release.md#图片优化目录单独映射)。
+## 资料、备份与更新
 
-## 整理文件夹与自动资料
-
-每个直接包含图片的文件夹是一部独立作品，父目录不会自动合并子目录。所选根目录直接放图片时也会生成作品。图片按文件名自然排序，例如 `1.jpg → 2.jpg → 10.jpg`。
-
-```text
-写真合集/
-├── 模特甲/
-│   ├── 2026-10-09 秋日作品/
-│   │   ├── 001.jpg
-│   │   └── 002.webp
-│   └── 2026-10-10 室内作品.cbz
-└── 模特乙/
-    └── 2025-07-12 夏日作品/
-        ├── 1.png
-        └── 2.jpg
-```
-
-留空默认模特时，合集根目录下按「模特／作品」识别第一级目录；选择单个模特目录时，使用根目录名，去掉两端装饰括号和空白。根目录直接放图片或超过上述两级时不猜测模特。ZIP/CBZ 使用相同规则。
-
-默认模特优先于目录推断；单本手动关联保留，作品可关联多人。模特改名不影响关联，删除模特不删除作品。
-
-作品原名以有效的 **`YYYY-MM-DD`** 开头时自动提取发布日期，需补零、符合真实日历且后面不紧接数字。库设置可隐藏名称日期前缀，保留日期字段和手工名称；手动填写或清空的日期、模特不会被重扫覆盖。
-
-封面默认使用首图，也可选择内页或上传 JPEG、PNG、WebP（最多 6 MiB），另存到资料目录。首次入库的加入时间不随重扫改变；**移动或重命名作品路径会生成新记录，原进度不会自动迁移。**
-
-排除规则支持 `*`、`?`、`[]`，忽略大小写，匹配相对路径或文件／目录名；目录命中时跳过子目录。例如 `预览/`、`*preview*`、`*.gif`，空行和 `#` 注释忽略。默认每 300 秒扫描，也可手动扫描。
-
-## 同步、资料与备份
-
-| 运行方式 | 资料位置 |
+| 平台 | 资料位置 |
 | --- | --- |
-| Windows 安装版／便携版 | `%LOCALAPPDATA%\Gravelle\data` |
-| Docker | 容器 `/data`，对应 `.env` 的 `DATA_PATH` |
-| 直接运行服务端 | `DATA_PATH`，默认项目 `data` |
+| Windows | `%LOCALAPPDATA%\Gravelle` |
+| macOS | `~/Library/Application Support/Gravelle` |
+| Docker | 容器 `/data` 对应的宿主机目录 |
 
-资料包含账户、库、元数据、模特、封面、头像、进度、书签和收藏。Windows 配置与日志也在 `%LOCALAPPDATA%\Gravelle`，升级、卸载保留此目录；原图单独备份。
+升级前停止服务，备份完整资料目录，并沿用原作品路径和挂载。资料包含账号、作品信息、进度、书签、封面及分享密码密钥；原始写真文件需另行备份。
 
-**升级前停止服务，备份整个资料目录。** SQLite 可能有 WAL/SHM 文件，不要运行时只复制数据库。Docker 同时备份 `.env`；若单独映射优化目录，一并保存 `OPTIMIZED_PATH`，沿用原挂载和项目名称。避免两个服务共用资料目录；迁移时保留服务内绝对路径与作品相对路径。
+网页设置可检查新版本；桌面启动器可检查并下载对应平台安装包，由用户确认安装。Docker 用户备份后拉取新镜像并重建容器。
 
-另一设备刷新并打开同一本即可续读，并发阅读以服务端最后保存为准。作品阅读方式和方向同步；主题、图片适配与加载、缓存、列表偏好保存在当前浏览器。同步需要连接服务。
+分享链接需要访客能连接服务地址；本机 `127.0.0.1` 链接不能供另一台设备使用。图片加密不能防截图，也不能代替 HTTPS；公网访问应使用受信任的 HTTPS 入口。
 
-[性能设置](docs/performance.md) 提供管理员可调整的后台任务并发数，默认 1，使图片优化与图片索引按单张图片排队；可设 1～8，提高后允许不同作品并行优化，或与索引同时进行。它保存在服务端，和当前浏览器的封面加载并发数等偏好分别生效。
-
-## 局域网访问与更新
-
-Windows 在启动器勾选「允许局域网访问」后启动，其他设备打开显示的 `http://电脑局域网IP:端口`。Docker 使用宿主机 IP 和 `WEB_PORT`。设备需能互相访问，防火墙应允许相应端口；Windows 启动器不会自动修改防火墙，具体放行方式见 [Windows 文档](docs/windows.md#局域网访问)。
-
-网页「设置 → 服务与数据 → 检查新版本」检查 GitHub 正式发行版并提供发行页链接，不会自动升级服务。Windows 启动器顶部版本号右侧可检查、下载新版，经 SHA-256 校验后，由你确认停止服务并打开安装器。网络失败不影响现有阅读服务。Docker 用户备份后手动替换镜像。
-
-如使用 HTTPS 反向代理，请转发域名根路径，保留原始 `Host`（含非默认端口），设置 `X-Forwarded-Proto: https`。暂不支持部署在 `/manga/` 等子路径。
-
-## 开发与验证
-
-源码运行需要 Python 3.12+；Pillow、NumPy 和 OpenCV headless 用于本地图像处理，Node.js 只用于前端测试。
-
-```sh
-python -m pip install -r requirements.txt
-python -m unittest discover -s tests -v
-node --test tests/test_*.js
-```
-
-测试使用临时图片和独立资料目录，可用 `SUMI_TEST_TEMP` 指定临时父目录。安装包构建见 [Windows 文档](docs/windows.md#从源码构建安装包)，发布流程见 [Docker 文档](docs/docker-release.md#发布者配置-github-actions)。
+详细操作：[用户与权限](docs/users.md) · [PDF](docs/pdf.md) · [EPUB](docs/epub.md) · [单本分享](docs/sharing.md) · [图片优化](docs/transcoding.md) · [以图搜图](docs/image-search.md) · [缓存管理](docs/cache.md) · [性能设置](docs/performance.md)
 
 ## 许可
 
-代码采用 [MIT License](LICENSE)。内嵌 Libre Caslon Text 字体采用独立的 [SIL Open Font License 1.1](static/fonts/OFL.txt)，依赖说明见 [第三方声明](desktop/THIRD_PARTY_NOTICES.md)。阅读交互参考了[拷贝漫画增强](https://greasyfork.org/zh-CN/scripts/421371-%E6%8B%B7%E8%B4%9D%E6%BC%AB%E7%94%BB%E5%A2%9E%E5%BC%BA)的使用体验，项目代码独立实现。
+项目采用 [MIT License](LICENSE)，字体及依赖许可见 [字体授权](static/fonts/OFL.txt) 与 [第三方声明](desktop/THIRD_PARTY_NOTICES.md)。阅读交互参考了[拷贝漫画增强](https://greasyfork.org/zh-CN/scripts/421371-%E6%8B%B7%E8%B4%9D%E6%BC%AB%E7%94%BB%E5%A2%9E%E5%BC%BA)的使用体验，项目代码独立实现。

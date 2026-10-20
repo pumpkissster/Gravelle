@@ -3,6 +3,14 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const Routes = require('../static/page-router.js');
 
+test('EPUB chapter location and fragment round-trip without changing the return page', () => {
+  const route = { view: 'reader', id: 'epub-book', page: 12, position: 0.623456, fragment: '段落 & #一', from: { view: 'library', id: 'photos', sort: 'added' } };
+  assert.deepEqual(Routes.parse(Routes.hash(route)), route);
+  assert.deepEqual(Routes.parse('#/read/epub-book?page=1&position=NaN&fragment=%00bad'), { view: 'reader', id: 'epub-book', page: 1 });
+  assert.equal(Routes.normalize({ view: 'reader', id: 'epub-book', position: 2 }).position, undefined);
+  assert.equal(Routes.normalize({ view: 'reader', id: 'epub-book', position: 0 }).position, 0);
+});
+
 test('all navigation views have stable copyable routes', () => {
   for (const view of ['home', 'libraries', 'recent', 'bookmarks', 'favorite', 'search', 'models', 'settings']) {
     assert.deepEqual(Routes.parse(Routes.hash({ view })), { view });
@@ -16,6 +24,16 @@ test('search and sorting round-trip without interpreting user input as a path', 
   assert.deepEqual(Routes.parse(Routes.hash(route)), route);
   assert.deepEqual(Routes.parse('#/search?q=a&password=secret&sort=bad'), { view: 'search', query: 'a' });
   assert.equal(Routes.hash(Routes.parse('#/search?username=person&password=secret')), '#/search');
+});
+test('cache settings use a stable second-level route', () => {
+  const route = { view: 'settings', section: 'cache' };
+  assert.equal(Routes.hash(route), '#/settings/cache');
+  assert.deepEqual(Routes.parse('#/settings/cache'), route);
+});
+test('sharing management is a copyable settings subpage', () => {
+  const route = { view: 'settings', section: 'shares' };
+  assert.equal(Routes.hash(route), '#/settings/shares');
+  assert.deepEqual(Routes.parse('#/settings/shares'), route);
 });
 test('reader keeps its page and detail return route with the original filtered page underneath', () => {
   const origin = { view: 'library', id: '2', query: '特集', sort: 'title' };

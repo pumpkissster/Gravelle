@@ -46,11 +46,17 @@
   let transcodingUI = null;
   let imageSearchUI = null;
   let imageSearchSettings = null;
+  let cacheManagementUI = null;
+  let sharingUI = null;
+  let sharingSettings = null;
+  let libraryCoverBusy = false;
+  let libraryCoverRequest = 0;
   let searchMode = 'text';
   const optimizationNotice = { tracker: window.GravelleTranscodingUI.createPendingTracker(), payload: null, count: 0, request: null, timer: null, deferred: null, waiting: new Set() };
   state.settingsSection = '';
   state.settingsTab = '';
-  reader.pageCache = Performance.createCache(Performance.get().imageCacheLimit, entry => entry.cancel?.());
+  reader.pageCache = Performance.createCache(Performance.get().imageCacheLimit, entry => entry.cancel?.(), { byteLimit: Performance.get().imageCacheMemoryMB * 1024 * 1024 });
+  reader.pdfUpgrades = new Map();
   const librarySorts = readLibrarySorts();
   reader.endOverlay = null;
   reader.endSequence = null;
@@ -89,12 +95,14 @@
     authGeneration += 1;
     reader.pending = null; clearTimeout(reader.saveTimer);
     if (reader.open) closeReader(false);
+    sharingUI?.reset();
     ['library-dialog', 'book-detail', 'metadata-dialog', 'model-dialog', 'bookmark-dialog', 'profile-dialog', 'remove-dialog', 'user-dialog', 'users-dialog', 'batch-model-dialog'].forEach(id => { if ($('#' + id).open) $('#' + id).close(); });
     reader.saveChains.clear(); reader.settingsChains.clear(); reader.pageCache.clear();
     clearTimeout(state.poll); state.poll = null; state.refreshPromise = null;
     stopCatalogFlow(); resetSelection(); selection.busy = false;
     transcodingUI?.reset();
     imageSearchUI?.reset(); searchMode = 'text';
+    cacheManagementUI?.reset(); libraryCoverRequest += 1; libraryCoverBusy = false;
     resetOptimizationReminders();
     state.books = []; state.libraries = []; state.models = []; state.bookmarks = [];
     state.loaded = false; state.loading = true; state.scanning = false; state.scanErrors = []; state.libraryError = null; state.lastScan = null; state.rootPath = '/library';
@@ -198,9 +206,11 @@
   }
 
   const post = (path, data, options = {}) => api(path, { method: 'POST', body: JSON.stringify(data), ...options });
+  sharingSettings = node('section'); sharingSettings.id = 'sharing-settings'; sharingSettings.hidden = true;
+  sharingUI = window.GravelleSharingUI.create({ api, post, isAdmin, toast, managementHost: sharingSettings });
   Performance.configureServer({ api, post, isAdmin });
   const bookUrl = id => '/api/books/' + encodeURIComponent(id);
-  const pageUrl = (id, index) => bookUrl(id) + '/pages/' + index;
+  const pageUrl = (book, index, width = 1600) => Model.pageSource(typeof book === 'object' ? book : { id: book }, index, width);
 
   function toast(message) {
     const element = $('#toast');
@@ -229,6 +239,7 @@
   function handleUnauthorized() {
     clearTimeout(state.poll);
     if (reader.open) closeReader(false);
+    sharingUI?.reset();
     state.session = { ...state.session, authenticated: false, user: null };
     showLogin();
     $('#login-error').textContent = '登录已失效，请重新登录。'; $('#login-error').hidden = false;
@@ -291,6 +302,7 @@
     $('#account-name').textContent = name;
     $('#settings-account-name').textContent = name;
     $('#settings-account-role').textContent = isAdmin() ? '管理员' : '用户';
+    $('#my-shares-setting').hidden = !isAdmin();
     ['account-avatar', 'settings-account-avatar'].forEach(id => {
       $('#' + id).replaceChildren(Avatars.createImage(user, { alt: '', lazy: false }));
     });
@@ -558,7 +570,7 @@
       } else if (route.view === 'reader') {
         const book = state.books.find(item => String(item.id) === route.id) || { id: route.id, title: '作品' };
         if (reader.open && String(reader.book?.id) === route.id) { if (route.page) setReaderPage(route.page - 1); }
-        else await openBook(book, route.page ? route.page - 1 : null, null, { fromRoute: true });
+        else await openBook(book, route.page ? route.page - 1 : null, null, { fromRoute: true, position: route.position, fragment: route.fragment });
       }
     } finally { if (generation === routing.generation) { routing.restoring = false; restoreListPosition(); } }
   }
@@ -571,7 +583,7 @@
     }
     const libraryId = String(options.libraryId ?? state.libraryId);
     const modelId = String(options.modelId ?? state.modelId);
-    const settingsSection = view === 'settings' && ['interface', 'performance', 'reading', 'transcoding', 'image-search'].includes(options.section) && (!['transcoding', 'image-search'].includes(options.section) || isAdmin()) ? options.section : '';
+    const settingsSection = view === 'settings' && ['interface', 'performance', 'reading', 'transcoding', 'image-search', 'cache', 'shares'].includes(options.section) && (!['transcoding', 'image-search', 'cache', 'shares'].includes(options.section) || isAdmin()) ? options.section : '';
     const settingsTab = settingsSection === 'transcoding' && options.tab === 'rules' ? 'rules' : '';
     const nextSearchMode = options.image === undefined ? searchMode : options.image ? 'image' : 'text';
     const samePage = state.view === view && (view !== 'library' || libraryId === String(state.libraryId)) && (view !== 'model' || modelId === String(state.modelId)) && (view !== 'search' || searchMode === nextSearchMode) && (view !== 'settings' || state.settingsSection === settingsSection && state.settingsTab === settingsTab);
@@ -591,6 +603,8 @@
     if (options.fromRoute && view === 'settings' && options.section && options.section !== settingsSection) commitRoute(currentViewRoute(), { replace: true });
     if (view !== 'settings' || settingsSection !== 'transcoding') transcodingUI?.hide();
     if (view !== 'settings' || settingsSection !== 'image-search') imageSearchUI?.hideSettings();
+    if (view !== 'settings' || settingsSection !== 'cache') cacheManagementUI?.hide();
+    if (view !== 'settings' || settingsSection !== 'shares') sharingUI?.hideManagement();
     if (options.libraryId !== undefined) state.libraryId = String(options.libraryId);
     if (view === 'library') { state.sort = librarySort(state.libraryId); $('#sort').value = state.sort; }
     if (options.sort) { state.sort = End.normalizeSort(options.sort); $('#sort').value = state.sort; }
@@ -666,7 +680,11 @@
       card.classList.toggle('is-selected', selection.enabled && selection.ids.has(String(library.id)));
       const button = node('button', 'library-tile'); button.type = 'button'; button.setAttribute('aria-label', `打开写真库 ${library.name}`);
       const books = state.books.filter(book => String(book.library_id) === String(library.id)); const montage = node('div', 'library-montage');
-      if (books.length) { montage.dataset.count = Math.min(books.length, 4); books.slice(0, 4).forEach(book => montage.append(makeCover(book, 'tile-cover'))); } else montage.append(icon('folder'));
+      if (library.cover?.url) {
+        montage.classList.add('is-composite'); const image = node('img'); image.alt = ''; image.decoding = 'async';
+        Performance.loadCover(image, library.cover.url + '?v=' + encodeURIComponent(library.cover.version || 'pending'));
+        image.addEventListener('error', () => { image.replaceWith(icon('folder')); }, { once: true }); montage.append(image);
+      } else if (books.length) { montage.dataset.count = Math.min(books.length, 4); books.slice(0, 4).forEach(book => montage.append(makeCover(book, 'tile-cover'))); } else montage.append(icon('folder'));
       const info = node('div', 'library-tile-info'); info.append(node('strong', '', library.name), node('span', '', `${typeLabels[library.media_type] || '日漫'} · ${books.length} 本作品`));
       button.append(montage, info); button.addEventListener('click', () => selection.enabled && state.view === 'libraries' ? toggleSelection(library.id) : selectLibrary(library.id)); card.append(button);
       if (state.view === 'libraries') card.append(selectionCheckbox(library.id, library.name, 'library-select'));
@@ -885,8 +903,8 @@
   function renderBookmarks() {
     $('#bookmark-list').replaceChildren(...state.bookmarks.map(bookmark => {
       const book = bookmark.book || state.books.find(item => item.id === bookmark.book_id); if (!book) return node('div');
-      const row = node('article', 'bookmark-card'); const open = node('button', 'bookmark-open'); open.type = 'button'; const image = node('img'); image.alt = `${book.title}第 ${bookmark.page + 1} 页`; Performance.loadCover(image, pageUrl(book.id, bookmark.page));
-      const info = node('div'); info.append(node('h3', '', book.title), node('p', 'bookmark-location', `第 ${bookmark.page + 1} 页 · ${book.library_name || ''}`), node('p', 'bookmark-note', bookmark.note || '无备注'), node('small', '', formatDate(bookmark.created_at, true))); open.append(image, info); open.setAttribute('aria-label', `打开书签 ${book.title} 第 ${bookmark.page + 1} 页`); open.addEventListener('click', () => openBook(book, bookmark.page));
+      const row = node('article', 'bookmark-card'); const open = node('button', 'bookmark-open'); open.type = 'button'; const image = node('img'); image.alt = `${book.title}第 ${bookmark.page + 1} 页`; Performance.loadCover(image, pageUrl(book, bookmark.page, 800));
+      const info = node('div'); info.append(node('h3', '', book.title), node('p', 'bookmark-location', `第 ${bookmark.page + 1} 页 · ${book.library_name || ''}`), node('p', 'bookmark-note', bookmark.note || '无备注'), node('small', '', formatDate(bookmark.created_at, true))); open.append(image, info); open.setAttribute('aria-label', `打开书签 ${book.title} 第 ${bookmark.page + 1} 页`); open.addEventListener('click', () => openBook(book, bookmark.page, null, { position: bookmark.position }));
       const remove = node('button', 'icon-button bookmark-remove'); remove.append(icon('close')); remove.setAttribute('aria-label', `移除书签 ${book.title} 第 ${bookmark.page + 1} 页`); remove.addEventListener('click', async () => { remove.disabled = true; try { await post('/api/bookmarks/' + encodeURIComponent(bookmark.id) + '/delete', {}); state.bookmarks = state.bookmarks.filter(item => item.id !== bookmark.id); renderLibrary(); toast('书签已移除。'); } catch (error) { toast(error.message); remove.disabled = false; } }); row.append(open, remove); return row;
     }));
   }
@@ -970,11 +988,11 @@
     settingsUpdateRequest = operation;
     return operation;
   }
-  const settingsSectionLabels = { service: '服务与数据', users: '用户管理', interface: '界面设置', performance: '性能设置', reading: '阅读偏好', transcoding: '图片优化', 'image-search': '图片搜索' };
+  const settingsSectionLabels = { service: '服务与数据', users: '用户管理', interface: '界面设置', performance: '性能设置', reading: '阅读偏好', transcoding: '图片优化', 'image-search': '图片搜索', cache: '缓存管理', shares: '我的分享' };
   function ensureImageSearchUI() {
     if (imageSearchUI) return;
     imageSearchSettings = node('section'); imageSearchSettings.id = 'image-search-settings'; imageSearchSettings.hidden = true;
-    imageSearchUI = window.GravelleImageSearchUI.create({ searchHost: $('#image-search-panel'), settingsHost: imageSearchSettings, api, post, openBook, isAdmin, toast, onManage: () => navigate('settings', { section: 'image-search' }) });
+    imageSearchUI = window.GravelleImageSearchUI.create({ searchHost: $('#image-search-panel'), settingsHost: imageSearchSettings, api, post, openBook, isAdmin, toast, onManage: () => navigate('settings', { section: 'image-search' }), onOpenFailure: async (bookId, page) => { const generation = authGeneration; try { const book = await api(bookUrl(bookId)); if (generation === authGeneration && isAdmin()) await openBook(book, page); } catch (error) { if (generation === authGeneration && error.status !== 401) toast(error.message); } } });
   }
   function changeSearchMode(mode) {
     if (selection.busy) return;
@@ -988,15 +1006,17 @@
     const index = node('div', 'settings-menu'); index.id = 'settings-menu';
     const back = node('button', 'button button-secondary settings-back', '返回设置'); back.type = 'button'; back.prepend(icon('left')); back.addEventListener('click', () => navigate('settings'));
     const items = {};
-    Object.entries(settingsSectionLabels).filter(([section]) => !['service', 'users'].includes(section)).forEach(([section, title]) => {
+    Object.entries(settingsSectionLabels).filter(([section]) => !['service', 'users', 'shares'].includes(section)).forEach(([section, title]) => {
       const entry = node('button', 'settings-menu-item'); entry.type = 'button'; entry.dataset.settingsSection = section;
-      const symbol = node('span', 'settings-menu-icon'); symbol.append(icon({ service: 'folder', users: 'person', interface: 'sun', performance: 'settings', reading: 'book', transcoding: 'refresh', 'image-search': 'search' }[section]));
+      const symbol = node('span', 'settings-menu-icon'); symbol.append(icon({ service: 'folder', users: 'person', interface: 'sun', performance: 'settings', reading: 'book', transcoding: 'refresh', 'image-search': 'search', cache: 'folder' }[section]));
       const content = node('span', 'settings-menu-content'); content.append(node('strong', '', title)); const detail = node('small'); content.append(detail); const badge = node('span', 'settings-menu-badge'); badge.hidden = true; entry.append(symbol, content, badge, icon('right')); entry.addEventListener('click', () => navigate('settings', { section })); index.append(entry); items[section] = { entry, detail, badge };
     });
     const transcode = node('section'); transcode.id = 'transcoding-settings'; transcode.hidden = true;
-    host.replaceChildren(back, panels[0], panels[1], index, ...panels.slice(2), transcode, imageSearchSettings);
-    settingsLayout = { index, back, items, panels: Object.fromEntries(sections.map((section, position) => [section, panels[position]])), transcode };
+    const cache = node('section'); cache.id = 'cache-management-settings'; cache.hidden = true;
+    host.replaceChildren(back, panels[0], panels[1], index, ...panels.slice(2), transcode, imageSearchSettings, cache, sharingSettings);
+    settingsLayout = { index, back, items, panels: Object.fromEntries(sections.map((section, position) => [section, panels[position]])), transcode, cache };
     transcodingUI = window.GravelleTranscodingUI.create({ host: transcode, api, post, toast, onCatalogChange: () => refreshLibrary(), onFiltersChange: () => { cancelListRestoration(); saveListPosition(); }, onRender: restoreListPosition, onTabChange: tab => { state.settingsTab = tab === 'rules' ? 'rules' : ''; syncViewRoute(); } });
+    cacheManagementUI = window.GravelleCacheManagementUI.create({ host: cache, api, post, toast, onCatalogChange: () => refreshLibrary() });
   }
   function renderSettings() {
     ensureSettingsLayout();
@@ -1005,8 +1025,9 @@
     Object.entries(settingsLayout.panels).forEach(([key, panel]) => { panel.hidden = ['service', 'users'].includes(key) ? Boolean(section) || key === 'service' && !isAdmin() : key !== section; });
     settingsLayout.items.transcoding.entry.hidden = !isAdmin();
     settingsLayout.items['image-search'].entry.hidden = !isAdmin();
+    settingsLayout.items.cache.entry.hidden = !isAdmin();
     renderOptimizationReminders();
-    const subtitles = { service: '版本、连接与访问地址', users: state.session?.user?.username || '当前账户与子账户', interface: interfaceTheme() === 'light' ? '亮色主题' : '暗色主题', performance: '加载、缓存与列表', reading: '图片适配与阅读背景', transcoding: '规则、作品与后台任务', 'image-search': '图片索引与后台任务' };
+    const subtitles = { service: '版本、连接与访问地址', users: state.session?.user?.username || '当前账户与子账户', interface: interfaceTheme() === 'light' ? '亮色主题' : '暗色主题', performance: '加载、缓存与列表', reading: '图片适配与阅读背景', transcoding: '规则、作品与后台任务', 'image-search': '图片索引与后台任务', cache: '空间占用与缓存清理' };
     Object.entries(settingsLayout.items).forEach(([key, value]) => { value.detail.textContent = subtitles[key]; });
     $('#subaccounts-setting').hidden = !isAdmin();
     renderSubaccountSummary();
@@ -1021,6 +1042,9 @@
     if (section === 'transcoding' && isAdmin()) transcodingUI.show(state.settingsTab); else transcodingUI.hide();
     imageSearchSettings.hidden = section !== 'image-search' || !isAdmin();
     if (section === 'image-search' && isAdmin()) imageSearchUI.showSettings(); else imageSearchUI.hideSettings();
+    settingsLayout.cache.hidden = section !== 'cache' || !isAdmin();
+    if (section === 'cache' && isAdmin()) cacheManagementUI.show(); else cacheManagementUI.hide();
+    if (section === 'shares' && isAdmin()) sharingUI.showManagement(); else sharingUI.hideManagement();
   }
   function renderSubaccountSummary() {
     const count = $('#subaccounts-count');
@@ -1279,7 +1303,8 @@
       if (generation !== authGeneration) return;
       state.loading = false;
       if (state.session?.authenticated && renderedLibraryData !== libraryDataSignature()) { renderLibraryNavigation(); renderSeries(); renderLibrary(); }
-      clearTimeout(state.poll); if (state.scanning && state.session?.authenticated) state.poll = setTimeout(() => refreshLibrary(), 1500);
+      if ($('#library-dialog').open) renderLibraryCoverEditor();
+      clearTimeout(state.poll); if ((state.scanning || ['home', 'libraries'].includes(state.view) && state.libraries.some(library => library.cover?.pending) || $('#library-dialog').open && state.libraries.some(library => library.id === state.editingLibrary && library.cover?.pending)) && state.session?.authenticated) state.poll = setTimeout(() => refreshLibrary(), 1500);
     } })();
     state.refreshPromise = operation; try { await operation; } finally { if (state.refreshPromise === operation) state.refreshPromise = null; }
     if (state.session?.authenticated && state.loaded && !routing.restoring) {
@@ -1331,17 +1356,48 @@
   function showLibraryForm(library = null) {
     if (!requireAccess()) return;
     libraryFormGeneration += 1; $('#library-create-author').disabled = false; $('#library-save').disabled = false;
+    libraryCoverRequest += 1; libraryCoverBusy = false;
     $('#library-remove').hidden = !library; $('#library-remove').disabled = false;
     const type = library?.media_type || 'photo'; const typeSelect = $('#library-type');
     typeSelect.replaceChildren(new Option('写真', 'photo'));
     if (type !== 'photo' && Object.hasOwn(typeLabels, type)) typeSelect.append(new Option(typeLabels[type] + '（已有类型）', type));
     typeSelect.value = type; typeSelect.disabled = type !== 'photo';
     state.editingLibrary = library?.id || null; $('#library-dialog-title').textContent = library ? '管理写真库' : '创建写真库'; $('#library-name').value = library?.name || ''; $('#library-mode').value = library?.reading_mode || 'single';
+    renderLibraryCoverEditor();
     const direction = $('#library-direction'); direction.dataset.pagedDirection = ['ltr', 'rtl', 'ttb'].includes(library?.reading_direction) ? library.reading_direction : 'ltr'; updateLibraryReadingDirection();
     libraryBrowseInput = null; libraryBrowseRequest += 1; $('#library-paths').replaceChildren(); const paths = library?.paths?.length ? library.paths : [library?.path || state.rootPath]; paths.forEach(path => addLibraryPath(path));
     $('#library-excludes').value = (library?.exclude_rules || []).join('\n'); const author = library?.default_author_id || state.models.find(model => model.name.normalize('NFKC').toLocaleLowerCase('zh-CN') === String(library?.default_author || '').normalize('NFKC').toLocaleLowerCase('zh-CN'))?.id || ''; renderLibraryAuthors(author); $('#library-author-new').hidden = true; $('#library-new-author').value = ''; $('#library-author-error').hidden = true;
     $('#library-hide-date').checked = Boolean(library?.hide_date_prefix); $('#library-apply-reading').checked = false; $('#library-apply-reading-field').hidden = !library; $('#library-save').textContent = library ? '保存并扫描' : '创建并扫描'; $('#library-form-error').hidden = true; $('#directory-picker').hidden = true; updateLibraryTypeFields(); if (!$('#library-dialog').open) $('#library-dialog').showModal(); $('#library-name').focus();
   }
+  function renderLibraryCoverEditor() {
+    const library = state.libraries.find(item => item.id === state.editingLibrary);
+    const host = $('#library-cover-editor'); host.hidden = !library || !isAdmin();
+    if (host.hidden) return;
+    const image = $('#library-cover-preview'); const cover = library.cover;
+    const url = cover?.url ? cover.url + '?v=' + encodeURIComponent(cover.version || 'pending') : '';
+    image.hidden = !url;
+    if (url && image.getAttribute('src') !== url) image.src = url;
+    const pending = libraryCoverBusy || Boolean(cover?.pending);
+    const button = $('#library-cover-shuffle'); button.disabled = pending || !library.book_count;
+    button.textContent = pending ? '正在生成…' : '换一组封面';
+    const status = $('#library-cover-status'); status.textContent = pending ? '正在生成封面…' : cover?.error || ''; status.hidden = !status.textContent; status.classList.toggle('form-error', Boolean(cover?.error));
+  }
+  $('#library-cover-shuffle').addEventListener('click', async () => {
+    const libraryId = state.editingLibrary; if (!libraryId || libraryCoverBusy || !isAdmin()) return;
+    const request = ++libraryCoverRequest; const auth = authGeneration; const form = libraryFormGeneration;
+    libraryCoverBusy = true; renderLibraryCoverEditor();
+    try {
+      const cover = await post('/api/libraries/' + encodeURIComponent(libraryId) + '/cover/shuffle', {});
+      if (request !== libraryCoverRequest || auth !== authGeneration || form !== libraryFormGeneration) return;
+      const library = state.libraries.find(item => item.id === libraryId); if (library) library.cover = cover;
+      await refreshLibrary();
+      if (request === libraryCoverRequest && auth === authGeneration) toast('已换一组封面，正在生成');
+    } catch (error) {
+      if (request === libraryCoverRequest && auth === authGeneration && error.status !== 401) toast(error.message);
+    } finally {
+      if (request === libraryCoverRequest && auth === authGeneration) { libraryCoverBusy = false; renderLibraryCoverEditor(); }
+    }
+  });
   function updateLibraryTypeFields() {
     const photo = $('#library-type').value === 'photo';
     $('#library-hide-date-field').hidden = !photo;
@@ -1387,15 +1443,18 @@
     libraryLink.setAttribute('aria-label', `打开写真库 ${book.library_name || ''}`);
     libraryLink.addEventListener('click', () => { $('#book-detail').close(); selectLibrary(book.library_id); });
     info.append(libraryLink, node('h2', '', book.title)); info.lastElementChild.id = 'detail-title';
-    const facts = node('div', 'detail-facts'); facts.append(node('span', '', book.release_date || '发布日期未设置'), node('span', '', `${book.page_count} 页`), node('span', '', `${modeLabels[book.reading_mode] || '单页'} · ${book.reading_mode === 'webtoon' ? '从上到下' : book.reading_direction === 'ttb' ? '上下翻页' : book.reading_direction === 'rtl' ? '从右到左' : '从左到右'}`)); info.append(facts);
+    const facts = node('div', 'detail-facts'); if (['pdf', 'epub'].includes(book.format)) facts.append(node('span', '', book.format.toUpperCase())); facts.append(node('span', '', book.release_date || '发布日期未设置'), node('span', '', `${book.page_count} 页`), node('span', '', `${modeLabels[book.reading_mode] || '单页'} · ${book.reading_mode === 'webtoon' ? '从上到下' : book.reading_direction === 'ttb' ? '上下翻页' : book.reading_direction === 'rtl' ? '从右到左' : '从左到右'}`)); info.append(facts);
+    if (book.format === 'epub' && book.document_author) info.append(node('p', 'detail-author', book.document_author));
     info.append(node('p', 'detail-author', `加入时间 · ${formatAddedDate(book.added_at)}`));
     const modelHeading = node('p', 'detail-section-label', '模特'); const chips = node('div', 'model-chips'); (book.models || []).forEach(model => { const button = node('button', 'model-chip'); button.append(modelAvatar(model, 'model-chip-avatar'), node('span', '', model.name)); button.addEventListener('click', () => { $('#book-detail').close(); navigate('model', { modelId: model.id }); }); chips.append(button); }); if (!chips.childElementCount) chips.append(node('span', 'detail-muted', '尚未关联模特')); info.append(modelHeading, chips);
     if (book.author && joinDistinctText([...(book.models || []).map(model => model.name), book.author]) !== joinDistinctText((book.models || []).map(model => model.name))) info.append(node('p', 'detail-author', `作者 · ${book.author}`));
     const actions = node('div', 'detail-actions'); const read = node('button', 'button button-primary', book.progress ? '▶ 继续阅读' : '▶ 开始阅读'); read.id = 'detail-read'; read.addEventListener('click', () => { $('#book-detail').close(); openBook(book); });
     const favorite = node('button', 'button button-secondary', book.favorite ? '♥ 已收藏' : '♡ 收藏'); favorite.id = 'detail-favorite'; favorite.setAttribute('aria-pressed', String(Boolean(book.favorite))); favorite.addEventListener('click', async () => { favorite.disabled = true; try { await toggleFavorite(book); } catch (error) { toast(error.message); favorite.disabled = false; } });
-    const edit = node('button', 'button button-secondary', '编辑资料'); edit.id = 'detail-edit'; edit.addEventListener('click', () => showMetadataForm(book)); actions.append(read, favorite); if (can('edit_metadata')) actions.append(edit); info.append(actions);
+    const edit = node('button', 'button button-secondary', '编辑资料'); edit.id = 'detail-edit'; edit.addEventListener('click', () => showMetadataForm(book)); actions.append(read, favorite); if (can('edit_metadata')) actions.append(edit);
+    if (isAdmin()) { const share = node('button', 'button button-secondary', '分享'); share.id = 'detail-share'; share.addEventListener('click', () => sharingUI.showCreate(book)); actions.append(share); }
+    info.append(actions);
     const history = node('div', 'detail-history'); history.append(node('h3', '', '阅读记录')); if (book.progress) history.append(node('p', '', `上次读到第 ${book.progress.page + 1} / ${book.page_count} 页`), node('small', '', `最近阅读 · ${formatDate(book.progress.updated_at, true)}`)); else history.append(node('p', 'detail-muted', '还没有阅读记录，翻开后会自动记录位置与时间。')); info.append(history);
-    if ((book.bookmarks || []).length) { const saved = node('div', 'detail-bookmarks'); saved.append(node('h3', '', `书签 · ${book.bookmarks.length}`)); book.bookmarks.forEach(bookmark => { const button = node('button', 'detail-bookmark', `第 ${bookmark.page + 1} 页${bookmark.note ? ' · ' + bookmark.note : ''}`); button.addEventListener('click', () => { $('#book-detail').close(); openBook(book, bookmark.page); }); saved.append(button); }); info.append(saved); }
+    if ((book.bookmarks || []).length) { const saved = node('div', 'detail-bookmarks'); saved.append(node('h3', '', `书签 · ${book.bookmarks.length}`)); book.bookmarks.forEach(bookmark => { const button = node('button', 'detail-bookmark', `第 ${bookmark.page + 1} 页${bookmark.note ? ' · ' + bookmark.note : ''}`); button.addEventListener('click', () => { $('#book-detail').close(); openBook(book, bookmark.page, null, { position: bookmark.position }); }); saved.append(button); }); info.append(saved); }
     const path = node('p', 'detail-path', book.path); path.title = book.path; info.append(path); layout.append(poster, info); $('#detail-content').replaceChildren(layout);
   }
   let metadataDirectionValue = '';
@@ -1428,6 +1487,8 @@
     $('#metadata-cover').value = (book.cover_page || 0) + 1;
     $('#metadata-cover-hint').textContent = `可选第 1–${book.page_count} 页`;
     $('#metadata-cover-source').value = book.cover_source === 'upload' ? 'upload' : 'page';
+    $('#metadata-mode').closest('.form-columns').hidden = false;
+    $('#metadata-cover-source option[value="page"]').textContent = '从作品内选页';
     $('#metadata-model-search').value = '';
     $('#metadata-new-model').value = '';
     $('#metadata-new-model-row').hidden = true;
@@ -1484,7 +1545,7 @@
     } else {
       const page = Math.max(1, Math.min(book.page_count, Number($('#metadata-cover').value) || 1)) - 1;
       preview.hidden = false;
-      preview.src = book.cover_source !== 'upload' && page === (book.cover_page || 0) ? `${bookUrl(book.id)}/cover?v=${encodeURIComponent(book.cover_version || book.cover_revision || '')}` : pageUrl(book.id, page);
+      preview.src = book.cover_source !== 'upload' && page === (book.cover_page || 0) ? `${bookUrl(book.id)}/cover?v=${encodeURIComponent(book.cover_version || book.cover_revision || '')}` : pageUrl(book, page, 800);
       preview.alt = `作品第 ${page + 1} 页封面预览`;
     }
   }
@@ -1802,13 +1863,13 @@
       if (!reader.open || token !== reader.token) return;
       const latest = await api(bookUrl(book.id));
       if (!reader.open || token !== reader.token) return;
-      if (!latest.page_count) throw new ApiError('这个文件夹里暂时没有可阅读的图片。', 404);
+      if (!latest.page_count) throw new ApiError(latest.format === 'pdf' ? '这个 PDF 暂时没有可阅读的页面。' : '这个文件夹里暂时没有可阅读的图片。', 404);
       reader.book = latest;
       if (reader.endSequence?.libraryId !== String(latest.library_id)) reader.endSequence = End.readingSequence(state.books, latest, librarySort(latest.library_id));
       const library = state.libraries.find(item => String(item.id) === String(latest.library_id));
       state.prefs.mode = latest.reading_mode || library?.reading_mode || 'single';
       state.prefs.direction = Users.readingDirection(latest, library);
-      reader.sizes = Array.from({ length: latest.page_count }, () => ({}));
+      reader.sizes = Array.from({ length: latest.page_count }, (_, index) => Model.pageDimensions(latest.page_sizes?.[index]) || {});
       reader.coverAlone = true; reader.offset = false;
       $('#cover-alone').checked = true; $('#spread-offset').checked = false;
       $('#reader-menu').hidden = true; $('#reader-menu-toggle').setAttribute('aria-expanded', 'false');
@@ -1934,7 +1995,7 @@
     if (!outgoing) $('#reader-viewport').scrollTop = 0;
     try {
       const pendingImages = spread.map(index => loadReaderImage(index));
-      reader.pageCache.setLimit(Performance.get().imageCacheLimit, [...spread, ...$$('img', wrap).map(image => Number(image.dataset.page))]);
+      configureReaderCache([...spread, ...$$('img', wrap).map(image => Number(image.dataset.page))]);
       const images = await Promise.all(pendingImages);
       if (!reader.open || token !== reader.token || epoch !== reader.epoch || state.prefs.mode === 'webtoon') return;
       rebuildSpreads();
@@ -1951,53 +2012,119 @@
       updateReaderPosition();
       markVisiblePage(reader.loadedPage);
       preloadNeighbors(reader.loadedPage);
+      refreshPdfResolution();
     } catch (error) {
       if (!reader.open || token !== reader.token || epoch !== reader.epoch) return;
       wrap.replaceChildren(makePageError(error.message, renderPage));
     }
   }
 
+  function readerMemoryBudget() { return Performance.get().imageCacheMemoryMB * 1024 * 1024; }
+  function readerCacheProtection() { return [...currentSpread(), ...$$('#page-image-wrap img').map(image => Number(image.dataset.page))]; }
+  function configureReaderCache(protectedPages = readerCacheProtection()) {
+    reader.pageCache.setLimits(Performance.get().imageCacheLimit, readerMemoryBudget(), protectedPages);
+  }
+  function pageMemoryEstimate(index) {
+    if (reader.book?.format === 'pdf') {
+      const width = readerPageWidth(index); const known = Model.pageDimensions(reader.sizes[index]);
+      return Math.min(16000000 * 4, width * width * (known ? known.height / known.width : 1.5) * 4);
+    }
+    const known = reader.sizes[index];
+    const nearby = state.prefs.mode === 'webtoon' ? reader.sizes[reader.index] : reader.sizes[currentSpread()[0]];
+    return Performance.decodedImageBytes(known, Performance.decodedImageBytes(nearby));
+  }
+  function reserveReaderPreload(index, protectedPages) {
+    if (reader.pageCache.peek(index)) return true;
+    const estimate = pageMemoryEstimate(index); const budget = readerMemoryBudget();
+    if (!budget) return true;
+    for (const key of reader.pageCache.keys()) {
+      if (reader.pageCache.availableBytes >= estimate) break;
+      if (!protectedPages.includes(key)) reader.pageCache.delete(key);
+    }
+    return reader.pageCache.availableBytes >= estimate;
+  }
   function preloadNeighbors(index) {
     if (!reader.book || state.prefs.mode === 'webtoon') return;
     const protectedPages = currentSpread(); const limit = Performance.get().imageCacheLimit;
     const candidates = [Math.max(...protectedPages) + 1, Math.min(...protectedPages) - 1].filter(value => value >= 0 && value < reader.book.page_count && !protectedPages.includes(value));
-    reader.preloads = candidates.slice(0, limit ? Math.max(0, limit - protectedPages.length) : candidates.length);
-    reader.preloads.forEach(value => loadReaderImage(value).catch(() => {}));
-    reader.pageCache.setLimit(limit, protectedPages);
+    configureReaderCache(protectedPages);
+    reader.preloads = [];
+    candidates.slice(0, limit ? Math.max(0, limit - protectedPages.length) : candidates.length).forEach(value => {
+      if (!reserveReaderPreload(value, [...protectedPages, ...reader.preloads])) return;
+      reader.preloads.push(value); loadReaderImage(value).catch(() => {});
+    });
+    configureReaderCache(protectedPages);
   }
 
   function clearReaderImages() {
+    reader.pdfUpgrades.forEach(entry => entry.cancel?.()); reader.pdfUpgrades.clear();
     reader.pageCache.clear(); reader.preloads = [];
     reader.rows.forEach(row => row.cancel?.());
   }
 
   function loadReaderImage(index) {
-    const existing = reader.pageCache.get(index); if (existing) return existing.promise;
+    const width = readerPageWidth(index);
+    const existing = reader.pageCache.get(index); if (existing && (!width || existing.width >= width || !existing.loaded)) return existing.promise;
+    const upgrading = reader.pdfUpgrades.get(index);
+    if (upgrading?.width >= width) return upgrading.promise;
+    upgrading?.cancel();
     const book = reader.book; const image = node('img');
     image.alt = `${book.title}，第 ${index + 1} 页`; image.dataset.page = index; image.decoding = 'async'; image.draggable = false;
-    const entry = { image, promise: null, cancel: null };
+    const entry = { image, promise: null, cancel: null, width, loaded: false, bytes: pageMemoryEstimate(index) };
+    const upgrade = Boolean(existing);
     entry.promise = new Promise((resolve, reject) => {
       let settled = false;
-      entry.cancel = () => { image.onload = null; image.onerror = null; image.removeAttribute('src'); if (!settled) { settled = true; reject(new Error('图片加载已取消。')); } };
-      image.onload = () => { settled = true; if (reader.book?.id === book.id) reader.sizes[index] = { width: image.naturalWidth, height: image.naturalHeight }; resolve(image); };
-      image.onerror = () => { settled = true; if (reader.pageCache.peek(index) === entry) reader.pageCache.delete(index); reject(new Error(`第 ${index + 1} 页加载失败。请检查网络，或确认图片文件仍在写真库中。`)); };
-      image.src = pageUrl(book.id, index);
+      entry.cancel = () => { image.onload = null; image.onerror = null; image.removeAttribute('src'); if (reader.pdfUpgrades.get(index) === entry) reader.pdfUpgrades.delete(index); if (!settled) { settled = true; reject(new Error('图片加载已取消。')); } };
+      image.onload = () => {
+        settled = entry.loaded = true; entry.bytes = Performance.decodedImageBytes({ width: image.naturalWidth, height: image.naturalHeight });
+        if (reader.book?.id === book.id) reader.sizes[index] = { width: image.naturalWidth, height: image.naturalHeight };
+        if (upgrade && reader.pdfUpgrades.get(index) === entry) {
+          // Keep the current page intact until its sharper replacement has decoded.
+          if (existing.image.parentElement === $('#page-image-wrap')) existing.image.replaceWith(image);
+          reader.pdfUpgrades.delete(index); reader.pageCache.set(index, entry);
+        }
+        resolve(image); queueMicrotask(() => { if (reader.pageCache.peek(index) === entry) { configureReaderCache(); if (image.parentElement === $('#page-image-wrap') && width < readerPageWidth(index)) refreshPdfResolution(); } });
+      };
+      image.onerror = () => { settled = true; if (reader.pdfUpgrades.get(index) === entry) reader.pdfUpgrades.delete(index); if (reader.pageCache.peek(index) === entry) reader.pageCache.delete(index); reject(new Error(`第 ${index + 1} 页加载失败。请检查网络，或确认${book.format === 'pdf' ? 'PDF 文件' : '图片文件'}仍在写真库中。`)); };
+      image.src = pageUrl(book, index, width || 1600);
     });
-    reader.pageCache.set(index, entry); return entry.promise;
+    if (upgrade) reader.pdfUpgrades.set(index, entry); else reader.pageCache.set(index, entry);
+    return entry.promise;
+  }
+
+  function readerPageWidth(index) {
+    if (reader.book?.format !== 'pdf') return 0;
+    const viewport = $('#reader-viewport'); const scroll = state.prefs.mode === 'webtoon';
+    return Model.pdfPageWidth({ width: viewport.clientWidth || window.innerWidth, height: viewport.clientHeight || window.innerHeight,
+      pixelRatio: window.devicePixelRatio, pages: scroll ? 1 : currentSpread().length, fit: state.prefs.fit, scroll, size: reader.sizes[index] });
+  }
+
+  function refreshPdfResolution() {
+    if (!reader.open || reader.book?.format !== 'pdf') return;
+    if (state.prefs.mode === 'webtoon') {
+      reader.visible.forEach(index => loadScrollPage(index, false, true));
+      return;
+    }
+    // No page rerender, scroll reset or new reading-progress event on resize.
+    currentSpread().forEach(index => { if (reader.pageCache.peek(index)) loadReaderImage(index).catch(() => {}); });
   }
 
   function scrollProtectedPages() {
     return new Set([...reader.visible, reader.index, ...(reader.restoring === null ? [] : [reader.restoring])]);
   }
 
-  function trimScrollImages() {
-    const limit = Performance.get().imageCacheLimit; if (!limit) return;
-    const protectedPages = scrollProtectedPages(); const retained = reader.rows.map((row, index) => ({ row, index })).filter(item => item.row.loaded || item.row.loading);
-    let count = retained.length;
+  function scrollRetainedBytes() {
+    return reader.rows.reduce((sum, row, index) => sum + (row.loaded || row.loading ? row.bytes || pageMemoryEstimate(index) : 0), 0);
+  }
+  function trimScrollImages(reserveBytes = 0, reserveCount = 0, additionalProtected = []) {
+    const limit = Performance.get().imageCacheLimit; const budget = readerMemoryBudget(); if (!limit && !budget) return;
+    const protectedPages = new Set([...scrollProtectedPages(), ...additionalProtected]); const retained = reader.rows.map((row, index) => ({ row, index })).filter(item => item.row.loaded || item.row.loading);
+    let count = retained.length; let bytes = scrollRetainedBytes();
     retained.sort((a, b) => Math.abs(b.index - reader.index) - Math.abs(a.index - reader.index)).forEach(({ row, index }) => {
-      if (count <= limit || protectedPages.has(index)) return;
+      if ((!limit || count + reserveCount <= limit) && (!budget || bytes + reserveBytes <= budget) || protectedPages.has(index)) return;
       const image = $('img', row.element);
       if (image?.naturalWidth && image.naturalHeight) row.ratio = image.naturalWidth / image.naturalHeight;
+      bytes -= row.bytes || pageMemoryEstimate(index); row.bytes = 0;
       row.cancel?.(); row.loaded = false; row.loading = false; row.failed = false; row.element.classList.remove('loaded');
       if (row.ratio) row.element.style.aspectRatio = String(row.ratio);
       row.element.replaceChildren(node('span', 'scroll-placeholder', `第 ${index + 1} 页`)); count -= 1;
@@ -2010,7 +2137,13 @@
     const candidates = [];
     for (let distance = 1; distance <= step; distance += 1) candidates.push(index + distance, index - distance);
     const available = limit ? Math.max(0, limit - protectedPages.size) : candidates.length;
-    candidates.filter(value => value >= 0 && value < reader.rows.length && !protectedPages.has(value)).slice(0, available).forEach(value => loadScrollPage(value));
+    const retainedCandidates = [];
+    candidates.filter(value => value >= 0 && value < reader.rows.length && !protectedPages.has(value)).slice(0, available).forEach(value => {
+      const row = reader.rows[value]; if (row.loaded || row.loading) { retainedCandidates.push(value); return; }
+      const estimate = pageMemoryEstimate(value); trimScrollImages(estimate, 1, retainedCandidates);
+      if (readerMemoryBudget() && scrollRetainedBytes() + estimate > readerMemoryBudget()) return;
+      loadScrollPage(value); retainedCandidates.push(value);
+    });
     trimScrollImages();
   }
 
@@ -2026,7 +2159,10 @@
       row.dataset.index = index;
       row.setAttribute('aria-label', `第 ${index + 1} 页`);
       row.append(node('span', 'scroll-placeholder', `第 ${index + 1} 页`));
-      reader.rows.push({ element: row, loaded: false, loading: false, failed: false });
+      const dimensions = Model.pageDimensions(reader.sizes[index]);
+      const ratio = dimensions ? dimensions.width / dimensions.height : null;
+      if (ratio) row.style.aspectRatio = String(ratio);
+      reader.rows.push({ element: row, loaded: false, loading: false, failed: false, ratio });
       fragment.append(row);
     }
     container.append(fragment);
@@ -2049,15 +2185,18 @@
     loadScrollBuffer(target);
   }
 
-  function loadScrollPage(index, retry = false) {
+  function loadScrollPage(index, retry = false, refresh = false) {
     const row = reader.rows[index];
-    if (!row || row.loaded || row.loading || (row.failed && !retry)) return;
+    const width = readerPageWidth(index);
+    const upgrade = Boolean(refresh && row?.loaded && width && width > (row.width || 0));
+    if (!row || (row.loaded && !upgrade) || row.loading || (row.failed && !retry)) return;
     const token = reader.token;
     const epoch = reader.epoch;
     const book = reader.book;
     row.loading = true;
+    row.bytes = pageMemoryEstimate(index);
     row.failed = false;
-    row.element.replaceChildren(node('span', 'scroll-placeholder', `正在加载第 ${index + 1} 页…`));
+    if (!upgrade) row.element.replaceChildren(node('span', 'scroll-placeholder', `正在加载第 ${index + 1} 页…`));
     const image = node('img');
     image.alt = `${book.title}，第 ${index + 1} 页`;
     image.decoding = 'async';
@@ -2066,6 +2205,9 @@
       if (!reader.open || token !== reader.token || epoch !== reader.epoch || reader.rows[index] !== row || !row.loading) return;
       row.loaded = true;
       row.loading = false;
+      row.width = width;
+      row.bytes = Performance.decodedImageBytes({ width: image.naturalWidth, height: image.naturalHeight });
+      reader.sizes[index] = { width: image.naturalWidth, height: image.naturalHeight };
       row.ratio = image.naturalWidth / image.naturalHeight;
       row.element.style.aspectRatio = '';
       row.element.classList.add('loaded');
@@ -2076,17 +2218,22 @@
       }
       trimScrollImages();
       scheduleVisibleScroll();
+      if (book.format === 'pdf' && width < readerPageWidth(index)) queueMicrotask(() => {
+        if (reader.open && token === reader.token && epoch === reader.epoch && reader.rows[index] === row && reader.visible.has(index)) loadScrollPage(index, false, true);
+      });
     };
     const onError = () => {
       if (!reader.open || token !== reader.token || epoch !== reader.epoch || reader.rows[index] !== row || !row.loading) return;
       row.loading = false;
+      if (upgrade) { row.failed = false; return; }
+      row.bytes = 0;
       row.failed = true;
       row.element.replaceChildren(makePageError(`第 ${index + 1} 页加载失败`, () => loadScrollPage(index, true)));
     };
     image.addEventListener('load', onLoad, { once: true });
     image.addEventListener('error', onError, { once: true });
     row.cancel = () => { image.removeEventListener('load', onLoad); image.removeEventListener('error', onError); image.removeAttribute('src'); row.loading = false; };
-    image.src = pageUrl(book.id, index);
+    image.src = pageUrl(book, index, width || 1600);
   }
 
   function scheduleVisibleScroll() {
@@ -2446,6 +2593,7 @@
   document.addEventListener('click', event => { if (!event.target.closest('.account-area')) closeAccountMenu(); });
   document.addEventListener('keydown', event => { if (event.key === 'Escape' && !$('#account-menu').hidden) { closeAccountMenu(); $('#account-toggle').focus(); } });
   ['account-settings', 'sidebar-settings'].forEach(id => { $('#' + id).addEventListener('click', () => navigate('settings')); });
+  $('#manage-shares').addEventListener('click', () => { if (requireAccess() && isAdmin()) navigate('settings', { section: 'shares' }); });
   $('#optimization-pending').addEventListener('click', () => { if (isAdmin()) navigate('settings', { section: 'transcoding' }); });
   ['optimization-notice-close', 'optimization-notice-later'].forEach(id => $('#' + id).addEventListener('click', () => $('#optimization-notice-dialog').close()));
   $('#optimization-notice-view').addEventListener('click', () => { $('#optimization-notice-dialog').close(); if (isAdmin()) navigate('settings', { section: 'transcoding' }); });
@@ -2727,7 +2875,7 @@
     event.preventDefault(); const target = state.bookmarkTarget; if (!target) return;
     const button = $('#bookmark-save'); button.disabled = true; $('#bookmark-error').hidden = true;
     try {
-      const result = await post(bookUrl(target.bookId) + '/bookmarks', { page: target.page, note: $('#bookmark-note').value.trim() });
+      const result = await post(bookUrl(target.bookId) + '/bookmarks', { page: target.page, note: $('#bookmark-note').value.trim(), ...(target.position !== undefined ? { position: target.position } : {}) });
       const book = reader.book?.id === target.bookId ? reader.book : state.books.find(item => item.id === target.bookId);
       state.bookmarks = [{ ...result.bookmark, book }, ...state.bookmarks.filter(item => item.id !== result.bookmark.id)];
       if (reader.book?.id === target.bookId) reader.book.bookmarks = [result.bookmark, ...(reader.book.bookmarks || []).filter(item => item.id !== result.bookmark.id)];
@@ -2743,6 +2891,7 @@
   $('#reader-fit').addEventListener('change', event => {
     savePref('fit', event.target.value);
     applyReaderPrefs();
+    refreshPdfResolution();
     if (state.prefs.mode === 'webtoon' && reader.book) {
       reader.restoring = reader.index;
       reader.rows[reader.index]?.element.scrollIntoView({ block: 'start', behavior: 'instant' });
@@ -2772,6 +2921,7 @@
       if (!reader.open || !reader.book) return;
       applyReaderPrefs();
       if (state.prefs.mode === 'double' && readerMode() !== reader.effective) setReaderMode();
+      else refreshPdfResolution();
     }, 120);
   }).observe($('#reader-viewport'));
   $('#previous-page').addEventListener('click', () => movePage(-1));
@@ -2914,7 +3064,7 @@
       renderChapters();
       if (state.prefs.mode === 'webtoon') loadScrollBuffer(reader.index);
       else preloadNeighbors(reader.index);
-    } else reader.pageCache.setLimit(Performance.get().imageCacheLimit);
+    } else configureReaderCache([]);
   });
 
   setupReaderChoices();

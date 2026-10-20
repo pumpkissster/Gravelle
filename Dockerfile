@@ -23,6 +23,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# The PDFium Linux font mapper scans /usr/share/fonts directly. Keep the
+# Debian package copyright files alongside the CJK fonts and fontconfig tools.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends fontconfig fonts-noto-cjk \
+    && fc-cache -f \
+    && test -s /usr/share/doc/fonts-noto-cjk/copyright \
+    && test -s /usr/share/doc/fontconfig/copyright \
+    && python -c "import subprocess; matches=[subprocess.check_output(['fc-match','-f','%{family}','sans-serif:lang='+lang],text=True) for lang in ('zh-cn','zh-tw','ja','ko')]; assert all('Noto' in name and 'CJK' in name for name in matches), 'CJK fallback fonts are missing'" \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN groupadd --gid 1000 sumi \
     && useradd --uid 1000 --gid sumi --no-create-home \
         --home-dir /nonexistent --shell /usr/sbin/nologin sumi \
@@ -30,9 +40,12 @@ RUN groupadd --gid 1000 sumi \
     && chown sumi:sumi /data
 
 COPY requirements.txt ./requirements.txt
-RUN python -m pip install --no-cache-dir -r requirements.txt
+RUN python -m pip install --no-cache-dir -r requirements.txt \
+    && python -c "import pypdfium2; pypdfium2.PdfDocument.new().close()" \
+    && python -c "from cryptography.hazmat.primitives.ciphers.aead import AESGCM; c=AESGCM(bytes(32)); assert c.decrypt(bytes(12),c.encrypt(bytes(12),b'build-only',b''),b'')==b'build-only'"
 
-COPY server.py accounts.py password_reset.py transcoding.py image_search.py image_search_features.py task_scheduler.py ./
+COPY server.py accounts.py password_reset.py transcoding.py image_search.py image_search_features.py task_scheduler.py library_covers.py cache_manager.py sharing.py share_crypto.py share_passwords.py epub_reader.py pdf_reader.py ./
+COPY desktop/licenses/OpenSSL-4.0.2-LICENSE.txt ./licenses/cryptography/OpenSSL-4.0.2-LICENSE.txt
 COPY release.json LICENSE ./
 COPY static ./static
 

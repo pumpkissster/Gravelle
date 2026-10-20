@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import socket
+import sys
 import tempfile
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
@@ -20,8 +21,8 @@ class LauncherError(Exception):
 
 
 def user_directory() -> Path:
-    base = Path(os.environ.get("LOCALAPPDATA", Path.home() / ".local" / "share"))
-    return base / "Gravelle"
+    from desktop.platforms import user_directory as platform_directory
+    return platform_directory(platform=sys.platform)
 
 
 @dataclass(frozen=True)
@@ -192,6 +193,7 @@ class ReleaseConfig:
     repository: str
     asset_name: str = "Gravelle-Setup-{version}-x64.exe"
     sha256_asset_name: str = "SHA256SUMS.txt"
+    platform: str = "windows"
 
     def validate(self) -> "ReleaseConfig":
         if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}", self.repository):
@@ -199,8 +201,11 @@ class ReleaseConfig:
         for name in (self.asset_name.replace("{version}", "1.0.0"), self.sha256_asset_name):
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,150}", name):
                 raise LauncherError("更新文件名称配置无效。")
-        if not self.asset_name.casefold().endswith(".exe"):
-            raise LauncherError("更新安装程序必须是 EXE 文件。")
+        if self.platform not in ("windows", "macos"):
+            raise LauncherError("更新平台配置无效。")
+        suffix = ".dmg" if self.platform == "macos" else ".exe"
+        if not self.asset_name.casefold().endswith(suffix):
+            raise LauncherError("更新文件格式与平台不匹配。")
         return self
 
     @property
@@ -211,9 +216,24 @@ class ReleaseConfig:
 def load_release_config(resource_root: Path) -> ReleaseConfig | None:
     # Only installation resources / administrator environment configure the
     # update origin. The writable launcher.json cannot change it.
+    def configured(repository, value=None):
+        value = value or {}
+        if sys.platform == "darwin":
+            from desktop.platforms import macos_update_asset
+            try:
+                asset = macos_update_asset()
+            except ValueError as error:
+                raise LauncherError("当前 Mac 芯片架构暂不受支持。") from error
+            return ReleaseConfig(repository, asset_name=asset,
+                                 sha256_asset_name=value.get("sha256_asset_name", "SHA256SUMS.txt"),
+                                 platform="macos").validate()
+        if value.get("platform", "windows") != "windows":
+            raise LauncherError("更新来源的平台与当前启动器不匹配。")
+        return ReleaseConfig(repository, **{key: value[key] for key in ("asset_name", "sha256_asset_name") if key in value}).validate()
+
     repository = os.environ.get("GRAVELLE_RELEASE_REPOSITORY", "").strip()
     if repository:
-        return ReleaseConfig(repository).validate()
+        return configured(repository)
     path = resource_root / "desktop" / "release.json"
     if not path.exists():
         return None
@@ -223,7 +243,7 @@ def load_release_config(resource_root: Path) -> ReleaseConfig | None:
             raise ValueError("Expected an object")
         if not value.get("repository"):
             return None
-        return ReleaseConfig(**{key: value[key] for key in ("repository", "asset_name", "sha256_asset_name") if key in value}).validate()
+        return configured(value["repository"], value)
     except (OSError, ValueError, TypeError) as error:
         raise LauncherError("更新来源配置无法读取。") from error
 
@@ -250,6 +270,14 @@ def check_update(config: ReleaseConfig | None, current_version: str) -> dict:
         if not re.fullmatch(r"v?(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})", latest):
             raise LauncherError("发布标签不是受支持的稳定版本。")
         available = version_key(latest) > version_key(current_version)
+        if available and config.platform == "macos":
+            assets = release.get("assets", [])
+            names = {item.get("name") for item in assets if isinstance(item, dict) and isinstance(item.get("name"), str)} if isinstance(assets, list) else set()
+            expected = config.asset_name.replace("{version}", latest.lstrip("vV"))
+            if not {expected, config.sha256_asset_name} <= names:
+                return {"configured": True, "available": False, "version": latest.lstrip("vV"),
+                        "platform_available": False, "url": config.releases_url,
+                        "message": "最新版本暂未提供适合此 Mac 的安装包。"}
         # Do not navigate to html_url or execute assets supplied by the API.
         # Construct the release page from the fixed trusted repository instead.
         return {"configured": True, "available": available, "version": latest.lstrip("vV"), "tag": latest,

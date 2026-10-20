@@ -1,10 +1,13 @@
 name: Build and release Gravelle
 
 on:
+  push:
+    branches:
+      - dev/release-0.9.0
   workflow_dispatch:
     inputs:
       release_version:
-        description: "版本号，必须与 server.py 的 VERSION 一致，例如 0.8.6"
+        description: "版本号，必须与 server.py 的 VERSION 一致，例如 0.9.0"
         required: true
         type: string
       publish:
@@ -38,6 +41,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
       source_sha: ${{ steps.version.outputs.source_sha }}
+      macos_required: ${{ steps.version.outputs.macos_required }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -55,7 +59,8 @@ jobs:
         id: version
         env:
           REQUESTED_VERSION: ${{ inputs.release_version }}
-          PUBLISH: ${{ inputs.publish }}
+          PUBLISH: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
+          EVENT_NAME: ${{ github.event_name }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           SOURCE_TAG: ${{ inputs.source_tag }}
         run: |
@@ -65,16 +70,23 @@ jobs:
           version = next(ast.literal_eval(n.value) for n in tree.body
                          if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'VERSION' for t in n.targets))
           assert re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', version), 'Only stable three-part versions are released'
-          assert os.environ['REQUESTED_VERSION'] == version, 'Requested version must match server.VERSION'
+          if os.environ['EVENT_NAME'] == 'workflow_dispatch':
+              assert os.environ['REQUESTED_VERSION'] == version, 'Requested version must match server.VERSION'
+          else:
+              assert os.environ['EVENT_NAME'] == 'push' and os.environ['GITHUB_REF'] == 'refs/heads/dev/release-0.9.0', 'Automatic builds are restricted to the release candidate branch'
           source_tag = os.environ['SOURCE_TAG']
           assert not source_tag or source_tag == 'v' + version, 'source_tag must be the exact existing stable version tag'
           source_sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          notes = pathlib.Path('docs/releases') / (version + '.md')
+          assert notes.is_file() and notes.read_text(encoding='utf-8').strip(), 'A reviewed version description is required before building release assets'
           if os.environ['PUBLISH'] == 'true':
+              assert os.environ['EVENT_NAME'] == 'workflow_dispatch', 'Publishing requires an explicit manual workflow dispatch'
               assert os.environ['GITHUB_REF'] == 'refs/heads/' + os.environ['DEFAULT_BRANCH'], 'Publish from the default branch only'
               internal_plan = subprocess.check_output(['git', 'ls-files', '--', 'docs/next-version.md'], text=True).strip()
               assert not internal_plan, 'Internal development plans must not be tracked in the published source commit'
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
-              output.write(f'version={version}\ntag=v{version}\nsource_sha={source_sha}\n')
+              macos_required = str(tuple(map(int, version.split('.'))) >= (0, 9, 0)).lower()
+              output.write(f'version={version}\ntag=v{version}\nsource_sha={source_sha}\nmacos_required={macos_required}\n')
           PY
       - run: python -m pip install -r requirements.txt
       - name: Check Docker build context excludes private data
@@ -139,6 +151,17 @@ jobs:
             dist/windows/*.zip
           if-no-files-found: error
           retention-days: 14
+
+  macos:
+    if: needs.test.outputs.macos_required == 'true'
+    needs: test
+    uses: ./.github/workflows/macos-build.yml
+    with:
+      source_ref: ${{ needs.test.outputs.source_sha }}
+      sign_and_notarize: false
+      require_native_gui: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
+    permissions:
+      contents: read
 
   docker-validate:
     needs: test
@@ -226,9 +249,90 @@ jobs:
           compression-level: 0
           retention-days: 7
 
+  assemble:
+    if: ${{ !cancelled() && needs.test.result == 'success' && needs.windows.result == 'success' && needs['docker-validate'].result == 'success' && (needs.macos.result == 'success' || (needs.macos.result == 'skipped' && needs.test.outputs.macos_required != 'true')) }}
+    needs: [test, windows, macos, docker-validate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      RELEASE_VERSION: ${{ needs.test.outputs.version }}
+      MACOS_REQUIRED: ${{ needs.test.outputs.macos_required }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ needs.test.outputs.source_sha }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v8
+        with:
+          name: windows-release
+          path: dist/release
+      - uses: actions/download-artifact@v8
+        if: needs.test.outputs.macos_required == 'true'
+        with:
+          name: gravelle-macos-arm64-development
+          path: ${{ runner.temp }}/macos-arm64
+      - uses: actions/download-artifact@v8
+        if: needs.test.outputs.macos_required == 'true'
+        with:
+          name: gravelle-macos-x64-development
+          path: ${{ runner.temp }}/macos-x64
+      - name: Verify and select both Mac architecture packages
+        if: needs.test.outputs.macos_required == 'true'
+        run: |
+          python - <<'PY'
+          import hashlib, os, pathlib, shutil
+          version = os.environ['RELEASE_VERSION']
+          destination = pathlib.Path('dist/release')
+          for arch in ('arm64', 'x64'):
+              source = pathlib.Path(os.environ['RUNNER_TEMP']) / ('macos-' + arch)
+              names = {f'Gravelle-macOS-{version}-{arch}.{extension}' for extension in ('dmg', 'zip')}
+              entries = [line.split('  ', 1) for line in (source / 'SHA256SUMS.txt').read_text(encoding='ascii').splitlines()]
+              assert len(entries) == len(names) and {name for digest, name in entries} == names, 'Unexpected Mac checksum entries'
+              for digest, name in entries:
+                  asset = source / name
+                  assert asset.is_file() and not asset.is_symlink(), 'Missing Mac release asset: ' + name
+                  assert hashlib.sha256(asset.read_bytes()).hexdigest() == digest, 'Mac checksum mismatch: ' + name
+                  shutil.copyfile(asset, destination / name)
+          PY
+      - name: Assemble source, deployment assets and exact reviewed description
+        run: |
+          set -euo pipefail
+          python packaging/package_source.py --output-dir dist/release --version "$RELEASE_VERSION"
+          cp "docs/releases/$RELEASE_VERSION.md" dist/release-notes.md
+          python - <<'PY'
+          import hashlib, os, pathlib
+          version = os.environ['RELEASE_VERSION']
+          root = pathlib.Path('dist/release')
+          names = {f'Gravelle-Setup-{version}-x64.exe', f'Gravelle-Windows-{version}-x64.zip',
+                   f'Gravelle-Docker-{version}.zip', f'Gravelle-Source-{version}.zip'}
+          if os.environ['MACOS_REQUIRED'] == 'true':
+              names.update(f'Gravelle-macOS-{version}-{arch}.{extension}'
+                           for arch in ('arm64', 'x64') for extension in ('dmg', 'zip'))
+          assert {asset.name for asset in root.iterdir()} == names | {'SHA256SUMS.txt'}, 'Release asset set is incomplete or contains unexpected files'
+          entries = [line.split('  ', 1) for line in (root / 'SHA256SUMS.txt').read_text(encoding='ascii').splitlines()]
+          assert len(entries) == len(names) and {name for digest, name in entries} == names, 'Combined checksums must include every release asset exactly once'
+          for digest, name in entries:
+              asset = root / name
+              assert asset.is_file() and not asset.is_symlink(), 'Invalid release asset: ' + name
+              assert hashlib.sha256(asset.read_bytes()).hexdigest() == digest, 'Combined checksum mismatch: ' + name
+          assert pathlib.Path('dist/release-notes.md').read_bytes() == (pathlib.Path('docs/releases') / (version + '.md')).read_bytes(), 'Release description must exactly match the reviewed document'
+          PY
+      - name: Preserve complete candidate assets and description for review
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-candidate
+          path: |
+            dist/release/*
+            dist/release-notes.md
+          if-no-files-found: error
+          retention-days: 14
+
   publish:
-    if: inputs.publish
-    needs: [test, windows, docker-validate]
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    needs: [test, assemble]
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -240,6 +344,7 @@ jobs:
       RELEASE_TAG: ${{ needs.test.outputs.tag }}
       RELEASE_REPOSITORY: ${{ github.repository }}
       SOURCE_SHA: ${{ needs.test.outputs.source_sha }}
+      MACOS_REQUIRED: ${{ needs.test.outputs.macos_required }}
       DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE }}
       DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
     steps:
@@ -259,42 +364,13 @@ jobs:
           PY
       - uses: actions/download-artifact@v8
         with:
-          name: windows-release
-          path: dist/release
-      - name: Assemble source and Docker deployment assets
-        env:
-          PUBLISH_DOCKER: ${{ inputs.publish_docker }}
+          name: release-candidate
+          path: dist
+      - name: Verify downloaded release checksums and approved description
         run: |
           set -euo pipefail
-          python packaging/package_source.py --output-dir dist/release --version "$RELEASE_VERSION"
-          if [ "$PUBLISH_DOCKER" = true ]; then
-            docker_note="Docker Hub 镜像：\`$DOCKERHUB_IMAGE:$RELEASE_VERSION\`（linux/amd64、linux/arm64）"
-          else
-            docker_note="Docker Hub 镜像：本次尚未发布，暂请使用源码构建；Docker 配置包已准备。"
-          fi
-          cat > dist/release-notes.md <<EOF
-          Windows 安装包：Gravelle-Setup-$RELEASE_VERSION-x64.exe
-
-          $docker_note
-
-          Docker 安装配置包：Gravelle-Docker-$RELEASE_VERSION.zip，部署步骤见包内 docs/docker-release.md。
-
-          更新前请备份服务端的数据目录。文件校验值见 SHA256SUMS.txt。
-          EOF
-          if [ -f "docs/releases/$RELEASE_VERSION.md" ]; then
-            printf '\n' >> dist/release-notes.md
-            cat "docs/releases/$RELEASE_VERSION.md" >> dist/release-notes.md
-          fi
-          if [ "$RELEASE_VERSION" = '1.8.3' ]; then
-            cat >> dist/release-notes.md <<'EOF'
-
-          本次更新：
-          - GitHub 仓库名称统一为 Gravelle，更新检查和官方链接同步调整。
-          - Windows 安装程序支持简体中文与英文，默认跟随系统界面语言，也可手动选择。
-          - 启动器采用用户提供的 SVG 字标，调整浅粉配色、分组卡片和操作区布局；小屏窗口可滚动配置区域。
-          - 启动器加入 Windows 高 DPI 感知，改善 4K 高缩放屏幕上的文字清晰度。
-          EOF
-          fi
+          (cd dist/release && sha256sum -c SHA256SUMS.txt)
+          cmp "docs/releases/$RELEASE_VERSION.md" dist/release-notes.md
       - name: Create or resume a draft release
         id: release
         env:
@@ -314,10 +390,13 @@ jobs:
           if release['isDraft']:
               assert release['targetCommitish'] == os.environ['SOURCE_SHA'], 'Existing draft belongs to a different source commit'
           else:
-              assert os.environ['PUBLISH_DOCKER'] == 'true', 'Published Windows assets are immutable; use a new version for changes'
+              assert os.environ['PUBLISH_DOCKER'] == 'true', 'Published release assets are immutable; use a new version for changes'
               version = os.environ['RELEASE_VERSION']
               required = {f'Gravelle-Setup-{version}-x64.exe', f'Gravelle-Windows-{version}-x64.zip',
                           f'Gravelle-Docker-{version}.zip', f'Gravelle-Source-{version}.zip', 'SHA256SUMS.txt'}
+              if os.environ['MACOS_REQUIRED'] == 'true':
+                  required.update(f'Gravelle-macOS-{version}-{arch}.{extension}'
+                                  for arch in ('arm64', 'x64') for extension in ('dmg', 'zip'))
               assert required <= {asset['name'] for asset in release['assets']}, 'Published release is missing required assets; do not replace it automatically'
               with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
                   output.write('existing_published=true\n')
@@ -330,6 +409,7 @@ jobs:
               --draft --title "Gravelle $RELEASE_VERSION" --notes-file dist/release-notes.md
           fi
           if [ "$upload_assets" = true ]; then
+            gh release edit "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" --notes-file dist/release-notes.md
             gh release upload "$RELEASE_TAG" dist/release/* --repo "$RELEASE_REPOSITORY" --clobber
           fi
       - uses: docker/setup-qemu-action@v4
@@ -359,25 +439,6 @@ jobs:
             type=gha,scope=gravelle-arm64
           sbom: true
           provenance: mode=min
-      - name: Record whether the Docker image is published
-        env:
-          PUBLISH_DOCKER: ${{ inputs.publish_docker }}
-        run: |
-          gh release view "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" --json body > "$RUNNER_TEMP/release-body.json"
-          python - <<'PY'
-          import json, os, pathlib, re
-          body = json.loads((pathlib.Path(os.environ['RUNNER_TEMP']) / 'release-body.json').read_text())['body']
-          if os.environ['PUBLISH_DOCKER'] == 'true':
-              note = f"Docker Hub 镜像：`{os.environ['DOCKERHUB_IMAGE']}:{os.environ['RELEASE_VERSION']}`（linux/amd64、linux/arm64）"
-          else:
-              note = 'Docker Hub 镜像：本次尚未发布，暂请使用源码构建；Docker 配置包已准备。'
-          if re.search(r'^Docker Hub 镜像：.*$', body, flags=re.M):
-              body = re.sub(r'^Docker Hub 镜像：.*$', lambda match: note, body, flags=re.M)
-          else:
-              body = body.rstrip() + '\n\n' + note + '\n'
-          pathlib.Path('dist/docker-release-notes.md').write_text(body, encoding='utf-8')
-          PY
-          gh release edit "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" --notes-file dist/docker-release-notes.md
       - name: Publish the GitHub release
         if: steps.release.outputs.existing_published != 'true'
         run: gh release edit "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" --draft=false --latest

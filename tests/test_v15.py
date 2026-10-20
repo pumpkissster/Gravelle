@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import sqlite3
 import struct
+import time
 import unittest
 import zipfile
 import zlib
@@ -288,8 +289,14 @@ class CoverThumbnailTests(DisposableAppTest):
         self.route = '/api/books/' + self.book['id']
 
     def cached_files(self):
+        # Authorized catalogue reads may have scheduled a library montage.
+        # Snapshot persistent page covers only after that producer has settled.
+        deadline = time.monotonic() + 10
+        while self.library(self.library_record['id']).get('cover', {}).get('pending'):
+            self.assertLess(time.monotonic(), deadline, 'Generated montage did not finish')
+            time.sleep(.02)
         return {path.name: (path.read_bytes(), path.stat().st_mtime_ns)
-                for path in (self.app.data / 'covers').glob('*') if path.is_file()}
+                for path in (self.app.data / 'covers').glob('*.jpg') if path.is_file()}
 
     def upload(self, content, **extra):
         return self.app.request(self.route + '/metadata', {
@@ -414,6 +421,7 @@ class CoverThumbnailTests(DisposableAppTest):
             self.assertNotIn(274, image.getexif())
 
     def test_cover_upload_and_multi_path_author_changes_require_auth_and_same_origin(self):
+        baseline = self.cached_files()
         self.assertEqual(self.app.request('/api/logout', {})[0], 200)
         body = {'cover_upload': {'data': base64.b64encode(self.original).decode()}}
         library_body = {'paths': [str(self.root)], 'default_author_id': None}
@@ -425,7 +433,7 @@ class CoverThumbnailTests(DisposableAppTest):
                               ('/api/libraries/' + self.library_record['id'], library_body)):
             self.assertEqual(self.app.request(path, payload, {'Origin': 'https://example.invalid'})[0], 403)
         self.assertEqual(self.detail(self.book)['cover_source'], 'page')
-        self.assertEqual(self.cached_files(), {})
+        self.assertEqual(self.cached_files(), baseline)
 
 
 class ReadingAndMigrationTests(DisposableAppTest):

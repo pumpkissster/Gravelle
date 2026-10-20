@@ -7,6 +7,16 @@
 !image_search.py
 !image_search_features.py
 !task_scheduler.py
+!library_covers.py
+!cache_manager.py
+!pdf_reader.py
+!epub_reader.py
+!sharing.py
+!share_crypto.py
+!share_passwords.py
+!desktop/
+!desktop/licenses/
+!desktop/licenses/OpenSSL-4.0.2-LICENSE.txt
 !requirements.txt
 !release.json
 !LICENSE

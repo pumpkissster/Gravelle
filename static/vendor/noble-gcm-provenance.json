@@ -1,0 +1,29 @@
+{
+  "package": "@noble/ciphers",
+  "version": "2.4.0",
+  "tarball": "https://registry.npmjs.org/@noble/ciphers/-/ciphers-2.4.0.tgz",
+  "tarball_integrity": "sha512-AnjFn0Jv92laAkvMrghlFZq4qQCIN/4DxFV/eooqtC2YTjB7kBeLMS2T9KJX4Dn+ZVXLOwK0lSgqDtx9gvxtiw==",
+  "tarball_sha256": "4a398bcc280c8742d474f9162f6d3c153e52ab1078e8ab592b4720410fb3c3e9",
+  "source_sha256": {
+    "aes.js": "941ebefe14c48cd1401ffe52f329d4e6ff14f3f596681b211a33cde21de3a90c",
+    "_polyval.js": "735b078133e0c5a97dd984a21389f152dc7958b283f52504f6f0906ded243fa5",
+    "utils.js": "a443ec1f60d1aaa25d1b7d8c102d33c0e8e6d683ada1ad17be9c32e69170ff95",
+    "LICENSE": "f36671a5487c9c5050efacb58011c37c24c55a889803cb036cf9d9a6347c1e2d",
+    "package.json": "feb7f2751f467dbde186fbcbaa7512ca0fe4c30bd0429e9e276d0c186357697b"
+  },
+  "build_tool": {
+    "package": "esbuild",
+    "version": "0.28.2",
+    "reference_executable_package": "@esbuild/win32-x64",
+    "reference_executable_integrity": "sha512-5ebpxr3nWMzrL/rnUI755Jkuee0bHL/Gq0WTF9lvcpv73wAp5eu8MfBUgWK9bhWvZjj7yX8etf/8tI8Ney695g=="
+  },
+  "flags": [
+    "--bundle",
+    "--format=iife",
+    "--global-name=GravelleNobleGCM",
+    "--minify",
+    "--target=es2020",
+    "--legal-comments=inline"
+  ],
+  "bundle_sha256": "9176e65441db300d2315b4fab4f7eef2f86ac06da45066a54c50c8285936ace3"
+}

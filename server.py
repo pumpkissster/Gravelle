@@ -30,6 +30,7 @@ import re
 import secrets
 import signal
 import socket
+from socketserver import TCPServer
 import sqlite3
 import stat
 import struct
@@ -41,15 +42,20 @@ import warnings
 from urllib.parse import parse_qs, urlsplit
 import zipfile
 
-from PIL import Image, ImageOps, UnidentifiedImageError
+from PIL import Image, ImageDraw, ImageOps, UnidentifiedImageError
 from accounts import (PERMISSION_KEYS, PERMISSION_OPTIONS, check_password, hash_password,
                       migrate_accounts, prepare_account_migration, validate_password)
 from password_reset import DataDirectoryLock
 from transcoding import TranscodingManager
 from image_search import ImageSearchManager, MAX_QUERY_BYTES
 from task_scheduler import SharedTaskScheduler
+from library_covers import LibraryCoverManager
+from cache_manager import CacheManager
+from pdf_reader import PdfManager, page_key as pdf_page_key, source_version as pdf_source_version
+from epub_reader import EpubManager, METADATA_VERSION as EPUB_METADATA_VERSION, legacy_image_page
+from sharing import SharingManager
 
-VERSION = "0.8.6"
+VERSION = "0.9.0"
 MEDIA_TYPES = {"manga_jp", "manga_kr", "comic_us", "photo"}
 IMAGE_TYPES = {
     ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
@@ -78,6 +84,15 @@ STATIC_FILES = {
     "/performance-settings.js": "performance-settings.js",
     "/reader-end.js": "reader-end.js",
     "/reader-end.css": "reader-end.css",
+    "/epub-reader.js": "epub-reader.js",
+    "/epub-reader.css": "epub-reader.css",
+    "/sharing-ui.js": "sharing-ui.js",
+    "/sharing-ui.css": "sharing-ui.css",
+    "/share-reader.js": "share-reader.js",
+    "/share-reader.css": "share-reader.css",
+    "/share-crypto.js": "share-crypto.js",
+    "/vendor/noble-gcm.js": "vendor/noble-gcm.js",
+    "/vendor/noble-ciphers-LICENSE.txt": "vendor/noble-ciphers-LICENSE.txt",
     "/gravelle-logo.png": "gravelle-logo.png",
     "/gravelle-wordmark.svg": "gravelle-wordmark.svg",
     "/gravelle-icon.png": "gravelle-icon.png",
@@ -89,6 +104,7 @@ STATIC_FILES = {
     "/list-state.js": "list-state.js",
     "/transcoding-ui.js": "transcoding-ui.js",
     "/image-search-ui.js": "image-search-ui.js",
+    "/cache-management-ui.js": "cache-management-ui.js",
     "/fonts/LibreCaslonText.ttf": "fonts/LibreCaslonText.ttf",
 }
 LOG = logging.getLogger("sumi")
@@ -482,10 +498,22 @@ class Library:
         self.migration_backup = prepare_account_migration(self.database)
         self._initialize_database()
         migrate_accounts(self.database)
+        # Add chapter offsets after the legacy single-account tables have been
+        # migrated, so existing reading records survive the schema upgrade.
+        with closing(self.connect()) as connection, connection:
+            for table in ("progress", "bookmarks"):
+                if "position" not in {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}:
+                    connection.execute(f"ALTER TABLE {table} ADD COLUMN position REAL NOT NULL DEFAULT 0")
         self.signing_key = self._load_secret()
         self.task_scheduler = SharedTaskScheduler(self, ReaderError)
         self.transcoding = TranscodingManager(self, ReaderError)
         self.image_search = ImageSearchManager(self, ReaderError)
+        self.library_covers = LibraryCoverManager(self, ReaderError)
+        self.cache_manager = CacheManager(self, library_cover_manager=self.library_covers)
+        self.pdf = PdfManager(self)
+        self.epub = EpubManager(self, ReaderError)
+        self.sharing = SharingManager(self, ReaderError)
+        self.cache_manager.register_category("pdf", self.pdf)
 
     def connect(self):
         connection = sqlite3.connect(self.database, timeout=20)
@@ -601,6 +629,10 @@ class Library:
                     (SELECT path FROM media_libraries WHERE id=books.library_id),'')""")
             if "removed" not in columns:
                 connection.execute("ALTER TABLE books ADD COLUMN removed INTEGER NOT NULL DEFAULT 0")
+            if "pdf_sizes" not in columns:
+                connection.execute("ALTER TABLE books ADD COLUMN pdf_sizes TEXT NOT NULL DEFAULT '[]'")
+            if "epub_metadata" not in columns:
+                connection.execute("ALTER TABLE books ADD COLUMN epub_metadata TEXT NOT NULL DEFAULT '{}'")
             for table in ("models", "owner_account"):
                 avatar_columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
                 if "avatar_file" not in avatar_columns:
@@ -726,7 +758,7 @@ class Library:
         result["scanning"] = scanning
         return result
 
-    def libraries(self, include_hidden=False):
+    def libraries(self, include_hidden=False, *, include_covers=True):
         with self.state_lock, closing(self.connect()) as connection:
             rows = connection.execute("""SELECT l.*, author.name AS default_author_name, COUNT(b.id) AS book_count
                 FROM media_libraries l LEFT JOIN books b ON b.library_id=l.id AND b.active=1
@@ -744,6 +776,10 @@ class Library:
                     "SELECT library_id FROM user_libraries WHERE user_id=?", (actor["id"],))}
                 libraries = [item for item in libraries if item["id"] in allowed]
             libraries = [item for item in libraries if item["id"] not in hidden]
+        if include_covers and not include_hidden:
+            cover_metadata = self.library_covers.metadata_many([item["id"] for item in libraries])
+            for item in libraries:
+                item["cover"] = cover_metadata.get(item["id"])
         return {"libraries": libraries, "root_path": str(self.root) if actor["role"] == "admin" else None,
                 "root_paths": [str(root) for root in self.roots] if actor["role"] == "admin" else []}
 
@@ -943,6 +979,7 @@ class Library:
                 self._prune_covers(book_id, set())
             self.transcoding.remove_books(book_ids)
             self.image_search.reconcile()
+        self.pdf.prune()
         return {"removed": ids}
 
     def batch_books(self, body):
@@ -989,6 +1026,7 @@ class Library:
                 self._prune_covers(book_id, set())
             self.transcoding.remove_books(ids)
             self.image_search.reconcile()
+        self.pdf.prune()
         return {"removed": ids}
 
     @staticmethod
@@ -1436,6 +1474,8 @@ class Library:
     def start(self):
         self.transcoding.start()
         self.image_search.start()
+        self.library_covers.start()
+        self.cache_manager.start()
         self.start_scan()
         self.periodic_thread = threading.Thread(target=self._periodic, name="scan-timer", daemon=True)
         self.periodic_thread.start()
@@ -1449,6 +1489,11 @@ class Library:
     def close(self):
         self.stop_event.set()
         self.task_scheduler.close()
+        self.pdf.close()
+        self.epub.close()
+        self.sharing.close()
+        self.cache_manager.close()
+        self.library_covers.close()
         self.image_search.close()
         self.transcoding.close()
         with self.request_condition:
@@ -1460,6 +1505,9 @@ class Library:
             self.scan_thread.join(timeout=30)
         if (not self.active_requests and (not self.scan_thread or not self.scan_thread.is_alive())
                 and not self.transcoding.is_alive()
+                and not self.cache_manager.is_alive()
+                and not self.pdf.is_alive()
+                and not self.library_covers.is_alive()
                 and (not self.image_search.thread or not self.image_search.thread.is_alive())):
             self.service_lock.release()
 
@@ -1523,7 +1571,7 @@ class Library:
             index_before = {tuple(row[key] for key in index_columns) for row in cached.values()
                             if row["active"] and not row["removed"]}
             previous_ids = {(self._source_identity(Path(row["source_root"]), row["path"]),
-                             "folder" if row["format"] == "folder" else "archive"): row["id"]
+                             row["format"] if row["format"] in ("folder", "pdf", "epub") else "archive"): row["id"]
                             for row in cached.values()}
             for root_value in roots:
                 try:
@@ -1550,7 +1598,7 @@ class Library:
                             continue
                         candidate = folder / name
                         suffix = candidate.suffix.lower()
-                        if suffix not in IMAGE_TYPES and suffix not in ARCHIVE_TYPES:
+                        if suffix not in IMAGE_TYPES and suffix not in ARCHIVE_TYPES and suffix not in (".pdf", ".epub"):
                             continue
                         relative = candidate.relative_to(root).as_posix()
                         if self._excluded(relative, rules):
@@ -1564,6 +1612,44 @@ class Library:
                                     image_files.append((relative, info))
                                 else:
                                     report(relative, "图片为空或超过 64 MiB，已跳过。")
+                            elif suffix == ".epub":
+                                book_id = previous_ids.get((self._source_identity(root, relative), "epub")) or self._book_id("source\0" + self._source_identity(root, relative), "epub", library_id)
+                                with self._open_media_file(root, relative) as handle:
+                                    current = os.fstat(handle.fileno())
+                                    signature = pdf_source_version(current)
+                                    previous = cached.get(book_id)
+                                    metadata = json.loads(previous["epub_metadata"]) if previous else {}
+                                    if not (previous and previous["signature"] == signature
+                                            and previous["scan_revision"] == revision
+                                            and metadata.get("metadata_version") == EPUB_METADATA_VERSION):
+                                        metadata = self.epub.inspect(handle)
+                                        if metadata["source_version"] != signature:
+                                            raise ReaderError("EPUB 在扫描期间发生变化，请重新扫描。", 422)
+                                pages = [f"epub:{index + 1:06d}" for index in range(metadata["page_count"])]
+                                book = self._book(config, root, book_id, metadata.get("title") or candidate.stem,
+                                                  folder, relative, "epub", pages, current.st_size, current.st_mtime, signature)
+                                book["epub_metadata"] = json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))
+                                found.append(book)
+                            elif suffix == ".pdf":
+                                book_id = previous_ids.get((self._source_identity(root, relative), "pdf")) or self._book_id("source\0" + self._source_identity(root, relative), "pdf", library_id)
+                                with self._open_media_file(root, relative) as handle:
+                                    current = os.fstat(handle.fileno())
+                                    signature = pdf_source_version(current)
+                                    previous = cached.get(book_id)
+                                    if (previous and previous["signature"] == signature
+                                            and previous["scan_revision"] == revision):
+                                        pages = json.loads(previous["pages"])
+                                        sizes = json.loads(previous["pdf_sizes"])
+                                    else:
+                                        metadata = self.pdf.inspect(handle)
+                                        if metadata["source_version"] != signature:
+                                            raise ReaderError("PDF 在扫描期间发生变化，请重新扫描。", 422)
+                                        pages = [pdf_page_key(index) for index in range(metadata["page_count"])]
+                                        sizes = metadata["sizes"]
+                                book = self._book(config, root, book_id, candidate.stem, folder, relative,
+                                                  "pdf", pages, current.st_size, current.st_mtime, signature)
+                                book["pdf_sizes"] = json.dumps(sizes, separators=(",", ":"))
+                                found.append(book)
                             else:
                                 book_id = previous_ids.get((self._source_identity(root, relative), "archive")) or self._book_id("source\0" + self._source_identity(root, relative), "archive", library_id)
                                 signature = f"{info.st_size}:{info.st_mtime_ns}"
@@ -1642,17 +1728,23 @@ class Library:
                 for book in found:
                     if book["id"] in removed:
                         continue
+                    previous = cached.get(book["id"])
+                    if book["format"] == "epub" and previous:
+                        old_epub = json.loads(previous["epub_metadata"])
+                        if old_epub.get("metadata_version") != EPUB_METADATA_VERSION:
+                            self._migrate_epub_locations(connection, book)
                     connection.execute("""
                         INSERT INTO books
                         (id,title,series,path,format,page_count,size,modified,added_at,pages,signature,active,
-                         library_id,scan_revision,source_root)
+                         library_id,scan_revision,source_root,pdf_sizes,epub_metadata)
                         VALUES (:id,:title,:series,:path,:format,:page_count,:size,:modified,:added_at,:pages,
-                                :signature,1,:library_id,:scan_revision,:source_root)
+                                :signature,1,:library_id,:scan_revision,:source_root,:pdf_sizes,:epub_metadata)
                         ON CONFLICT(id) DO UPDATE SET
                         title=excluded.title,series=excluded.series,path=excluded.path,
                         format=excluded.format,page_count=excluded.page_count,size=excluded.size,
                         modified=excluded.modified,pages=excluded.pages,signature=excluded.signature,
-                        source_root=excluded.source_root,scan_revision=excluded.scan_revision,active=1
+                        source_root=excluded.source_root,scan_revision=excluded.scan_revision,pdf_sizes=excluded.pdf_sizes,
+                        epub_metadata=excluded.epub_metadata,active=1
                     """, book)
                     self._apply_photo_defaults(connection, config, Path(book["source_root"]), book)
                     if book["id"] in inspected:
@@ -1664,6 +1756,8 @@ class Library:
                 index_after = {tuple(row[key] for key in index_columns) for row in connection.execute(
                     "SELECT * FROM books WHERE library_id=? AND active=1 AND removed=0", (library_id,))}
             LOG.info("Media library %s scan finished: %d books, %d warnings", config["name"], len(found), len(errors))
+            self.library_covers.reconcile(library_id)
+            self.pdf.prune()
             if index_after != index_before or index_sources_changed or errors != json.loads(config["errors"]):
                 self.image_search.reconcile()
         except Exception as error:
@@ -1681,6 +1775,34 @@ class Library:
         return os.path.normcase(os.path.abspath(root.joinpath(*PurePosixPath(relative).parts)))
 
     @staticmethod
+    def _migrate_epub_locations(connection, book):
+        """Upgrade former chapter locations once, atomically with the image catalogue."""
+        metadata = json.loads(book["epub_metadata"])
+        ranges, total = metadata["chapter_ranges"], book["page_count"]
+        cover = connection.execute("SELECT cover_page FROM book_metadata WHERE book_id=?", (book["id"],)).fetchone()
+        if cover:
+            connection.execute("UPDATE book_metadata SET cover_page=? WHERE book_id=?",
+                               (legacy_image_page(cover["cover_page"], 0, ranges, total), book["id"]))
+        for row in connection.execute("SELECT user_id,page,position FROM progress WHERE book_id=?", (book["id"],)).fetchall():
+            page = legacy_image_page(row["page"], row["position"], ranges, total)
+            connection.execute("UPDATE progress SET page=?,position=0 WHERE user_id=? AND book_id=?",
+                               (page, row["user_id"], book["id"]))
+        marks = connection.execute("SELECT * FROM bookmarks WHERE book_id=? ORDER BY created_at,id", (book["id"],)).fetchall()
+        groups = {}
+        for row in marks:
+            page = legacy_image_page(row["page"], row["position"], ranges, total)
+            groups.setdefault((row["user_id"], page), []).append(row)
+        # Empty text documents can map to the same following image. Preserve
+        # every note when merging the former chapter bookmarks onto that page.
+        if marks:
+            connection.execute("DELETE FROM bookmarks WHERE book_id=?", (book["id"],))
+        for (user_id, page), rows in groups.items():
+            first = rows[0]
+            notes = list(dict.fromkeys(row["note"] for row in rows if row["note"]))
+            connection.execute("INSERT INTO bookmarks(id,user_id,book_id,page,note,created_at,position) VALUES(?,?,?,?,?,?,0)",
+                               (first["id"], user_id, book["id"], page, "\n\n".join(notes), first["created_at"]))
+
+    @staticmethod
     def _book_id(path, kind, library_id=None):
         namespace = "" if library_id is None else library_id + "\0"
         return hashlib.sha256((namespace + kind + "\0" + path).encode("utf-8")).hexdigest()[:24]
@@ -1690,7 +1812,7 @@ class Library:
         return dict(id=book_id, title=title, series=series, path=path, format=format_name,
                     page_count=len(pages), size=size, modified=modified, added_at=time.time(),
                     pages=json.dumps(pages, ensure_ascii=False), signature=signature,
-                    library_id=config["id"], scan_revision=config["revision"], source_root=str(root))
+                    library_id=config["id"], scan_revision=config["revision"], source_root=str(root), pdf_sizes="[]", epub_metadata="{}")
 
     @staticmethod
     def _photo_folder_values(root, book):
@@ -1780,6 +1902,14 @@ class Library:
                 book["title"] = row["title"][len(prefix):].lstrip() or row["title"]
         book["cover_page"] = min(max(row["cover_page"], 0), max(row["page_count"] - 1, 0))
         book["cover_version"] = Library._cover_version(row)
+        if row["format"] == "pdf":
+            book["page_revision"] = hashlib.sha256(row["signature"].encode()).hexdigest()[:24]
+        elif row["format"] == "epub":
+            book["page_revision"] = row["signature"][:24]
+            metadata = json.loads(row["epub_metadata"])
+            book["reader_kind"] = "images"
+            book["document_author"] = metadata.get("author", "")
+            book["document_language"] = metadata.get("language", "")
         # Keep the resolved preference available when its direction is not
         # supported by the current layout. A hidden but authorized library
         # may not be present in the client's library list to resolve it again.
@@ -1799,7 +1929,7 @@ class Library:
     def _select(self, connection, book_id=None, library_id=None, visible=False, management=False):
         actor = self._actor(connection)
         access, arguments = self._access_sql(connection, visible=visible, management=management)
-        sql = '''SELECT b.*, p.page, p.completed, p.updated_at, COALESCE(f.favorite,0) AS favorite,
+        sql = '''SELECT b.*, p.page, p.completed, p.updated_at, p.position AS read_position, COALESCE(f.favorite,0) AS favorite,
             l.name AS library_name, l.path AS library_path,
             CASE WHEN l.media_type='photo' THEN COALESCE(library_author.name,folder_model.name,l.default_author)
                  ELSE COALESCE(library_author.name,l.default_author) END AS author,
@@ -1856,6 +1986,12 @@ class Library:
             if internal:
                 return dict(row)
             book = self._export(row, self._models_for_books(connection, [book_id]).get(book_id))
+            if row["format"] == "pdf":
+                book["page_sizes"] = json.loads(row["pdf_sizes"])
+            elif row["format"] == "epub":
+                metadata = json.loads(row["epub_metadata"])
+                book["epub_chapters"] = metadata["chapters"]
+                book["epub_toc"] = metadata["toc"]
             book["bookmarks"] = self._bookmarks(connection, book_id)
             return book
 
@@ -1886,7 +2022,7 @@ class Library:
             rows = self._select(connection, library_id=library_id, visible=True)
             models = self._models_for_books(connection, [row["id"] for row in rows])
             books = [self._export(row, models.get(row["id"])) for row in rows]
-            libraries = self.libraries()["libraries"]
+            libraries = self.libraries(include_covers=False)["libraries"]
         books.sort(key=lambda book: (natural_key(book["title"]), natural_key(book["series"]), book["path"]))
         if library_id is not None:
             libraries = [item for item in libraries if item["id"] == library_id]
@@ -1911,15 +2047,17 @@ class Library:
     @staticmethod
     def _cover_version(book):
         value = f"{book['signature']}:{book['cover_source']}:{book['cover_page']}:{book['cover_revision']}"
+        if book["format"] == "epub":
+            value += ":epub-images-v2"
         return hashlib.sha256(value.encode()).hexdigest()[:24]
 
     @staticmethod
-    def _thumbnail(data):
+    def _thumbnail(data, allow_bmp=False):
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("error", Image.DecompressionBombWarning)
                 with Image.open(BytesIO(data)) as image:
-                    if image.format not in ("JPEG", "PNG", "WEBP", "GIF", "AVIF"):
+                    if image.format not in (("JPEG", "PNG", "WEBP", "GIF", "AVIF", "BMP") if allow_bmp else ("JPEG", "PNG", "WEBP", "GIF", "AVIF")):
                         raise ReaderError("封面只支持 JPG、PNG、WebP、GIF 或 AVIF 图片。", 422)
                     if image.width <= 0 or image.height <= 0 or image.width * image.height > MAX_COVER_PIXELS:
                         raise ReaderError("封面图片不能超过 4000 万像素。", 422)
@@ -2078,6 +2216,8 @@ class Library:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, self.covers / name)
+            if hasattr(self, "cache_manager"):
+                self.cache_manager.enforce_cover_limit()
         finally:
             temporary.unlink(missing_ok=True)
 
@@ -2328,7 +2468,7 @@ class Library:
 
     def _bookmarks(self, connection, book_id=None):
         access, arguments = self._access_sql(connection, visible=book_id is None)
-        sql = f'''SELECT k.*,b.page_count FROM bookmarks k JOIN books b ON b.id=k.book_id
+        sql = f'''SELECT k.*,b.page_count,b.format FROM bookmarks k JOIN books b ON b.id=k.book_id
             WHERE k.user_id=? AND b.active=1 AND {access}'''
         parameters = [self._actor(connection)['id'], *arguments]
         if book_id is not None:
@@ -2337,7 +2477,8 @@ class Library:
         rows = connection.execute(sql + ' ORDER BY k.created_at DESC,k.id', parameters).fetchall()
         return [{'id': row['id'], 'book_id': row['book_id'],
                  'page': min(row['page'], max(0,row['page_count']-1)),
-                 'note': row['note'], 'created_at': row['created_at']} for row in rows]
+                 'note': row['note'], 'created_at': row['created_at'],
+                 } for row in rows]
 
     def bookmarks(self):
         with closing(self.connect()) as connection:
@@ -2351,6 +2492,7 @@ class Library:
 
     def save_bookmark(self, book_id, body):
         page = body.get('page')
+        position = self._reading_position(body)
         note = self._text(body.get('note',''), '书签备注', 1000, blank=True, multiline=True)
         with closing(self.connect()) as connection, connection:
             connection.execute('BEGIN IMMEDIATE')
@@ -2363,9 +2505,9 @@ class Library:
             existing = connection.execute('SELECT id FROM bookmarks WHERE user_id=? AND book_id=? AND page=?',
                                           (user_id,book_id,page)).fetchone()
             bookmark_id = existing['id'] if existing else secrets.token_hex(12)
-            connection.execute('''INSERT INTO bookmarks(id,user_id,book_id,page,note,created_at) VALUES(?,?,?,?,?,?)
-                ON CONFLICT(user_id,book_id,page) DO UPDATE SET note=excluded.note''',
-                (bookmark_id,user_id,book_id,page,note,time.time()))
+            connection.execute('''INSERT INTO bookmarks(id,user_id,book_id,page,note,created_at,position) VALUES(?,?,?,?,?,?,?)
+                ON CONFLICT(user_id,book_id,page) DO UPDATE SET note=excluded.note,position=excluded.position''',
+                (bookmark_id,user_id,book_id,page,note,time.time(),0))
             bookmark = next(item for item in self._bookmarks(connection,book_id) if item['id']==bookmark_id)
         return {'bookmark':bookmark}, 200 if existing else 201
 
@@ -2378,8 +2520,16 @@ class Library:
             connection.execute('DELETE FROM bookmarks WHERE id=? AND user_id=?',(bookmark_id,user_id))
         return {'ok':True}
 
+    @staticmethod
+    def _reading_position(body):
+        position = body.get('position', 0)
+        if type(position) not in (int, float) or not 0 <= position <= 1:
+            raise ReaderError('章节内的位置需要在 0～1 之间。')
+        return float(position)
+
     def set_progress(self, book_id, body):
         page, completed = body.get('page'), body.get('completed')
+        position = self._reading_position(body)
         if type(page) is not int or type(completed) is not bool:
             raise ReaderError('阅读进度需要整数页码和完成状态。')
         with closing(self.connect()) as connection, connection:
@@ -2390,11 +2540,13 @@ class Library:
             if not 0 <= page < book['page_count']:
                 raise ReaderError('页码超出作品范围。')
             updated_at = time.time()
-            connection.execute('''INSERT INTO progress(user_id,book_id,page,completed,updated_at) VALUES(?,?,?,?,?)
+            position = 0
+            connection.execute('''INSERT INTO progress(user_id,book_id,page,completed,updated_at,position) VALUES(?,?,?,?,?,?)
                 ON CONFLICT(user_id,book_id) DO UPDATE SET page=excluded.page,
-                completed=excluded.completed,updated_at=excluded.updated_at''',
-                (self._actor(connection)['id'],book_id,page,int(completed),updated_at))
-        return {'progress':{'page':page,'completed':completed,'updated_at':updated_at}}
+                completed=excluded.completed,updated_at=excluded.updated_at,position=excluded.position''',
+                (self._actor(connection)['id'],book_id,page,int(completed),updated_at,position))
+        return {'progress':{'page':page,'completed':completed,'updated_at':updated_at,
+                            }}
 
     def set_favorite(self, book_id, body):
         favorite = body.get('favorite')
@@ -2409,12 +2561,17 @@ class Library:
                 (self._actor(connection)['id'],book_id,int(favorite)))
         return {'favorite':favorite}
 
-    def image(self, book_id, index, management=False):
+    def image(self, book_id, index, management=False, width=None):
         book = self.book(book_id, internal=True, management=management)
         if index is None:
             index = min(max(book["cover_page"], 0), max(0, book["page_count"] - 1))
         if index < 0 or index >= book["page_count"]:
             raise ReaderError("图片页码不存在。", 404)
+        if book["format"] == "pdf":
+            book["pdf_source_version"] = book["signature"]
+            return self.pdf.image(book, index, 1600 if width is None else width)
+        if book["format"] == "epub":
+            return self.epub.image(book, index)
         page = json.loads(book["pages"])[index]
         if not management:
             try:
@@ -2471,7 +2628,7 @@ class Library:
                 try:
                     with self._open_media_file(root, relative) as handle:
                         info = os.fstat(handle.fileno())
-                        stamp = f"{info.st_size}:{info.st_mtime_ns}"
+                        stamp = f"{info.st_dev}:{info.st_ino}:{info.st_size}:{info.st_mtime_ns}:{info.st_ctime_ns}"
                 except OSError as error:
                     raise ReaderError("无法读取封面来源，请重新扫描写真库。", 422) from error
                 version = hashlib.sha256((self._cover_version(book) + stamp).encode()).hexdigest()[:24]
@@ -2480,8 +2637,8 @@ class Library:
                 try:
                     data = candidate.read_bytes()
                 except FileNotFoundError:
-                    original, _, _ = self.image(book_id, page_index)
-                    data = self._thumbnail(original)
+                    original, _, _ = self.image(book_id, page_index, width=600)
+                    data = self._thumbnail(original, allow_bmp=book["format"] == "epub")
                     self._write_cover(name, data)
                     self._prune_covers(book_id, {name})
             etag = '"' + hashlib.sha256(data).hexdigest() + '"'
@@ -2562,8 +2719,38 @@ def _linux_default_ipv4():
     return result
 
 
+def _macos_default_ipv4():
+    """Read the default-route IPv4 interface without contacting the network."""
+    import subprocess
+    environment = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C"}
+    try:
+        route = subprocess.run(["/sbin/route", "-n", "get", "default"],
+                               capture_output=True, text=True, timeout=2,
+                               check=False, env=environment)
+        if route.returncode or len(route.stdout) > 16384:
+            return []
+        interfaces = re.findall(r"^\s*interface:\s*(\S+)\s*$", route.stdout, re.MULTILINE)
+        if len(interfaces) != 1 or not re.fullmatch(r"[A-Za-z][A-Za-z0-9]{0,15}", interfaces[0]):
+            return []
+        address = subprocess.run(["/usr/sbin/ipconfig", "getifaddr", interfaces[0]],
+                                 capture_output=True, text=True, timeout=2,
+                                 check=False, env=environment)
+        value = address.stdout.strip()
+        if address.returncode or len(value) > 64:
+            return []
+        try:
+            ipaddress.IPv4Address(value)
+        except ipaddress.AddressValueError:
+            return []
+        return [value] if _private_address(value) else []
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+
+
 def _lan_ipv4_addresses():
     try:
+        if sys.platform == "darwin":
+            return _macos_default_ipv4()
         return _windows_default_ipv4() if os.name == "nt" else _linux_default_ipv4()
     except (OSError, ValueError, ImportError, AttributeError):
         return []
@@ -2620,6 +2807,12 @@ class ReaderServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
+    def server_bind(self):
+        # HTTPServer's reverse DNS lookup can block startup on offline networks.
+        # The reader only needs the bound address and actual port, not a FQDN.
+        TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
     def __init__(self, address, library):
         self.library = library
         self.image_search_slots = threading.BoundedSemaphore(2)
@@ -2641,13 +2834,16 @@ class ReaderHandler(BaseHTTPRequestHandler):
         self.connection.settimeout(20)
 
     def log_message(self, format_string, *args):
-        LOG.info("%s %s", self.client_address[0], (format_string % args).translate(
+        message = re.sub(r"(/(?:api/)?share/)[A-Za-z0-9_-]{43}", r"\1[redacted]", format_string % args)
+        LOG.info("%s %s", self.client_address[0], message.translate(
             {code: "?" for code in range(32)}))
 
     def end_headers(self):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("X-Frame-Options", "DENY")
+        if urlsplit(self.path).path.startswith(("/share/", "/api/share/")):
+            self.send_header("X-Robots-Tag", "noindex, nofollow, noarchive")
         self.send_header("Content-Security-Policy", "default-src 'self'; img-src 'self' data: blob:; style-src 'self'; script-src 'self'; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
         super().end_headers()
 
@@ -2675,6 +2871,28 @@ class ReaderHandler(BaseHTTPRequestHandler):
             return cookie.value if cookie else None
         except Exception:
             return None
+
+    def share_session_token(self):
+        try:
+            cookies = SimpleCookie()
+            cookies.load(self.headers.get("Cookie", ""))
+            value = cookies.get("gravelle_share")
+            return value.value if value else ""
+        except Exception:
+            return ""
+
+    def share_cookie_header(self, token, session, expires_at):
+        cookie = SimpleCookie()
+        cookie["gravelle_share"] = session
+        cookie["gravelle_share"]["path"] = "/api/share/" + token
+        cookie["gravelle_share"]["httponly"] = True
+        cookie["gravelle_share"]["samesite"] = "Strict"
+        cookie["gravelle_share"]["max-age"] = max(0, int(expires_at - time.time()))
+        if not session:
+            cookie["gravelle_share"]["expires"] = "Thu, 01 Jan 1970 00:00:00 GMT"
+        if self.headers.get("X-Forwarded-Proto", "").lower() == "https":
+            cookie["gravelle_share"]["secure"] = True
+        return cookie.output(header="").strip()
 
     def authenticated(self):
         return self.library.valid_session(self.session_token())
@@ -2838,7 +3056,9 @@ class ReaderHandler(BaseHTTPRequestHandler):
             if self.command == "POST":
                 # An early rejection may leave unread bytes on this connection.
                 self.close_connection = True
-            retry = 60 if urlsplit(self.path).path.startswith("/api/image-search/") else self.library.login_retry(self.client_address[0])
+            error_path = urlsplit(self.path).path
+            retry = (300 if error_path.startswith("/api/share/") else 60
+                     if error_path.startswith("/api/image-search/") else self.library.login_retry(self.client_address[0]))
             headers = {"Retry-After": str(retry)} if error.status == 429 else None
             self.respond({"error": str(error)}, error.status, headers)
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
@@ -2867,8 +3087,40 @@ class ReaderHandler(BaseHTTPRequestHandler):
         if path == "/api/session":
             self.respond(self.library.session(self.session_token()))
             return
+        if path.startswith("/api/share/"):
+            match = re.fullmatch(r"/api/share/([A-Za-z0-9_-]{43})(?:/(manifest|pages/([0-9]{1,6})))?", path)
+            if match is None:
+                raise ReaderError("分享接口不存在。", 404)
+            token, media, index = match.groups()
+            if set(query) - ({"width"} if index is not None else set()) or any(len(values) != 1 for values in query.values()):
+                raise ReaderError("分享参数无效。")
+            session = self.share_session_token()
+            if index is None:
+                self.respond(self.library.sharing.manifest(token, session) if media == "manifest" else self.library.sharing.info(token, session))
+                return
+            width = query.get("width", ["1600"])[0]
+            if width not in ("800", "1600", "2400"):
+                raise ReaderError("分享图片尺寸无效。")
+            data, mime = self.library.sharing.image(token, session, int(index), width=int(width))
+            # A public image endpoint never serves plaintext or conditional
+            # cached responses; every request rechecks its live share session.
+            self.send_response(200)
+            self.send_header("Content-Type", mime)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "private, no-store")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("Vary", "Cookie")
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(data)
+            return
         if path.startswith("/api/"):
             self.require_auth()
+            if path == "/api/shares":
+                if request.query:
+                    raise ReaderError("分享管理不接受查询参数。")
+                self.respond(self.library.sharing.listing())
+                return
             if path == "/api/performance":
                 self.library.require_admin()
                 if request.query:
@@ -2893,6 +3145,31 @@ class ReaderHandler(BaseHTTPRequestHandler):
                 result = (self.library.transcoding.snapshot() if path == "/api/transcoding"
                           else self.library.transcoding.summary())
                 self.respond(result)
+                return
+            if path == "/api/image-search/failures":
+                self.library.require_admin()
+                page, page_size = self.pagination_query(query, 20)
+                self.respond(self.library.image_search.failures(page=page, page_size=page_size))
+                return
+            optimization_details = re.fullmatch(r"/api/transcoding/books/([a-f0-9]{24})/details", path)
+            if optimization_details:
+                self.library.require_admin()
+                page, page_size = self.pagination_query(query, 40)
+                self.respond(self.library.transcoding.details(optimization_details[1], page=page, page_size=page_size))
+                return
+            if path == "/api/cache":
+                self.library.require_admin()
+                if request.query:
+                    raise ReaderError("缓存管理不接受查询参数。")
+                self.respond(self.library.cache_manager.snapshot())
+                return
+            library_cover = re.fullmatch(r"/api/libraries/([a-f0-9]{24})/cover", path)
+            if library_cover:
+                if set(query) - {"v"} or any(len(values) != 1 for values in query.values()):
+                    raise ReaderError("写真库封面参数无效。")
+                with self.library.auth_lock:
+                    self.require_auth()
+                    self.respond_image(*self.library.library_covers.image(library_cover[1]))
                 return
             transcode_preview = re.fullmatch(r"/api/transcoding/books/([a-f0-9]{24})/pages/([0-9]{1,6})", path)
             if transcode_preview:
@@ -2933,6 +3210,25 @@ class ReaderHandler(BaseHTTPRequestHandler):
             if path == "/api/bookmarks":
                 self.respond(self.library.bookmarks())
                 return
+            match = re.fullmatch(r"/api/books/([a-f0-9]{24})/epub/(chapters/([0-9]{1,5})|resources/([a-f0-9]{32}))", path)
+            if match:
+                book_id, _, index, token = match.groups()
+                book = self.library.book(book_id, internal=True)
+                if book["format"] != "epub":
+                    raise ReaderError("EPUB 作品不存在。", 404)
+                if set(query) - {"v"} or any(len(values) != 1 for values in query.values()):
+                    raise ReaderError("EPUB 参数无效。")
+                if "v" in query:
+                    version = query["v"][0]
+                    if not re.fullmatch(r"[a-f0-9]{24}", version):
+                        raise ReaderError("EPUB 版本无效。")
+                    if version != book["signature"][:24]:
+                        raise ReaderError("EPUB 已更新，请重新打开作品。", 409)
+                if index is not None:
+                    self.respond(self.library.epub.chapter(book, int(index)))
+                else:
+                    self.respond_image(*self.library.epub.resource(book, token))
+                return
             match = re.fullmatch(r"/api/avatars/(user|models)/([1-9][0-9]{0,9}|[a-f0-9]{24})", path)
             if match:
                 self.respond_image(*self.library.avatar(*match.groups()))
@@ -2945,8 +3241,20 @@ class ReaderHandler(BaseHTTPRequestHandler):
                 else:
                     if index is not None and len(index) > 6:
                         raise ReaderError("图片页码不存在。", 404)
+                    width = None
+                    if (media != "cover" and query
+                            and self.library.book(book_id, internal=True)["format"] == "pdf"):
+                        if set(query) - {"width", "v"} or any(len(values) != 1 for values in query.values()):
+                            raise ReaderError("页面参数无效。")
+                        if "width" in query:
+                            value = query["width"][0]
+                            if not value.isascii() or not value.isdigit() or not 1 <= len(value) <= 4 or not 1 <= int(value) <= 4096:
+                                raise ReaderError("页面宽度需要在 1～4096 之间。")
+                            width = int(value)
+                        if "v" in query and not re.fullmatch(r"[a-f0-9]{24}", query["v"][0]):
+                            raise ReaderError("页面版本无效。")
                     data, mime, etag = (self.library.cover(book_id) if media == "cover" else
-                                       self.library.image(book_id, int(index)))
+                                       self.library.image(book_id, int(index), width=width))
                     if self.headers.get("If-None-Match") == etag:
                         self.send_response(304)
                         self.send_header("ETag", etag)
@@ -2963,7 +3271,10 @@ class ReaderHandler(BaseHTTPRequestHandler):
                         self.wfile.write(data)
                 return
             raise ReaderError("接口不存在。", 404)
-        name = STATIC_FILES.get(path)
+        is_share_page = re.fullmatch(r"/share/[A-Za-z0-9_-]{43}", path) is not None
+        if is_share_page and request.query:
+            raise ReaderError("分享页面地址无效。", 400)
+        name = "share.html" if is_share_page else STATIC_FILES.get(path)
         if name is None:
             raise ReaderError("页面不存在。", 404)
         candidate = self.server.static / name
@@ -2981,10 +3292,22 @@ class ReaderHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", mime)
         self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Cache-Control", "no-store" if is_share_page else "no-cache")
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(data)
+
+    @staticmethod
+    def pagination_query(query, default_size):
+        if set(query) - {"page", "page_size"} or any(len(values) != 1 for values in query.values()):
+            raise ReaderError("分页参数无效。")
+        values = []
+        for key, default in (("page", 1), ("page_size", default_size)):
+            value = query.get(key, [str(default)])[0]
+            if not re.fullmatch(r"[1-9][0-9]{0,5}", value):
+                raise ReaderError("分页参数需要是正整数。")
+            values.append(int(value))
+        return values
 
     def respond_image(self, data, mime, etag):
         if self.headers.get("If-None-Match") == etag:
@@ -3004,9 +3327,60 @@ class ReaderHandler(BaseHTTPRequestHandler):
 
     def post_route(self):
         self.check_origin()
-        path = urlsplit(self.path).path
+        request = urlsplit(self.path)
+        path = request.path
+        if path.startswith("/api/share/"):
+            match = re.fullmatch(r"/api/share/([A-Za-z0-9_-]{43})/(unlock|logout)", path)
+            if match is None:
+                raise ReaderError("分享接口不存在。", 404)
+            if request.query:
+                raise ReaderError("分享请求不接受查询参数。")
+            lengths = self.headers.get_all("Content-Length", [])
+            if self.headers.get("Content-Encoding") or self.headers.get("Transfer-Encoding"):
+                self.close_connection = True
+                raise ReaderError("分享请求不支持分块或压缩请求。")
+            if len(lengths) > 1 or (lengths and not re.fullmatch(r"[0-9]{1,10}", lengths[0])):
+                self.close_connection = True
+                raise ReaderError("请求长度无效。")
+            body = self.read_body(maximum=2048)
+            token = match[1]
+            if match[2] == "logout":
+                if body:
+                    raise ReaderError("退出分享不接受其他参数。")
+                self.respond(self.library.sharing.logout(token, self.share_session_token()),
+                             headers={"Set-Cookie": self.share_cookie_header(token, "", 0)})
+                return
+            if set(body) != {"password"}:
+                raise ReaderError("请输入分享密码。")
+            result = dict(self.library.sharing.unlock(token, body["password"], self.share_session_token(), self.client_address[0]))
+            session = result.pop("session")
+            self.respond(result, headers={"Set-Cookie": self.share_cookie_header(token, session, result["session_expires_at"])})
+            return
         if path not in ("/api/register", "/api/login", "/api/logout"):
             self.require_auth()
+        if path == "/api/shares":
+            if request.query:
+                raise ReaderError("创建分享不接受查询参数。")
+            self.respond(self.library.sharing.create(self.read_body()), 201)
+            return
+        share_close = re.fullmatch(r"/api/shares/([a-f0-9]{32})/close", path)
+        if share_close:
+            if request.query or self.read_body():
+                raise ReaderError("关闭分享不接受其他参数。")
+            self.respond(self.library.sharing.revoke(share_close[1]))
+            return
+        share_delete = re.fullmatch(r"/api/shares/([a-f0-9]{32})/delete", path)
+        if share_delete:
+            if request.query or self.read_body():
+                raise ReaderError("删除分享不接受其他参数。")
+            self.respond(self.library.sharing.delete(share_delete[1]))
+            return
+        share_password = re.fullmatch(r"/api/shares/([a-f0-9]{32})/password", path)
+        if share_password:
+            if request.query or self.read_body(maximum=2048):
+                raise ReaderError("查看分享密码不接受其他参数。")
+            self.respond(self.library.sharing.reveal_password(share_password[1]))
+            return
         if path == "/api/performance":
             self.library.require_admin()
             if urlsplit(self.path).query:
@@ -3019,6 +3393,21 @@ class ReaderHandler(BaseHTTPRequestHandler):
             if urlsplit(self.path).query:
                 raise ReaderError("图片搜索不接受外部路径或查询参数。")
             self.query_image()
+            return
+        if path == "/api/image-search/retry":
+            self.library.require_admin()
+            if urlsplit(self.path).query:
+                raise ReaderError("图片索引重试不接受查询参数。")
+            self.respond(self.library.image_search.retry_failures(self.read_body()))
+            return
+        library_shuffle = re.fullmatch(r"/api/libraries/([a-f0-9]{24})/cover/shuffle", path)
+        if library_shuffle:
+            self.library.require_admin()
+            if urlsplit(self.path).query or self.read_body():
+                raise ReaderError("换一组封面不接受其他参数。")
+            with self.library.auth_lock:
+                self.require_auth()
+                self.respond(self.library.library_covers.shuffle(library_shuffle[1]))
             return
         if path in ("/api/image-search/settings", "/api/image-search/actions"):
             self.library.require_admin()
@@ -3033,6 +3422,13 @@ class ReaderHandler(BaseHTTPRequestHandler):
         upload_request = (re.fullmatch(r"/api/books/[a-f0-9]{24}/metadata", path)
                           or re.fullmatch(r"/api/models(?:/[a-f0-9]{24})?", path) or path == "/api/profile")
         body = self.read_body(MAX_COVER_BODY_BYTES if upload_request else MAX_BODY_BYTES)
+        if path in ("/api/cache/settings", "/api/cache/clear"):
+            self.library.require_admin()
+            if urlsplit(self.path).query:
+                raise ReaderError("缓存管理不接受查询参数。")
+            operation = self.library.cache_manager.save_settings if path.endswith("/settings") else self.library.cache_manager.clear
+            self.respond(operation(body))
+            return
         if path in ("/api/transcoding/rules/preview", "/api/transcoding/rules", "/api/transcoding/actions", "/api/transcoding/cleanup"):
             self.library.require_admin()
             if urlsplit(self.path).query:
@@ -3179,4 +3575,7 @@ if __name__ == "__main__":
     # Private worker helpers import this module's validation functions. Share
     # the running module so ReaderError keeps one identity under python server.py.
     sys.modules.setdefault("server", sys.modules[__name__])
+    if sys.argv[1:2] == ["--pdf-worker"]:
+        from pdf_reader import worker_main
+        raise SystemExit(worker_main(sys.argv[2:]))
     raise SystemExit(main())

@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="referrer" content="no-referrer">
+  <meta name="robots" content="noindex,nofollow,noarchive">
+  <meta name="theme-color" content="#191618">
+  <title>写真分享 · Gravelle</title>
+  <link rel="icon" href="/gravelle-icon.png">
+  <link rel="stylesheet" href="/share-reader.css">
+  <script defer src="/vendor/noble-gcm.js"></script>
+  <script defer src="/share-crypto.js"></script>
+  <script defer src="/share-reader.js"></script>
+</head>
+<body>
+  <main id="share-gate" class="share-gate">
+    <section class="share-access" aria-labelledby="share-access-title">
+      <img class="share-wordmark" src="/gravelle-wordmark.svg" alt="Gravelle">
+      <h1 id="share-access-title">输入访问密码</h1>
+      <p id="share-gate-message" class="share-description" role="status" aria-live="polite">正在检查分享…</p>
+      <form id="share-unlock-form" hidden>
+        <label class="share-password-label" for="share-password">访问密码</label>
+        <input id="share-password" type="password" maxlength="64" autocomplete="off" required>
+        <p id="share-password-error" class="share-password-error" role="alert" hidden></p>
+        <button id="share-unlock" type="submit" class="share-primary">进入阅读</button>
+      </form>
+      <button id="share-gate-retry" type="button" class="share-secondary" hidden>重试</button>
+    </section>
+  </main>
+  <section id="share-reader" class="share-reader" aria-label="分享阅读器" hidden>
+    <header class="share-toolbar">
+      <img class="share-mini-mark" src="/gravelle-wordmark.svg" alt="Gravelle">
+      <div class="share-heading"><h1 id="share-title"></h1><span>分享阅读</span></div>
+      <button id="share-fit" class="share-tool" type="button" aria-pressed="false">适应宽度</button>
+      <button id="share-theme" class="share-tool" type="button" aria-label="切换为浅色背景">浅色</button>
+      <button id="share-exit" class="share-tool" type="button">退出</button>
+    </header>
+    <div id="share-viewport" class="share-viewport" tabindex="0" aria-label="写真页面">
+      <div id="share-image-host" class="share-image-host"></div>
+      <div id="share-page-message" class="share-page-message" role="status" aria-live="polite"><span id="share-page-message-text"></span><button id="share-page-retry" type="button" class="share-secondary" hidden>重试本页</button></div>
+    </div>
+    <footer class="share-navigation">
+      <button id="share-previous" class="share-secondary" type="button" aria-label="上一页">上一页</button>
+      <form id="share-page-form" class="share-page-form"><label class="share-sr-only" for="share-page-number">页码</label><input id="share-page-number" type="number" min="1" step="1" inputmode="numeric" aria-label="页码"><span id="share-page-total"></span></form>
+      <button id="share-next" class="share-primary" type="button" aria-label="下一页">下一页</button>
+    </footer>
+  </section>
+</body>
+</html>

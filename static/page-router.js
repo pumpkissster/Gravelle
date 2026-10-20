@@ -9,7 +9,7 @@
   const views = { home: 'home', libraries: 'libraries', recent: 'recent', bookmarks: 'bookmarks', favorites: 'favorite', search: 'search', models: 'models', settings: 'settings' };
   const sorts = ['added', 'added_asc', 'title', 'updated', 'release', 'modified'];
   const listViews = ['library', 'recent', 'favorite', 'search', 'model'];
-  const settingsSections = ['service', 'users', 'interface', 'performance', 'reading', 'transcoding', 'image-search'];
+  const settingsSections = ['service', 'users', 'interface', 'performance', 'reading', 'transcoding', 'image-search', 'cache', 'shares'];
   const home = () => ({ view: 'home' });
   function id(value) { return typeof value === 'string' && value.length > 0 && value.length <= 200 && !/[\x00-\x1f\x7f/\\]/.test(value) ? value : ''; }
   function normalize(input, depth = 0) {
@@ -30,6 +30,8 @@
     }
     if (route.view === 'search' && input.image === true) route.image = true;
     if (route.view === 'reader' && Number.isSafeInteger(Number(input.page)) && Number(input.page) > 0 && Number(input.page) <= 1000000) route.page = Number(input.page);
+    if (route.view === 'reader' && input.position !== undefined && input.position !== null && input.position !== '' && Number.isFinite(Number(input.position)) && Number(input.position) >= 0 && Number(input.position) <= 1) route.position = Math.round(Number(input.position) * 1000000) / 1000000;
+    if (route.view === 'reader' && typeof input.fragment === 'string' && input.fragment.length <= 500 && !/[\x00-\x1f\x7f]/.test(input.fragment)) { if (input.fragment) route.fragment = input.fragment; }
     if (['book', 'reader'].includes(route.view) && input.from && depth < 2) {
       const from = normalize(input.from, depth + 1);
       if (!['book', 'reader'].includes(from.view) || (route.view === 'reader' && from.view === 'book')) route.from = from;
@@ -50,7 +52,7 @@
     if (!view) return home();
     const params = new URLSearchParams(query);
     if (decoded[0] === 'settings' && decoded.length === 2 && !settingsSections.includes(decoded[1])) return home();
-    return normalize({ view, id: decoded[1], section: decoded[0] === 'settings' ? decoded[1] : undefined, tab: params.get('tab'), image: params.get('type') === 'image', query: params.get('q'), sort: params.get('sort'), series: params.get('series'), page: params.get('page'), from: params.has('from') ? parse(params.get('from'), depth + 1) : undefined }, depth);
+    return normalize({ view, id: decoded[1], section: decoded[0] === 'settings' ? decoded[1] : undefined, tab: params.get('tab'), image: params.get('type') === 'image', query: params.get('q'), sort: params.get('sort'), series: params.get('series'), page: params.get('page'), position: params.get('position'), fragment: params.get('fragment'), from: params.has('from') ? parse(params.get('from'), depth + 1) : undefined }, depth);
   }
   function path(input, depth = 0) {
     const route = normalize(input, depth);
@@ -59,6 +61,8 @@
     if (route.sort) params.set('sort', route.sort);
     if (route.series) params.set('series', route.series);
     if (route.page) params.set('page', route.page);
+    if (route.position !== undefined) params.set('position', route.position);
+    if (route.fragment) params.set('fragment', route.fragment);
     if (route.from) params.set('from', path(route.from, depth + 1));
     if (route.tab) params.set('tab', route.tab);
     if (route.image) params.set('type', 'image');

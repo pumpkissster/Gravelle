@@ -17,6 +17,9 @@ if __package__ in (None, ""):
 
 # The frozen server also runs isolated image jobs. Dispatch before loading the
 # launcher/runtime so a worker cannot start Tk or acquire the application lock.
+if __name__ == "__main__" and sys.argv[1:2] == ["--pdf-worker"]:
+    from pdf_reader import worker_main
+    raise SystemExit(worker_main(sys.argv[2:]))
 if __name__ == "__main__" and sys.argv[1:2] == ["--transcode-worker"]:
     from transcoding import worker_main
     raise SystemExit(worker_main(sys.argv[2:]))
@@ -735,6 +738,9 @@ class LauncherWindow:
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["--pdf-worker"]:
+        from pdf_reader import worker_main
+        return worker_main(argv[1:])
     if argv[:1] == ["--transcode-worker"]:
         from transcoding import worker_main
         return worker_main(argv[1:])

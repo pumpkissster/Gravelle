@@ -70,5 +70,26 @@
     if (!Number.isFinite(primary) || !Number.isFinite(cross) || Math.abs(primary) <= 55 || Math.abs(primary) <= Math.abs(cross) * 1.5) return 0;
     return -Math.sign(primary) * (!vertical && direction === 'rtl' ? -1 : 1);
   }
-  return { buildSpreads, spreadForPage, visualPages, effectiveMode, effectiveDirection, canScrollPage, createWheelPager, swipePageDelta };
+  const pdfWidths = Object.freeze([800, 1600, 2400, 3200, 4096]);
+  function pageDimensions(value) {
+    const width = Number(Array.isArray(value) ? value[0] : value?.width);
+    const height = Number(Array.isArray(value) ? value[1] : value?.height);
+    return Number.isFinite(width) && width > 0 && Number.isFinite(height) && height > 0 ? { width, height } : null;
+  }
+  function pdfPageWidth({ width, height, pixelRatio = 1, pages = 1, fit = 'height', scroll = false, size } = {}) {
+    const available = Math.max(1, Number(width) || 800) / Math.max(1, Number(pages) || 1);
+    const dimensions = pageDimensions(size);
+    const display = !scroll && fit === 'height' && dimensions && Number(height) > 0 ? Math.min(available, Number(height) * dimensions.width / dimensions.height) : available;
+    const ratio = Number.isFinite(Number(pixelRatio)) && Number(pixelRatio) > 0 ? Number(pixelRatio) : 1;
+    const target = display * ratio;
+    return pdfWidths.find(value => value >= target) || pdfWidths.at(-1);
+  }
+  function pageSource(book, index, width = 1600) {
+    const base = '/api/books/' + encodeURIComponent(book.id) + '/pages/' + index;
+    if (book.format !== 'pdf') return base;
+    const bucket = pdfWidths.find(value => value >= Number(width)) || pdfWidths.at(-1);
+    const revision = typeof book.page_revision === 'string' && /^[a-f0-9]{24}$/.test(book.page_revision) ? book.page_revision : '';
+    return base + '?width=' + bucket + (revision ? '&v=' + encodeURIComponent(revision) : '');
+  }
+  return { buildSpreads, spreadForPage, visualPages, effectiveMode, effectiveDirection, canScrollPage, createWheelPager, swipePageDelta, pageDimensions, pdfPageWidth, pageSource };
 }));

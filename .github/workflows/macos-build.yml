@@ -1,0 +1,221 @@
+name: Validate macOS development builds
+
+on:
+  push:
+    branches:
+      - dev/macos-preview
+  workflow_dispatch:
+    inputs:
+      sign_and_notarize:
+        description: "Use configured Apple Developer ID certificate and notarize the validation artifacts"
+        type: boolean
+        default: false
+        required: true
+  workflow_call:
+    inputs:
+      source_ref:
+        description: "Exact source commit selected by the release workflow"
+        type: string
+        default: ""
+        required: false
+      sign_and_notarize:
+        description: "Use configured Apple Developer ID certificate and notarization"
+        type: boolean
+        default: false
+        required: false
+      require_native_gui:
+        description: "Require native launcher validation for a formal release"
+        type: boolean
+        default: false
+        required: false
+    secrets:
+      APPLE_CERTIFICATE_P12_BASE64:
+        required: false
+      APPLE_CERTIFICATE_PASSWORD:
+        required: false
+      APPLE_CODESIGN_IDENTITY:
+        required: false
+      APPLE_ID:
+        required: false
+      APPLE_TEAM_ID:
+        required: false
+      APPLE_APP_SPECIFIC_PASSWORD:
+        required: false
+
+# This workflow never creates a GitHub Release or pushes a container image.
+permissions:
+  contents: read
+
+concurrency:
+  group: gravelle-macos-validation-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+            python_arch: arm64
+          - runner: macos-15-intel
+            arch: x64
+            python_arch: x64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.source_ref || github.sha }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          architecture: ${{ matrix.python_arch }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            desktop/requirements-macos-build.txt
+      - name: Install native build dependencies
+        run: python -m pip install --disable-pip-version-check -r desktop/requirements-macos-build.txt
+      - name: Validate packaging and launcher contracts
+        run: |
+          python desktop/build_macos.py --validate-config --arch '${{ matrix.arch }}'
+          python -m unittest discover -s tests -p 'test_macos*.py' -v
+          python -m unittest discover -s tests -p 'test_pdf*.py' -v
+          python -m unittest discover -s tests -p 'test_epub*.py' -v
+      - name: Prepare temporary signing keychain
+        if: inputs.sign_and_notarize
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          CODESIGN_IDENTITY: ${{ secrets.APPLE_CODESIGN_IDENTITY }}
+          NOTARY_APPLE_ID: ${{ secrets.APPLE_ID }}
+          NOTARY_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          NOTARY_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          python - <<'PY'
+          import base64, json, os, pathlib, re, secrets, subprocess
+          required = ('CERTIFICATE_BASE64', 'CERTIFICATE_PASSWORD', 'CODESIGN_IDENTITY',
+                      'NOTARY_APPLE_ID', 'NOTARY_TEAM_ID', 'NOTARY_PASSWORD')
+          if not all(os.environ.get(name) for name in required):
+              raise SystemExit('Configure all Apple signing and notarization secrets before requesting a signed validation build.')
+          identity = os.environ['CODESIGN_IDENTITY']
+          if not re.fullmatch(r'Developer ID Application: [^\r\n]+ \([A-Z0-9]{10}\)', identity):
+              raise SystemExit('Use a Developer ID Application signing identity.')
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          keychain = root / 'gravelle-signing.keychain-db'
+          certificate = root / 'gravelle-signing.p12'
+          password = secrets.token_urlsafe(32)
+          profile = 'gravelle-validation'
+          def run(command):
+              result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+              if result.returncode:
+                  raise SystemExit('Apple signing keychain preparation failed; secret output was withheld.')
+          previous = subprocess.check_output(['security', 'list-keychains', '-d', 'user'], text=True)
+          (root / 'gravelle-previous-keychains.json').write_text(json.dumps([line.strip().strip('"') for line in previous.splitlines()]))
+          try:
+              certificate.write_bytes(base64.b64decode(os.environ['CERTIFICATE_BASE64'], validate=True))
+              certificate.chmod(0o600)
+              run(['security', 'create-keychain', '-p', password, str(keychain)])
+              run(['security', 'set-keychain-settings', '-lut', '5400', str(keychain)])
+              run(['security', 'unlock-keychain', '-p', password, str(keychain)])
+              run(['security', 'import', str(certificate), '-P', os.environ['CERTIFICATE_PASSWORD'],
+                   '-T', '/usr/bin/codesign', '-t', 'cert', '-f', 'pkcs12', '-k', str(keychain)])
+              run(['security', 'set-key-partition-list', '-S', 'apple-tool:,apple:,codesign:', '-s', '-k', password, str(keychain)])
+              run(['security', 'list-keychains', '-d', 'user', '-s', str(keychain)])
+              run(['xcrun', 'notarytool', 'store-credentials', profile, '--apple-id', os.environ['NOTARY_APPLE_ID'],
+                   '--team-id', os.environ['NOTARY_TEAM_ID'], '--password', os.environ['NOTARY_PASSWORD'], '--keychain', str(keychain)])
+              # Only public identity, profile name and temporary path cross steps.
+              with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as output:
+                  output.write(f'GRAVELLE_CODESIGN_IDENTITY={identity}\nGRAVELLE_NOTARY_PROFILE={profile}\nGRAVELLE_NOTARY_KEYCHAIN={keychain}\n')
+          finally:
+              certificate.unlink(missing_ok=True)
+          PY
+      - name: Build app, DMG and ZIP
+        env:
+          BUILD_REPOSITORY: ${{ github.repository }}
+        run: python desktop/build_macos.py --repository "$BUILD_REPOSITORY" --arch '${{ matrix.arch }}' --output-dir 'dist/macos-${{ matrix.arch }}'
+      - name: Smoke test frozen server and image workers
+        env:
+          GRAVELLE_STARTUP_TRACE: "1"
+        run: |
+          executable=$(python -c 'import json; print(json.load(open("dist/macos-${{ matrix.arch }}/build-report.json"))["app"] + "/Contents/MacOS/Gravelle")')
+          python desktop/smoke_macos.py --executable "$executable" --work-root 'work/macos-smoke-${{ matrix.arch }}' --report 'work/macos-smoke-${{ matrix.arch }}/trace-report.json' --skip-gui
+          env -u GRAVELLE_STARTUP_TRACE python desktop/smoke_macos.py --executable "$executable" --work-root 'work/macos-smoke-${{ matrix.arch }}' --report 'work/macos-smoke-${{ matrix.arch }}/report.json' --skip-gui
+      - name: Verify artifact checksums
+        run: cd 'dist/macos-${{ matrix.arch }}' && shasum -a 256 -c SHA256SUMS.txt
+      - name: Smoke test native launcher window and menu bar
+        timeout-minutes: 8
+        env:
+          REQUIRE_NATIVE_GUI: ${{ inputs.require_native_gui }}
+        run: |
+          executable=$(python -c 'import json; print(json.load(open("dist/macos-${{ matrix.arch }}/build-report.json"))["app"] + "/Contents/MacOS/Gravelle")')
+          storage="$PWD/work/macos-gui-${{ matrix.arch }}"
+          set +e
+          python desktop/smoke_macos.py --executable "$executable" --work-root "$storage" --report "$storage/gui-report.json" --gui-only
+          gui_status=$?
+          set -e
+          if [ "$gui_status" -eq 77 ]; then
+            GUI_REPORT="$storage/gui-report.json" python - <<'PY'
+          import json, os, pathlib
+          report = json.loads(pathlib.Path(os.environ['GUI_REPORT']).read_text(encoding='utf-8'))
+          assert report.get('status') == 'unsupported', 'Exit 77 requires an explicit unsupported GUI report'
+          PY
+            if [ "$REQUIRE_NATIVE_GUI" = true ]; then
+              echo '::error::Formal release requires native launcher GUI validation; this runner has no graphical session.'
+              exit 1
+            fi
+            echo '::warning::Native GUI smoke is unsupported because this runner has no graphical session. The launcher UI has NOT passed native validation; test the development app on a real Mac.'
+            printf '\nNative launcher GUI: **unsupported** (runner has no graphical session). This is not a passed GUI test. Development artifacts are retained for real Mac validation.\n' >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$gui_status" -ne 0 ]; then
+            exit "$gui_status"
+          else
+            printf '\nNative launcher GUI and application Quit smoke: passed (idle, service running, window hidden). Owned service exit and port release verified.\n' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Preserve development artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: gravelle-macos-${{ matrix.arch }}-development
+          path: |
+            dist/macos-${{ matrix.arch }}/*.dmg
+            dist/macos-${{ matrix.arch }}/*.zip
+            dist/macos-${{ matrix.arch }}/SHA256SUMS.txt
+            dist/macos-${{ matrix.arch }}/build-report.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Preserve validation report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-${{ matrix.arch }}-smoke-report
+          path: work/macos-smoke-${{ matrix.arch }}/*.json
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Preserve native launcher report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-${{ matrix.arch }}-launcher-report
+          path: |
+            work/macos-gui-${{ matrix.arch }}/gui-report.json
+            work/macos-gui-${{ matrix.arch }}/*-port-*.png
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Remove temporary signing credentials
+        if: always() && inputs.sign_and_notarize
+        run: |
+          python - <<'PY'
+          import json, os, pathlib, subprocess
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          previous = root / 'gravelle-previous-keychains.json'
+          keychain = root / 'gravelle-signing.keychain-db'
+          if previous.is_file():
+              values = json.loads(previous.read_text())
+              subprocess.run(['security', 'list-keychains', '-d', 'user', '-s', *values], check=True)
+          if keychain.is_file():
+              subprocess.run(['security', 'delete-keychain', str(keychain)], check=True)
+          (root / 'gravelle-signing.p12').unlink(missing_ok=True)
+          previous.unlink(missing_ok=True)
+          PY
