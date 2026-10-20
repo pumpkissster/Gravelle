@@ -274,6 +274,11 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
             self.port.setStringValue_(state.port)
             self.port.setFont_(A.NSFont.systemFontOfSize_(14))
             self.port.setBezelStyle_(A.NSTextFieldRoundedBezel)
+            self.port.cell().setUsesSingleLineMode_(True)
+            # A rounded AppKit cell has its own bezel/editor metrics. Stretching
+            # it to the row height leaves a second-looking outline on focus.
+            self.port.sizeToFit()
+            self.port_height = self.port.frame().size.height
             self.port.setAccessibilityLabel_(tr("port"))
             self.network_card.addSubview_(self.port)
             self.lan = A.NSButton.checkboxWithTitle_target_action_(tr("lan"), self, "changeLAN:")
@@ -385,6 +390,7 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
             icon = A.NSImage.alloc().initWithContentsOfFile_(str(resource_root() / "static" / "gravelle-icon.png"))
             if icon is not None:
                 icon.setSize_(A.NSMakeSize(19, 19))
+                icon.setTemplate_(True)
                 self.status_item.button().setImage_(icon)
             else:
                 self.status_item.button().setTitle_("Gravelle")
@@ -445,7 +451,7 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
             self.frame(self.network_card, 0, y, content_width, 236)
             self.frame(self.network_heading, 20, 20, content_width - 40, 26)
             self.frame(self.port_label, 20, 65, 108, 24)
-            self.frame(self.port, 128, 58, 116, 36)
+            self.frame(self.port, 128, 76 - self.port_height / 2, 116, self.port_height)
             self.frame(self.diagnose_button, content_width - 170, 56, 150, 40)
             self.frame(self.lan, 20, 108, content_width - 40, 28)
             self.frame(self.address_label, 20, 151, content_width - 40, 20)
@@ -743,6 +749,7 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
                 # terminate event as Dock Quit. No mock or app.stop() pass.
                 self.window.setContentSize_(A.NSMakeSize(600, 480))
                 self.layout_window()
+                port_metrics = self.capture_port_smoke()
                 body_height = self.root.bounds().size.height
                 footer = self.start_button.frame()
                 checks = {"window_visible": bool(self.window.isVisible()),
@@ -750,6 +757,10 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
                           "status_menu_present": self.status_item.menu() is not None,
                           "native_buttons": isinstance(self.start_button, A.NSButton),
                           "port_field": isinstance(self.port, A.NSTextField),
+                          "port_uses_native_height": abs(self.port.frame().size.height - self.port.intrinsicContentSize().height) <= 1,
+                          "port_single_line": bool(self.port.cell().usesSingleLineMode()),
+                          "status_icon_is_template": bool(self.status_item.button().image() is not None
+                                                           and self.status_item.button().image().isTemplate()),
                           "small_window_footer_visible": footer.origin.y >= 0 and footer.origin.y + footer.size.height <= body_height,
                           "body_scrolls_independently": self.scroll.documentView() == self.document,
                           "labels_at_least_12pt": min(self.version.font().pointSize(), self.status.font().pointSize(),
@@ -758,6 +769,7 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
                 self.smoke_result = {"status": "running", "checks": checks,
                                      "platform": "macos", "native_event_loop": True,
                                      "scenario": smoke_scenario,
+                                     "port_metrics": port_metrics,
                                      "termination_requested": False,
                                      "application_will_terminate": False,
                                      "service_pid": None, "service_port": None,
@@ -808,6 +820,30 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
             self.smoke_result['termination_requested'] = True
             smoke_report.write_text(json.dumps(self.smoke_result, ensure_ascii=False, indent=2) + '\n', encoding='utf8')
             app.terminate_(None)
+
+        @objc.python_method
+        def capture_port_smoke(self):
+            """Capture this isolated input in both states using native AppKit drawing."""
+            for name, focus in (("port-focused.png", True), ("port-unfocused.png", False)):
+                self.window.makeFirstResponder_(self.port if focus else None)
+                if focus:
+                    self.port.selectText_(None)
+                    editor = self.port.currentEditor()
+                    if editor is None or editor.string() != self.port.stringValue():
+                        raise LauncherError("The native port editor did not show its current value.")
+                self.window.displayIfNeeded()
+                rect = A.NSInsetRect(self.port.convertRect_toView_(self.port.bounds(), self.root), -12, -12)
+                bitmap = self.root.bitmapImageRepForCachingDisplayInRect_(rect)
+                if bitmap is None:
+                    raise LauncherError("The native port field could not be captured.")
+                self.root.cacheDisplayInRect_toBitmapImageRep_(rect, bitmap)
+                png = bitmap.representationUsingType_properties_(A.NSBitmapImageFileTypePNG, {})
+                if png is None or not png.writeToFile_atomically_(str(smoke_report.parent / name), True):
+                    raise LauncherError("The native port field capture could not be saved.")
+            return {"height": self.port.frame().size.height,
+                    "intrinsic_height": self.port.intrinsicContentSize().height,
+                    "font_size": self.port.font().pointSize(),
+                    "screenshots": ["port-focused.png", "port-unfocused.png"]}
 
         def windowShouldClose_(self, window):
             window.orderOut_(None)

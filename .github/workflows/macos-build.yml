@@ -159,7 +159,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: macos-${{ matrix.arch }}-launcher-report
-          path: work/macos-gui-${{ matrix.arch }}/gui-report.json
+          path: |
+            work/macos-gui-${{ matrix.arch }}/gui-report.json
+            work/macos-gui-${{ matrix.arch }}/*-port-*.png
           if-no-files-found: warn
           retention-days: 14
       - name: Remove temporary signing credentials

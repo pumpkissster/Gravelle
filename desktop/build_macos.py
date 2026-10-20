@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import base64
 import hashlib
 import importlib.metadata
 import io
@@ -149,6 +150,30 @@ def collect_licenses(target: Path) -> None:
             raise BuildError(f'License notices missing for {name}.')
 
 
+def macos_icon_png(source: Path) -> bytes:
+    """Give only the Mac app icon a white rounded tile and Dock-safe margins."""
+    from PIL import Image
+    import resvg_py
+
+    original = source.read_bytes()
+    with Image.open(io.BytesIO(original)) as image:
+        if image.format != 'PNG' or image.mode != 'RGBA':
+            raise BuildError('The supplied app logo must be a transparent RGBA PNG.')
+        image.verify()
+    encoded = base64.b64encode(original).decode('ascii')
+    svg = ('<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">'
+           '<rect x="100" y="100" width="824" height="824" rx="185" fill="#fff"/>'
+           '<image x="205" y="205" width="614" height="614" preserveAspectRatio="xMidYMid meet" '
+           f'href="data:image/png;base64,{encoded}"/>'
+           '</svg>')
+    png = resvg_py.svg_to_bytes(svg_string=svg, width=1024, height=1024, skip_system_fonts=True)
+    with Image.open(io.BytesIO(png)) as image:
+        if image.mode != 'RGBA' or image.size != (1024, 1024) or image.getextrema()[3] != (0, 255):
+            raise BuildError('The Mac app icon must render as a 1024-pixel RGBA PNG with transparent outer margins.')
+    return png
+
+
+
 def prepare_resources(root: Path, resources: Path, config: dict) -> None:
     from PIL import Image
     import resvg_py
@@ -165,9 +190,9 @@ def prepare_resources(root: Path, resources: Path, config: dict) -> None:
         if image.mode != 'RGBA' or image.width != 600 or image.getextrema()[3] != (0, 255):
             raise BuildError('The wordmark must render as a transparent 600-pixel RGBA PNG.')
     (assets / 'gravelle-wordmark.png').write_bytes(png)
-    with Image.open(root / 'static' / 'gravelle-icon.png') as image:
-        image.convert('RGBA').save(resources / 'Gravelle.icns', format='ICNS',
-                                    sizes=[(16, 16), (32, 32), (64, 64), (128, 128), (256, 256), (512, 512), (1024, 1024)])
+    with Image.open(io.BytesIO(macos_icon_png(root / 'static' / 'gravelle-icon.png'))) as image:
+        image.save(resources / 'Gravelle.icns', format='ICNS',
+                   sizes=[(16, 16), (32, 32), (64, 64), (128, 128), (256, 256), (512, 512), (1024, 1024)])
     collect_licenses(resources / 'licenses')
     (resources / 'THIRD_PARTY_NOTICES.md').write_text(
         '# Gravelle macOS runtime\n\n'

@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import io
 import importlib.metadata
+import importlib.util
 import json
 from pathlib import Path
 import shutil
@@ -116,6 +117,65 @@ class MacOSPackagingTests(unittest.TestCase):
         self.assertNotIn('GravelleServer.exe', spec)
         self.assertIn('entitlements_file=', spec)
         self.assertEqual(build_macos.ENTITLEMENTS, {'com.apple.security.cs.allow-jit': True})
+
+    @unittest.skipUnless(importlib.util.find_spec('resvg_py'), 'Build-only resvg-py is not installed')
+    def test_real_mac_icon_has_white_rounded_tile_and_preserves_supplied_logo(self):
+        from PIL import Image
+        source = build_macos.ROOT / 'static' / 'gravelle-icon.png'
+        original = source.read_bytes()
+        with Image.open(io.BytesIO(original)) as logo:
+            colours = logo.convert('RGBA').getcolors(logo.width * logo.height)
+            brand_colour = max((count, colour) for count, colour in colours if colour[3] == 255)[1]
+        rendered = build_macos.macos_icon_png(source)
+        with Image.open(io.BytesIO(rendered)) as icon:
+            self.assertEqual(icon.mode, 'RGBA')
+            self.assertEqual(icon.size, (1024, 1024))
+            # A white tile remains visible in light and dark Docks; its
+            # rounded corners and outer margins remain genuinely transparent.
+            self.assertEqual(icon.getpixel((0, 0))[3], 0)
+            self.assertEqual(icon.getpixel((1023, 1023))[3], 0)
+            self.assertEqual(icon.getpixel((110, 110))[3], 0)
+            for point in ((150, 512), (874, 512), (512, 150), (512, 874)):
+                self.assertEqual(icon.getpixel(point), (255, 255, 255, 255))
+            colours = {colour: count for count, colour in icon.getcolors(icon.width * icon.height)}
+            self.assertGreater(colours[brand_colour], 10000, 'The original pink mark must remain visible and unchanged in colour')
+            self.assertGreater(colours[(255, 255, 255, 255)], 400000)
+            # Do not enlarge or clip the mark against the rounded tile.
+            pixels = icon.load()
+            pink_points = [(x, y) for y in range(1024) for x in range(1024)
+                           if pixels[x, y] == brand_colour]
+            self.assertGreater(min(x for x, y in pink_points), 200)
+            self.assertLess(max(x for x, y in pink_points), 824)
+            self.assertGreater(min(y for x, y in pink_points), 200)
+            self.assertLess(max(y for x, y in pink_points), 824)
+        self.assertEqual(source.read_bytes(), original, 'Mac packaging must never overwrite the web/Windows logo')
+
+
+    @unittest.skipUnless(importlib.util.find_spec('resvg_py'), 'Build-only resvg-py is not installed')
+    def test_resources_encode_white_mac_icon_at_all_icns_sizes_without_changing_wordmark(self):
+        from PIL import Image
+        static = self.root / 'static'
+        static.mkdir()
+        for name in ('gravelle-icon.png', 'gravelle-wordmark.svg'):
+            shutil.copyfile(build_macos.ROOT / 'static' / name, static / name)
+        originals = {path.name: path.read_bytes() for path in static.iterdir()}
+        resources = self.root / 'resources'
+        config = build_macos.configuration(self.root, 'owner/repo', 'arm64', 'dist/mac')
+        with patch.object(build_macos, 'collect_licenses'):
+            build_macos.prepare_resources(self.root, resources, config)
+        with Image.open(resources / 'Gravelle.icns') as icon:
+            self.assertEqual(icon.format, 'ICNS')
+            self.assertEqual(icon.size, (1024, 1024))
+            self.assertEqual(icon.convert('RGBA').getpixel((150, 512)), (255, 255, 255, 255))
+            # Pillow writes a native 16pt @2x slot plus PNG sizes 32..1024.
+            self.assertIn((16, 16, 2), icon.info['sizes'])
+            for width in (32, 64, 128, 256, 512, 1024):
+                self.assertTrue(any(size[0] * size[2] == width for size in icon.info['sizes']))
+        with Image.open(resources / 'desktop' / 'assets' / 'gravelle-wordmark.png') as wordmark:
+            self.assertEqual(wordmark.width, 600)
+            self.assertEqual(wordmark.getextrema()[3], (0, 255))
+        self.assertEqual({path.name: path.read_bytes() for path in static.iterdir()}, originals)
+
 
     def simulated_native_build(self, *, signing=False, notary_status='Accepted', binary_arch='arm64'):
         """Exercise artifact ordering using explicit generated fixtures, not Mach-O files."""

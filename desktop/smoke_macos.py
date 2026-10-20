@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import shutil
 import socket
 import subprocess
 import sys
@@ -130,6 +131,15 @@ def native_smoke(executable: Path, work: Path) -> dict:
             except (OSError, ValueError):
                 native = {}
                 item.setdefault('error', 'Native launcher did not write a valid termination report')
+            captures = {}
+            for name in ('port-focused.png', 'port-unfocused.png'):
+                captured = scratch / name
+                if captured.is_file() and not captured.is_symlink():
+                    destination = work / (scenario + '-' + name)
+                    shutil.copyfile(captured, destination)
+                    captures[name] = str(destination)
+            if captures:
+                item['screenshots'] = captures
             if (item['returncode'] == 77 and native.get('status') == 'unsupported'
                     and not item['timed_out']):
                 item['status'] = 'unsupported'
