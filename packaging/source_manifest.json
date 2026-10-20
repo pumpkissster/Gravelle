@@ -1,6 +1,6 @@
 [
   "server.py", "accounts.py", "password_reset.py", "transcoding.py", "image_search.py", "image_search_features.py", "task_scheduler.py", "library_covers.py", "cache_manager.py", "epub_reader.py", "pdf_reader.py", "release.json", "requirements.txt", "README.md", "LICENSE",
-  "Dockerfile", "compose.yaml", "compose.build.yaml", "compose.optimization.yaml", ".env.example", ".dockerignore", ".gitignore",
+  "Dockerfile", "compose.yaml", "compose.build.yaml", "compose.optimization.yaml", ".env.example", ".dockerignore", ".gitignore", ".gitattributes",
   ".github/workflows/release.yml",
   ".github/workflows/macos-build.yml",
   "start_windows.py", "start-windows.cmd", "restart-windows.cmd", "restart-windows.ps1",

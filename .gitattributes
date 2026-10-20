@@ -1,0 +1,3 @@
+# Preserve reviewed bytes, pinned license hashes and web assets on every OS.
+# Disabling text conversion does not disable Git's normal readable text diffs.
+* -text
