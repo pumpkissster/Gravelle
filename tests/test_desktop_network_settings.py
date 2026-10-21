@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from io import StringIO
+import errno
 import json
 from pathlib import Path
 import socket
@@ -207,17 +208,53 @@ class DesktopNetworkSettingsTests(unittest.TestCase):
                 self.assertFalse(controller.running)
                 self.assertTrue(Path(recovery["backup"]).is_file())
                 self.assertEqual(read_security_entry_path(data), "/")
-                for port in (main_port, share_port):
-                    with socket.socket() as probe:
-                        probe.bind(("127.0.0.1", port))
+                self.assertTrue(ports_released(config), "Owned service left a listener after entry recovery")
                 self.assertEqual(controller.start(config), config.local_url)
                 self.assertEqual(status(config.local_url), 200)
                 self.assertNotIn("isolated-test-entry", (root / "server.log").read_text(encoding="utf8"))
             finally:
                 controller.stop()
-            for port in (main_port, share_port):
-                with socket.socket() as probe:
-                    probe.bind(("127.0.0.1", port))
+            self.assertTrue(ports_released(config), "Owned service left a listener after stop")
+
+
+class NetworkPortProbeTests(unittest.TestCase):
+    def test_dual_port_probe_rejects_either_live_listener_even_with_reusable_address(self):
+        for occupied in (0, 1):
+            with self.subTest(listener=occupied):
+                main, share = random_ports(2)
+                config = LauncherConfig(port=main, share_port=share)
+                self.assertTrue(ports_released(config))
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+                    if sys.platform != 'win32':
+                        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    listener.bind(('127.0.0.1', (main, share)[occupied]))
+                    listener.listen(1)
+                    self.assertFalse(ports_released(config))
+                self.assertTrue(ports_released(config))
+
+    @unittest.skipIf(sys.platform == 'win32', 'Unix TIME_WAIT reuse policy')
+    def test_dual_port_probe_allows_unix_time_wait_after_the_listener_has_exited(self):
+        main, share = random_ports(2)
+        config = LauncherConfig(port=main, share_port=share)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind(('127.0.0.1', main))
+            listener.listen(1)
+            with socket.create_connection(('127.0.0.1', main), timeout=2) as client:
+                accepted, _ = listener.accept()
+                with accepted:
+                    accepted.settimeout(2)
+                    # The server sends the first FIN so its local port enters
+                    # TIME_WAIT after both peers complete a clean TCP close.
+                    accepted.shutdown(socket.SHUT_WR)
+                    self.assertEqual(client.recv(1), b'')
+                    client.shutdown(socket.SHUT_WR)
+                    self.assertEqual(accepted.recv(1), b'')
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as strict_probe:
+            with self.assertRaises(OSError) as rejected:
+                strict_probe.bind(('127.0.0.1', main))
+            self.assertEqual(rejected.exception.errno, errno.EADDRINUSE)
+        self.assertTrue(ports_released(config))
 
 
 class FrozenNetworkSmokeDriverTests(unittest.TestCase):
