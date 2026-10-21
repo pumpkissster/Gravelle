@@ -16,7 +16,7 @@ import types
 import unittest
 from unittest.mock import MagicMock, patch
 
-from desktop.core import LauncherConfig, LauncherError
+from desktop.core import LauncherConfig, LauncherError, security_entry_recovery_warnings
 from desktop.macos_entry import main, validate_smoke_paths
 from desktop.macos_launcher import (LauncherState, normalise_roots, preferred_language, text,
                                     verified_disk_image, window_size)
@@ -50,8 +50,11 @@ def termination_contract():
     state = types.SimpleNamespace(events=queue.Queue(), worker=MagicMock(),
                                   controller=types.SimpleNamespace(stop=MagicMock(), process=None, running=False))
     app = MagicMock()
+    recovery_alert = MagicMock()
     namespace = {"queue": queue, "state": state, "app": app, "tr": lambda key, **values: key,
+                 "language": "en", "security_entry_recovery_warnings": security_entry_recovery_warnings,
                  "A": types.SimpleNamespace(NSTerminateLater=2, NSTerminateCancel=0,
+                                             NSAlert=types.SimpleNamespace(alloc=lambda: types.SimpleNamespace(init=lambda: recovery_alert)),
                                              NSModalPanelRunLoopMode="NSModalPanelRunLoopMode"),
                  "F": types.SimpleNamespace(NSRunLoopCommonModes="NSRunLoopCommonModes")}
     module = ast.fix_missing_locations(ast.Module(body=methods, type_ignores=[]))
@@ -59,6 +62,7 @@ def termination_contract():
     subject = types.SimpleNamespace(busy=False, quitting=False, exit_started=False, updating=False,
                                     status=MagicMock(), update_button=MagicMock(), restore_=MagicMock(),
                                     openBrowser_=MagicMock(), window=MagicMock(), address=MagicMock(),
+                                    recovery_alert=recovery_alert,
                                     performSelectorOnMainThread_withObject_waitUntilDone_modes_=MagicMock())
     subject.set_busy = lambda busy: setattr(subject, "busy", busy)
     for name in selected:
@@ -203,7 +207,7 @@ class MacLauncherTests(unittest.TestCase):
         app.replyToApplicationShouldTerminate_.assert_called_once_with(True)
 
     def test_busy_quit_is_retained_until_foreground_operation_completes(self):
-        for operation in ("start", "stop", "reset", "diagnose", "smoke-start"):
+        for operation in ("start", "stop", "reset", "reset-entry", "diagnose", "smoke-start"):
             for succeeds in (True, False):
                 with self.subTest(operation=operation, succeeds=succeeds):
                     subject, state, app = termination_contract()
@@ -223,6 +227,18 @@ class MacLauncherTests(unittest.TestCase):
                     subject.openBrowser_.assert_not_called()
                     subject.window.orderOut_.assert_not_called()
                     app.replyToApplicationShouldTerminate_.assert_not_called()
+
+    def test_security_entry_recovery_warns_in_current_language_without_delaying_quit(self):
+        subject, state, _ = termination_contract()
+        state.controller.config = None
+        state.events.put(("reset-entry", True, {"warnings": ["已保留独立分享端口。"],
+                                               "warning_codes": ["share_isolation_preserved"]}))
+        subject.poll_(None)
+        subject.recovery_alert.runModal.assert_called_once_with()
+        notice = subject.recovery_alert.setInformativeText_.call_args.args[0]
+        self.assertIn("will not fall back", notice)
+        self.assertNotIn("已保留", notice)
+        self.assertFalse(subject.busy)
 
     def test_shutdown_failure_cancels_pending_termination_and_can_be_retried(self):
         subject, state, app = termination_contract()

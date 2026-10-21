@@ -193,7 +193,7 @@ class SharingAPITests(unittest.TestCase):
         status, visitor, metadata, cookie = self.unlock(result)
         self.assertEqual(status,200,visitor)
         self.assertNotIn('session',visitor)
-        self.assertEqual(set(visitor['manifest']),{'title','page_count','format'})
+        self.assertEqual(set(visitor['manifest']),{'title','page_count','format','reading_mode','reading_direction'})
         self.assertIn('HttpOnly',metadata['Set-Cookie'])
         self.assertIn('SameSite=Strict',metadata['Set-Cookie'])
         self.assertIn('Path=/api/share/'+token,metadata['Set-Cookie'])
@@ -228,6 +228,30 @@ class SharingAPITests(unittest.TestCase):
         self.assertEqual(self.unlock(result,cookie=cookie)[0],200)
         self.assertEqual(self.unlock(result)[0],200)
         self.assertEqual(self.request('/api/shares',{'book_id':self.book['id'],'mode':'visits','max_visits':1},actor='admin')[0],400)
+
+    def test_guest_defaults_ignore_creator_preferences_and_cannot_write_account_settings(self):
+        with closing(self.app.connect()) as connection, connection:
+            connection.execute("UPDATE media_libraries SET reading_mode='double',reading_direction='rtl' WHERE id=?", (self.library['id'],))
+            connection.execute("INSERT INTO reading_preferences(user_id,book_id,reading_mode,reading_direction) VALUES(1,?,'webtoon','ttb')", (self.book['id'],))
+            connection.execute("INSERT INTO book_metadata(book_id,reading_mode_override,reading_direction_override) VALUES(?,'single','ttb') ON CONFLICT(book_id) DO UPDATE SET reading_mode_override='single',reading_direction_override='ttb'", (self.book['id'],))
+        result = self.create()
+        status, visitor, _, cookie = self.unlock(result)
+        self.assertEqual(status, 200, visitor)
+        self.assertEqual(visitor['manifest']['reading_mode'], 'single')
+        self.assertEqual(visitor['manifest']['reading_direction'], 'ttb')
+        self.assertEqual(set(visitor['manifest']), {'title','page_count','format','reading_mode','reading_direction'})
+        serialized = json.dumps(visitor['manifest'])
+        for value in (str(self.media), self.book['id'], 'share-admin', 'reading_preferences', 'progress', 'favorite'):
+            self.assertNotIn(value, serialized)
+        base = '/api/share/' + result['share']['token']
+        self.assertEqual(self.request(base + '/manifest?reading_mode=double', cookie=cookie)[0], 400)
+        self.assertEqual(self.request(base + '/reading-preferences', {'reading_mode':'double'}, cookie=cookie)[0], 404)
+        self.assertEqual(self.request('/api/books/' + self.book['id'] + '/reading-preferences', {'reading_mode':'double'}, cookie=cookie)[0], 401)
+        self.assertEqual(self.unlock(result, cookie=cookie)[1]['manifest'], visitor['manifest'])
+        with closing(self.app.connect()) as connection:
+            personal = connection.execute('SELECT user_id,reading_mode,reading_direction FROM reading_preferences').fetchall()
+            self.assertEqual([tuple(row) for row in personal], [(1,'webtoon','ttb')])
+            self.assertEqual(connection.execute('SELECT COUNT(*) FROM progress').fetchone()[0], 0)
 
     def test_real_cbz_and_pdf_sources_remain_readable_through_encryption(self):
         books = self.app.listing()['books']

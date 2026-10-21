@@ -49,6 +49,8 @@
   let cacheManagementUI = null;
   let sharingUI = null;
   let sharingSettings = null;
+  let networkSettingsUI = null;
+  let networkSettings = null;
   let libraryCoverBusy = false;
   let libraryCoverRequest = 0;
   let searchMode = 'text';
@@ -96,6 +98,7 @@
     reader.pending = null; clearTimeout(reader.saveTimer);
     if (reader.open) closeReader(false);
     sharingUI?.reset();
+    networkSettingsUI?.reset();
     ['library-dialog', 'book-detail', 'metadata-dialog', 'model-dialog', 'bookmark-dialog', 'profile-dialog', 'remove-dialog', 'user-dialog', 'users-dialog', 'batch-model-dialog'].forEach(id => { if ($('#' + id).open) $('#' + id).close(); });
     reader.saveChains.clear(); reader.settingsChains.clear(); reader.pageCache.clear();
     clearTimeout(state.poll); state.poll = null; state.refreshPromise = null;
@@ -206,8 +209,10 @@
   }
 
   const post = (path, data, options = {}) => api(path, { method: 'POST', body: JSON.stringify(data), ...options });
+  networkSettings = node('section'); networkSettings.id = 'network-settings'; networkSettings.hidden = true;
+  networkSettingsUI = window.GravelleNetworkSettingsUI.create({ host: networkSettings, api, post, isAdmin, toast, onSaved: () => { settingsAccessGeneration++; settingsAccessReadAt = 0; settingsAccessRequest = null; } });
   sharingSettings = node('section'); sharingSettings.id = 'sharing-settings'; sharingSettings.hidden = true;
-  sharingUI = window.GravelleSharingUI.create({ api, post, isAdmin, toast, managementHost: sharingSettings });
+  sharingUI = window.GravelleSharingUI.create({ api, post, isAdmin, toast, managementHost: sharingSettings, getNetworkSettings: () => networkSettingsUI.getSettings(true) });
   Performance.configureServer({ api, post, isAdmin });
   const bookUrl = id => '/api/books/' + encodeURIComponent(id);
   const pageUrl = (book, index, width = 1600) => Model.pageSource(typeof book === 'object' ? book : { id: book }, index, width);
@@ -583,7 +588,7 @@
     }
     const libraryId = String(options.libraryId ?? state.libraryId);
     const modelId = String(options.modelId ?? state.modelId);
-    const settingsSection = view === 'settings' && ['interface', 'performance', 'reading', 'transcoding', 'image-search', 'cache', 'shares'].includes(options.section) && (!['transcoding', 'image-search', 'cache', 'shares'].includes(options.section) || isAdmin()) ? options.section : '';
+    const settingsSection = view === 'settings' && ['interface', 'performance', 'reading', 'transcoding', 'image-search', 'cache', 'shares', 'network'].includes(options.section) && (!['transcoding', 'image-search', 'cache', 'shares', 'network'].includes(options.section) || isAdmin()) ? options.section : '';
     const settingsTab = settingsSection === 'transcoding' && options.tab === 'rules' ? 'rules' : '';
     const nextSearchMode = options.image === undefined ? searchMode : options.image ? 'image' : 'text';
     const samePage = state.view === view && (view !== 'library' || libraryId === String(state.libraryId)) && (view !== 'model' || modelId === String(state.modelId)) && (view !== 'search' || searchMode === nextSearchMode) && (view !== 'settings' || state.settingsSection === settingsSection && state.settingsTab === settingsTab);
@@ -605,6 +610,7 @@
     if (view !== 'settings' || settingsSection !== 'image-search') imageSearchUI?.hideSettings();
     if (view !== 'settings' || settingsSection !== 'cache') cacheManagementUI?.hide();
     if (view !== 'settings' || settingsSection !== 'shares') sharingUI?.hideManagement();
+    if (view !== 'settings' || settingsSection !== 'network') networkSettingsUI?.hide();
     if (options.libraryId !== undefined) state.libraryId = String(options.libraryId);
     if (view === 'library') { state.sort = librarySort(state.libraryId); $('#sort').value = state.sort; }
     if (options.sort) { state.sort = End.normalizeSort(options.sort); $('#sort').value = state.sort; }
@@ -988,7 +994,7 @@
     settingsUpdateRequest = operation;
     return operation;
   }
-  const settingsSectionLabels = { service: '服务与数据', users: '用户管理', interface: '界面设置', performance: '性能设置', reading: '阅读偏好', transcoding: '图片优化', 'image-search': '图片搜索', cache: '缓存管理', shares: '我的分享' };
+  const settingsSectionLabels = { service: '服务与数据', users: '用户管理', interface: '界面设置', performance: '性能设置', network: '网络设置', reading: '阅读偏好', transcoding: '图片优化', 'image-search': '图片搜索', cache: '缓存管理', shares: '我的分享' };
   function ensureImageSearchUI() {
     if (imageSearchUI) return;
     imageSearchSettings = node('section'); imageSearchSettings.id = 'image-search-settings'; imageSearchSettings.hidden = true;
@@ -1008,12 +1014,12 @@
     const items = {};
     Object.entries(settingsSectionLabels).filter(([section]) => !['service', 'users', 'shares'].includes(section)).forEach(([section, title]) => {
       const entry = node('button', 'settings-menu-item'); entry.type = 'button'; entry.dataset.settingsSection = section;
-      const symbol = node('span', 'settings-menu-icon'); symbol.append(icon({ service: 'folder', users: 'person', interface: 'sun', performance: 'settings', reading: 'book', transcoding: 'refresh', 'image-search': 'search', cache: 'folder' }[section]));
+      const symbol = node('span', 'settings-menu-icon'); symbol.append(icon({ service: 'folder', users: 'person', interface: 'sun', performance: 'settings', reading: 'book', transcoding: 'refresh', 'image-search': 'search', cache: 'folder', network: 'settings' }[section]));
       const content = node('span', 'settings-menu-content'); content.append(node('strong', '', title)); const detail = node('small'); content.append(detail); const badge = node('span', 'settings-menu-badge'); badge.hidden = true; entry.append(symbol, content, badge, icon('right')); entry.addEventListener('click', () => navigate('settings', { section })); index.append(entry); items[section] = { entry, detail, badge };
     });
     const transcode = node('section'); transcode.id = 'transcoding-settings'; transcode.hidden = true;
     const cache = node('section'); cache.id = 'cache-management-settings'; cache.hidden = true;
-    host.replaceChildren(back, panels[0], panels[1], index, ...panels.slice(2), transcode, imageSearchSettings, cache, sharingSettings);
+    host.replaceChildren(back, panels[0], panels[1], index, ...panels.slice(2), transcode, imageSearchSettings, cache, sharingSettings, networkSettings);
     settingsLayout = { index, back, items, panels: Object.fromEntries(sections.map((section, position) => [section, panels[position]])), transcode, cache };
     transcodingUI = window.GravelleTranscodingUI.create({ host: transcode, api, post, toast, onCatalogChange: () => refreshLibrary(), onFiltersChange: () => { cancelListRestoration(); saveListPosition(); }, onRender: restoreListPosition, onTabChange: tab => { state.settingsTab = tab === 'rules' ? 'rules' : ''; syncViewRoute(); } });
     cacheManagementUI = window.GravelleCacheManagementUI.create({ host: cache, api, post, toast, onCatalogChange: () => refreshLibrary() });
@@ -1026,8 +1032,9 @@
     settingsLayout.items.transcoding.entry.hidden = !isAdmin();
     settingsLayout.items['image-search'].entry.hidden = !isAdmin();
     settingsLayout.items.cache.entry.hidden = !isAdmin();
+    settingsLayout.items.network.entry.hidden = !isAdmin();
     renderOptimizationReminders();
-    const subtitles = { service: '版本、连接与访问地址', users: state.session?.user?.username || '当前账户与子账户', interface: interfaceTheme() === 'light' ? '亮色主题' : '暗色主题', performance: '加载、缓存与列表', reading: '图片适配与阅读背景', transcoding: '规则、作品与后台任务', 'image-search': '图片索引与后台任务', cache: '空间占用与缓存清理' };
+    const subtitles = { service: '版本、连接与访问地址', users: state.session?.user?.username || '当前账户与子账户', interface: interfaceTheme() === 'light' ? '亮色主题' : '暗色主题', performance: '加载、缓存与列表', reading: '图片适配与阅读背景', transcoding: '规则、作品与后台任务', 'image-search': '图片索引与后台任务', cache: '空间占用与缓存清理', network: '安全入口、独立分享端口与公网地址' };
     Object.entries(settingsLayout.items).forEach(([key, value]) => { value.detail.textContent = subtitles[key]; });
     $('#subaccounts-setting').hidden = !isAdmin();
     renderSubaccountSummary();
@@ -1045,6 +1052,7 @@
     settingsLayout.cache.hidden = section !== 'cache' || !isAdmin();
     if (section === 'cache' && isAdmin()) cacheManagementUI.show(); else cacheManagementUI.hide();
     if (section === 'shares' && isAdmin()) sharingUI.showManagement(); else sharingUI.hideManagement();
+    if (section === 'network' && isAdmin()) networkSettingsUI.show(); else networkSettingsUI.hide();
   }
   function renderSubaccountSummary() {
     const count = $('#subaccounts-count');

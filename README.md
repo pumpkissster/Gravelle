@@ -2,7 +2,7 @@
 
 Gravelle 是属于你自己的写真库阅读器，支持 Windows、macOS 和 Docker。电脑、手机和平板通过浏览器阅读，同一账号共用进度、书签和收藏。
 
-当前版本 **0.9.0** · [下载与更新说明](https://github.com/pumpkissster/Gravelle/releases/latest)
+当前版本 **0.9.1** · [下载与更新说明](https://github.com/pumpkissster/Gravelle/releases/latest)
 
 ## 主要功能
 
@@ -12,6 +12,7 @@ Gravelle 是属于你自己的写真库阅读器，支持 Windows、macOS 和 Do
 - 按规则优化大图，各设备共用优化副本，保留原图。
 - 在自己的写真库中以图搜图，支持完整截图和轻中度裁剪匹配。
 - 管理员创建带密码的单本分享，有效期可选 1／3／7 天，在设置中管理链接与查看访问统计。
+- 网络设置支持安全入口、独立分享端口和公网分享地址。详见 [网络设置说明](docs/network.md)。
 - 图片索引失败列表、写真库合成封面和缓存管理。
 
 EPUB 面向图片写真集，不支持纯文字书或 DRM；PDF 不支持加密文档。PDF、EPUB 暂不参加图片优化和以图搜图。扫描、编辑资料和移除作品不会删除或改写原文件。

@@ -44,7 +44,7 @@ RUN python -m pip install --no-cache-dir -r requirements.txt \
     && python -c "import pypdfium2; pypdfium2.PdfDocument.new().close()" \
     && python -c "from cryptography.hazmat.primitives.ciphers.aead import AESGCM; c=AESGCM(bytes(32)); assert c.decrypt(bytes(12),c.encrypt(bytes(12),b'build-only',b''),b'')==b'build-only'"
 
-COPY server.py accounts.py password_reset.py transcoding.py image_search.py image_search_features.py task_scheduler.py library_covers.py cache_manager.py sharing.py share_crypto.py share_passwords.py epub_reader.py pdf_reader.py ./
+COPY server.py accounts.py password_reset.py network_settings.py transcoding.py image_search.py image_search_features.py task_scheduler.py library_covers.py cache_manager.py sharing.py share_crypto.py share_passwords.py epub_reader.py pdf_reader.py ./
 COPY desktop/licenses/OpenSSL-4.0.2-LICENSE.txt ./licenses/cryptography/OpenSSL-4.0.2-LICENSE.txt
 COPY release.json LICENSE ./
 COPY static ./static
@@ -53,7 +53,7 @@ RUN python -c "import ast, pathlib; tree=ast.parse(pathlib.Path('server.py').rea
     && python password_reset.py --help > /dev/null
 
 USER 1000:1000
-EXPOSE 8080
+EXPOSE 8080 8081
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD python -c "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:'+os.getenv('PORT','8080')+'/api/health', timeout=5).read()"

@@ -8,9 +8,11 @@
   <meta name="theme-color" content="#191618">
   <title>写真分享 · Gravelle</title>
   <link rel="icon" href="/gravelle-icon.png">
+  <link rel="stylesheet" href="/styles.css">
   <link rel="stylesheet" href="/share-reader.css">
   <script defer src="/vendor/noble-gcm.js"></script>
   <script defer src="/share-crypto.js"></script>
+  <script defer src="/reader-model.js"></script>
   <script defer src="/share-reader.js"></script>
 </head>
 <body>
@@ -28,23 +30,68 @@
       <button id="share-gate-retry" type="button" class="share-secondary" hidden>重试</button>
     </section>
   </main>
-  <section id="share-reader" class="share-reader" aria-label="分享阅读器" hidden>
-    <header class="share-toolbar">
-      <img class="share-mini-mark" src="/gravelle-wordmark.svg" alt="Gravelle">
-      <div class="share-heading"><h1 id="share-title"></h1><span>分享阅读</span></div>
-      <button id="share-fit" class="share-tool" type="button" aria-pressed="false">适应宽度</button>
-      <button id="share-theme" class="share-tool" type="button" aria-label="切换为浅色背景">浅色</button>
-      <button id="share-exit" class="share-tool" type="button">退出</button>
-    </header>
-    <div id="share-viewport" class="share-viewport" tabindex="0" aria-label="写真页面">
-      <div id="share-image-host" class="share-image-host"></div>
-      <div id="share-page-message" class="share-page-message" role="status" aria-live="polite"><span id="share-page-message-text"></span><button id="share-page-retry" type="button" class="share-secondary" hidden>重试本页</button></div>
+  <section id="share-reader" class="reader share-reader" aria-label="分享阅读器" data-theme="dark" data-mode="single" data-fit="height" data-direction="ltr" data-controls="visible" hidden>
+    <div class="reader-shell">
+      <header class="reader-toolbar">
+        <button id="share-exit" class="icon-button" type="button" aria-label="退出分享阅读" title="退出阅读"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 5-7 7 7 7"/></svg></button>
+        <div class="reader-title-wrap"><h2 id="share-title"></h2></div>
+        <div class="reader-options">
+          <div class="reader-choice"><button id="share-mode-trigger" class="reader-choice-trigger" type="button" aria-label="阅读方式" aria-haspopup="listbox" aria-expanded="false" aria-controls="share-choice-popover"><span id="share-mode-value">单页</span><svg class="reader-choice-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg></button></div>
+          <div class="reader-choice"><button id="share-direction-trigger" class="reader-choice-trigger" type="button" aria-label="阅读方向" aria-haspopup="listbox" aria-expanded="false" aria-controls="share-choice-popover"><span id="share-direction-value">左 → 右</span><svg class="reader-choice-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg></button></div>
+          <div class="reader-choice"><button id="share-fit-trigger" class="reader-choice-trigger" type="button" aria-label="图片适配" aria-haspopup="listbox" aria-expanded="false" aria-controls="share-choice-popover"><span id="share-fit-value">适应屏幕</span><svg class="reader-choice-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg></button></div>
+          <button id="share-theme" class="icon-button" type="button" aria-label="切换为浅色阅读背景" title="切换阅读背景"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/></svg></button>
+          <button id="share-fullscreen" class="icon-button reader-text-button" type="button" aria-label="进入全屏" title="全屏 (Enter)">⛶</button>
+          <button id="share-help" class="icon-button" type="button" aria-label="查看阅读快捷键" aria-expanded="false" aria-controls="share-help-panel">?</button>
+        </div>
+      </header>
+      <div class="reader-body">
+        <div id="share-viewport" class="reader-viewport share-viewport" tabindex="0" aria-label="图片阅读区域">
+          <div id="share-paged-view" class="paged-view">
+            <button id="share-tap-previous" class="tap-zone tap-left" type="button" aria-label="上一页" tabindex="-1"></button>
+            <div id="share-image-host" class="page-image-wrap share-image-host"></div>
+            <button id="share-tap-next" class="tap-zone tap-right" type="button" aria-label="下一页" tabindex="-1"></button>
+          </div>
+          <div id="share-scroll-view" class="scroll-view" hidden></div>
+          <div id="share-page-message" class="page-loading share-page-message" role="status" aria-live="polite"><span id="share-page-message-text"></span><button id="share-page-retry" type="button" class="button button-secondary" hidden>重试本页</button></div>
+        </div>
+      </div>
+      <footer class="reader-footer">
+        <div class="page-navigation">
+          <button id="share-previous" class="icon-button" type="button" aria-label="上一页"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 5-7 7 7 7"/></svg></button>
+          <form id="share-page-form" class="page-number" dir="ltr"><label class="sr-only" for="share-page-number">跳转页码</label><input id="share-page-number" type="number" min="1" step="1" inputmode="numeric" aria-label="跳转页码"><span id="share-page-total"></span></form>
+          <button id="share-next" class="icon-button" type="button" aria-label="下一页"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg></button>
+        </div>
+        <label class="page-slider-label"><span class="sr-only">页码滑块</span><input id="share-page-slider" type="range" min="0" max="0" value="0" aria-label="跳转到页面"></label>
+        <span id="share-mode-hint" class="reader-key-hint">↑ ↓ 翻页 · ? 帮助</span>
+      </footer>
+      <div class="reader-floating">
+        <section id="share-menu" class="reader-menu" aria-label="快捷阅读设置" hidden>
+          <strong>阅读工具</strong>
+          <button id="share-menu-mode" type="button">切换单页 / 双页</button>
+          <label><input id="share-cover-alone" type="checkbox" checked> 封面单独显示</label>
+          <label><input id="share-spread-offset" type="checkbox"> 跨页配对校正</label>
+          <button id="share-menu-theme" type="button">切换日间 / 夜间</button>
+          <small>双页在窄屏下自动显示为单页。</small>
+        </section>
+        <button id="share-menu-toggle" class="reader-page-float" type="button" aria-label="打开阅读工具" aria-expanded="false" aria-controls="share-menu"><span id="share-floating-page">—</span><small>阅读工具 · ⋯</small></button>
+      </div>
+      <section id="share-help-panel" class="reader-help-panel" aria-label="阅读快捷键" hidden>
+        <button id="share-help-close" class="icon-button" type="button" aria-label="关闭快捷键帮助"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M6 18 18 6"/></svg></button>
+        <h3>专注影像，轻松翻页。</h3>
+        <dl>
+          <dt>↑ / ↓</dt><dd>上一页 / 下一页；连续阅读中滚动</dd>
+          <dt>← / →</dt><dd id="share-help-arrows">上一页 / 下一页，跟随阅读方向</dd>
+          <dt>PageUp / PageDown / 空格</dt><dd>上一页 / 下一页</dd>
+          <dt>Home / End</dt><dd>第一张 / 最后一张图片</dd>
+          <dt>Enter</dt><dd>进入 / 退出全屏</dd>
+          <dt>Backspace / Esc</dt><dd>退出分享阅读</dd>
+          <dt>M</dt><dd>显示 / 隐藏阅读菜单</dd>
+          <dt>?</dt><dd>显示 / 关闭此帮助</dd>
+        </dl>
+        <p id="share-help-description">点击画面中央显示阅读菜单，两侧点击或左右滑动可翻页。双页时从右到左会交换图片左右位置。</p>
+      </section>
+      <div id="share-choice-popover" class="reader-choice-popover" role="listbox" tabindex="-1" hidden></div>
     </div>
-    <footer class="share-navigation">
-      <button id="share-previous" class="share-secondary" type="button" aria-label="上一页">上一页</button>
-      <form id="share-page-form" class="share-page-form"><label class="share-sr-only" for="share-page-number">页码</label><input id="share-page-number" type="number" min="1" step="1" inputmode="numeric" aria-label="页码"><span id="share-page-total"></span></form>
-      <button id="share-next" class="share-primary" type="button" aria-label="下一页">下一页</button>
-    </footer>
   </section>
 </body>
 </html>

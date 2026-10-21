@@ -11,7 +11,7 @@ import time
 
 from desktop.core import (LauncherConfig, LauncherError, SingleInstanceLock, check_update,
                           download_update, load_config, load_release_config, network_diagnostics,
-                          save_config, verify_installer)
+                          save_config, security_entry_recovery_warnings, verify_installer)
 from desktop.runtime import ServerController, resource_root
 
 REOPEN_NOTIFICATION = "com.gravelle.launcher.show-window"
@@ -34,6 +34,8 @@ _TEXT = {
     "pick": ("选择写真根文件夹", "Choose Photo Folders"),
     "network": ("访问设置", "Connection"),
     "port": ("服务端口", "Port"),
+    "share_port": ("分享端口", "Share Port"),
+    "share_port_hint": ("在网页网络设置中开启独立分享端口", "Enable the separate share port in the web network settings"),
     "lan": ("允许局域网设备访问", "Allow access from the local network"),
     "diagnose": ("检查连接", "Check Connection"),
     "ready": ("选择写真根文件夹，启动后在浏览器阅读。", "Choose your photo folders, then start reading in your browser."),
@@ -56,8 +58,14 @@ _TEXT = {
     "reset_hint": ("重置会停止此启动器管理的服务，并退出已有登录。", "Resetting stops the reader managed by this launcher and signs out existing sessions."),
     "resetting": ("正在停止服务并重置管理员密码…", "Stopping the reader and resetting the admin password…"),
     "reset_done": ("管理员密码已重置。请启动阅读器并使用新密码登录。", "Admin password reset. Start the reader and sign in with the new password."),
+    "reset_entry": ("关闭安全入口…", "Disable Security Entry…"),
+    "reset_entry_hint": ("此操作会停止当前启动器管理的阅读器，备份配置并关闭安全入口。如果服务由其他程序启动，请先自行停止它。", "This stops the reader managed by this launcher, backs up the settings and disables the security entry. Stop any reader started by another app yourself first."),
+    "disable_entry": ("关闭安全入口", "Disable Entry"),
+    "resetting_entry": ("正在停止阅读器并关闭安全入口…", "Stopping the reader and disabling the security entry…"),
+    "reset_entry_done": ("安全入口已关闭。请重新启动阅读器。", "Security entry disabled. Restart the reader."),
     "save_password": ("保存新密码", "Save Password"),
     "cancel": ("取消", "Cancel"),
+    "ok": ("确定", "OK"),
     "working": ("操作进行中，请稍候…", "An operation is in progress. Please wait…"),
     "quitting_after_operation": ("正在完成当前操作，随后退出…", "Finishing the current operation before quitting…"),
     "address": ("访问地址", "Reader Address"),
@@ -119,7 +127,7 @@ class LauncherState:
             config = LauncherConfig()
             self.configuration_error = str(error)
         self.roots = list(config.library_paths)
-        self.port, self.lan_enabled = str(config.port), config.lan_enabled
+        self.port, self.share_port, self.lan_enabled = str(config.port), str(config.share_port), config.lan_enabled
         self.release_config, self.release, self.downloaded = None, None, None
 
     def configuration(self) -> LauncherConfig:
@@ -128,9 +136,13 @@ class LauncherState:
             if not value.isascii() or not value.isdecimal():
                 raise ValueError("Invalid port")
             port = int(value)
+            share_value = str(self.share_port).strip()
+            if not share_value.isascii() or not share_value.isdecimal():
+                raise ValueError("Invalid share port")
+            share_port = int(share_value)
         except (ValueError, TypeError) as error:
             raise LauncherError("端口需要是 1 至 65535 之间的整数。") from error
-        return LauncherConfig(port=port, lan_enabled=self.lan_enabled, library_paths=self.roots).validate()
+        return LauncherConfig(port=port, share_port=share_port, lan_enabled=self.lan_enabled, library_paths=self.roots).validate()
 
     def add_roots(self, paths) -> None:
         proposed = normalise_roots([*self.roots, *paths])
@@ -281,18 +293,30 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
             self.port_height = self.port.frame().size.height
             self.port.setAccessibilityLabel_(tr("port"))
             self.network_card.addSubview_(self.port)
+            self.share_port_label = self.label(tr("share_port"), self.network_card)
+            self.share_port = A.NSTextField.alloc().initWithFrame_(A.NSMakeRect(0, 0, 125, 34))
+            self.share_port.setStringValue_(state.share_port)
+            self.share_port.setFont_(A.NSFont.systemFontOfSize_(14))
+            self.share_port.setBezelStyle_(A.NSTextFieldRoundedBezel)
+            self.share_port.cell().setUsesSingleLineMode_(True)
+            self.share_port.sizeToFit()
+            self.share_port_height = self.share_port.frame().size.height
+            self.share_port.setAccessibilityLabel_(tr("share_port"))
+            self.network_card.addSubview_(self.share_port)
+            self.share_port_hint = self.label(tr("share_port_hint"), self.network_card, size=12, color=muted)
             self.lan = A.NSButton.checkboxWithTitle_target_action_(tr("lan"), self, "changeLAN:")
             self.lan.setFont_(A.NSFont.systemFontOfSize_(13))
             self.lan.setState_(A.NSControlStateValueOn if state.lan_enabled else A.NSControlStateValueOff)
             self.network_card.addSubview_(self.lan)
             self.diagnose_button = self.button(tr("diagnose"), "diagnose:", self.network_card)
             self.address_label = self.label(tr("address"), self.network_card, size=12, color=muted)
-            self.address = self.label(LauncherConfig(port=int(state.port), library_paths=state.roots).local_url,
+            self.address = self.label(LauncherConfig(port=int(state.port), share_port=int(state.share_port), library_paths=state.roots).local_url,
                                       self.network_card, size=13, wrap=True)
             self.address.setSelectable_(True)
             self.log_button = self.button(tr("logs"), "showLogs:", self.document)
             self.data_button = self.button(tr("data"), "showData:", self.document)
             self.reset_button = self.button(tr("reset"), "resetPassword:", self.document)
+            self.reset_entry_button = self.button(tr("reset_entry"), "resetSecurityEntry:", self.document)
             self.status = self.label(state.configuration_error or tr("ready"), self.root, size=13, color=muted, wrap=True)
             self.start_button = self.button(tr("start"), "startReader:", self.root, primary=True)
             self.stop_button = self.button(tr("stop"), "stopReader:", self.root)
@@ -436,7 +460,7 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
             self.frame(self.scroll, 28, 107, width - 56, height - footer - 107)
             content_width = max(1, self.scroll.contentSize().width)
             roots_height = 76 + len(state.roots) * 46
-            document_height = roots_height + 16 + 236 + 66
+            document_height = roots_height + 16 + 310 + 112
             self.document.setFrameSize_(A.NSMakeSize(content_width, document_height))
             self.frame(self.roots_card, 0, 0, content_width, roots_height)
             self.frame(self.roots_heading, 20, 24, content_width - 204, 26)
@@ -448,17 +472,21 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
                 self.frame(choose, content_width - 176, y, 76, 38)
                 self.frame(remove, content_width - 96, y, 76, 38)
             y = roots_height + 16
-            self.frame(self.network_card, 0, y, content_width, 236)
+            self.frame(self.network_card, 0, y, content_width, 310)
             self.frame(self.network_heading, 20, 20, content_width - 40, 26)
             self.frame(self.port_label, 20, 65, 108, 24)
             self.frame(self.port, 128, 76 - self.port_height / 2, 116, self.port_height)
             self.frame(self.diagnose_button, content_width - 170, 56, 150, 40)
-            self.frame(self.lan, 20, 108, content_width - 40, 28)
-            self.frame(self.address_label, 20, 151, content_width - 40, 20)
-            self.frame(self.address, 20, 178, content_width - 40, 48)
-            self.frame(self.log_button, 0, y + 253, 115, 38)
-            self.frame(self.data_button, 123, y + 253, 115, 38)
-            self.frame(self.reset_button, content_width - 228, y + 253, 228, 38)
+            self.frame(self.share_port_label, 20, 107, 108, 24)
+            self.frame(self.share_port, 128, 118 - self.share_port_height / 2, 116, self.share_port_height)
+            self.frame(self.share_port_hint, 20, 145, content_width - 40, 20)
+            self.frame(self.lan, 20, 182, content_width - 40, 28)
+            self.frame(self.address_label, 20, 225, content_width - 40, 20)
+            self.frame(self.address, 20, 252, content_width - 40, 48)
+            self.frame(self.log_button, 0, y + 327, 115, 38)
+            self.frame(self.data_button, 123, y + 327, 115, 38)
+            self.frame(self.reset_button, content_width - 228, y + 327, 228, 38)
+            self.frame(self.reset_entry_button, content_width - 228, y + 373, 228, 38)
             self.frame(self.status, 30, height - 127, width - 60, 49)
             self.frame(self.start_button, 28, height - 67, width - 316, 43)
             self.frame(self.stop_button, width - 280, height - 67, 100, 43)
@@ -472,18 +500,20 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
             for field, choose, remove in zip(self.folder_controls[::3], self.folder_controls[1::3], self.folder_controls[2::3]):
                 choose.setEnabled_(editing)
                 remove.setEnabled_(editing and len(state.roots) > 1)
-            for control in (self.port, self.lan, self.add_button):
+            for control in (self.port, self.share_port, self.lan, self.add_button):
                 control.setEnabled_(editing)
             self.start_button.setEnabled_(editing)
             self.stop_button.setEnabled_(running and not busy)
             self.browser_button.setEnabled_(running and not busy)
             self.diagnose_button.setEnabled_(not busy)
             self.reset_button.setEnabled_(not busy)
+            self.reset_entry_button.setEnabled_(not busy)
             self.stop_menu.setEnabled_(running and not busy)
 
         @objc.python_method
         def read_configuration(self):
             state.port = str(self.port.stringValue())
+            state.share_port = str(self.share_port.stringValue())
             state.lan_enabled = bool(self.lan.state())
             return state.configuration()
 
@@ -557,13 +587,16 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
                 running = state.controller.running
                 self.set_busy(True)
                 self.status.setStringValue_(tr("diagnosing"))
-                state.worker("diagnose", lambda: network_diagnostics(config, running))
+                state.worker("diagnose", lambda: network_diagnostics(config, running, state.controller.data_path))
             except (LauncherError, OSError) as error:
                 self.status.setStringValue_(str(error))
 
         def openBrowser_(self, sender):
             if not self.quitting and state.controller.running:
-                A.NSWorkspace.sharedWorkspace().openURL_(F.NSURL.URLWithString_(state.controller.config.local_url))
+                try:
+                    A.NSWorkspace.sharedWorkspace().openURL_(F.NSURL.URLWithString_(state.controller.reader_url))
+                except (LauncherError, OSError, RuntimeError) as error:
+                    self.status.setStringValue_(str(error))
 
         def update_(self, sender):
             if self.updating or self.quitting:
@@ -639,6 +672,20 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
             first.setStringValue_("")
             second.setStringValue_("")
 
+        def resetSecurityEntry_(self, sender):
+            if self.busy or self.quitting:
+                return
+            alert = A.NSAlert.alloc().init()
+            alert.setMessageText_(tr("reset_entry"))
+            alert.setInformativeText_(tr("reset_entry_hint"))
+            alert.addButtonWithTitle_(tr("disable_entry"))
+            alert.addButtonWithTitle_(tr("cancel"))
+            if alert.runModal() != A.NSAlertFirstButtonReturn:
+                return
+            self.set_busy(True)
+            self.status.setStringValue_(tr("resetting_entry"))
+            state.worker("reset-entry", state.controller.reset_security_entry)
+
         def restore_(self, notification):
             self.window.deminiaturize_(None)
             self.window.makeKeyAndOrderFront_(None)
@@ -702,7 +749,7 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
                     # A start/reset worker may not have acquired its service
                     # lock when Quit arrives. Wait for its completion before
                     # stopping, so it cannot start an orphan after shutdown.
-                    if kind in ("start", "stop", "reset", "diagnose", "smoke-start"):
+                    if kind in ("start", "stop", "reset", "reset-entry", "diagnose", "smoke-start"):
                         self.begin_exit()
                     continue
                 if kind == "background-diagnose":
@@ -722,11 +769,22 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
                     self.openBrowser_(None)
                     self.window.orderOut_(None)
                     config = state.controller.config
-                    state.worker("background-diagnose", lambda: network_diagnostics(config, True))
+                    state.worker("background-diagnose", lambda: network_diagnostics(config, True, state.controller.data_path))
                 elif kind == "stop":
                     self.status.setStringValue_(tr("stopped"))
                 elif kind == "reset":
                     self.status.setStringValue_(tr("reset_done"))
+                elif kind == "reset-entry":
+                    self.status.setStringValue_(tr("reset_entry_done"))
+                    if state.controller.config is not None:
+                        self.address.setStringValue_(state.controller.config.local_url)
+                    warnings = security_entry_recovery_warnings(value, language)
+                    if warnings:
+                        alert = A.NSAlert.alloc().init()
+                        alert.setMessageText_(tr("reset_entry"))
+                        alert.setInformativeText_(tr("reset_entry_done") + "\n\n" + "\n".join(warnings))
+                        alert.addButtonWithTitle_(tr("ok"))
+                        alert.runModal()
                 elif kind == "diagnose":
                     self.status.setStringValue_(value["message"])
                     addresses = [tr("local") + ": " + value["local_url"]]

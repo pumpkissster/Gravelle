@@ -299,10 +299,26 @@ class SharingManager:
             connection.execute("DELETE FROM shares WHERE id=? AND creator_id=?", (identifier, creator))
         return {"deleted": True, "id": identifier}
 
-    @staticmethod
-    def _manifest(book, session):
+    def _manifest(self, connection, book, session):
+        # _select resolves the creator's personal preferences for ordinary
+        # reading. Guest defaults use only published work/library settings;
+        # never export the creator's account preferences or progress.
+        defaults = connection.execute("""SELECT
+            COALESCE(m.reading_mode_override,l.reading_mode) AS reading_mode,
+            COALESCE(m.reading_direction_override,l.reading_direction) AS reading_direction
+            FROM books b JOIN media_libraries l ON l.id=b.library_id
+            LEFT JOIN book_metadata m ON m.book_id=b.id WHERE b.id=?""", (book["id"],)).fetchone()
+        mode = defaults["reading_mode"] if defaults is not None else None
+        direction = defaults["reading_direction"] if defaults is not None else None
+        mode = mode if mode in ("single", "double", "webtoon") else "single"
+        direction = direction if direction in ("ltr", "rtl", "ttb") else "ltr"
+        if mode == "webtoon":
+            direction = "ttb"
+        elif mode == "double" and direction == "ttb":
+            direction = "ltr"
         return {"manifest": {"title": book["title_override"] or book["title"],
-                             "page_count": book["page_count"], "format": book["format"]},
+                             "page_count": book["page_count"], "format": book["format"],
+                             "reading_mode": mode, "reading_direction": direction},
                 "key": encode_key(bytes(session["encryption_key"])),
                 "session_expires_at": session["expires_at"],
                 "encryption": {"algorithm": "AES-GCM", "envelope": "GSH1", "aad_prefix": "gravelle-share-v1:"}}
@@ -320,7 +336,7 @@ class SharingManager:
             guest = self._session(connection, row, session, now)
             if guest is None:
                 raise self._error("请先输入访问密码。", 401)
-            return self._manifest(book, guest)
+            return self._manifest(connection, book, guest)
 
     def logout(self, token, session=""):
         """Revoke only this visitor's session, even after its share expires."""
@@ -365,7 +381,7 @@ class SharingManager:
             row, book, _ = self._share(connection, token, now)
             guest = self._session(connection, row, session, now)
             if guest is not None:
-                return {**self._manifest(book, guest), "session": session}
+                return {**self._manifest(connection, book, guest), "session": session}
             stored_hash = row["password_hash"]
         if not isinstance(password, str) or len(password) > 64:
             self._attempt(token, client_ip)
@@ -384,7 +400,7 @@ class SharingManager:
             row, book, _ = self._share(connection, token, now)
             guest = self._session(connection, row, session, now)
             if guest is not None:
-                return {**self._manifest(book, guest), "session": session}
+                return {**self._manifest(connection, book, guest), "session": session}
             connection.execute("DELETE FROM share_sessions WHERE expires_at<=?", (now,))
             if connection.execute("SELECT COUNT(*) FROM share_sessions WHERE share_id=?", (row["id"],)).fetchone()[0] >= MAX_LIVE_SESSIONS:
                 raise self._error("当前访问人数较多，请稍后再试。", 429)
@@ -394,7 +410,7 @@ class SharingManager:
                 (_digest(raw_session), row["id"], key, now, expiry))
             connection.execute("UPDATE shares SET visits=visits+1 WHERE id=?", (row["id"],))
             guest = self._session(connection, row, raw_session, now)
-            return {**self._manifest(book, guest), "session": raw_session}
+            return {**self._manifest(connection, book, guest), "session": raw_session}
 
     def image(self, token, session, index, width=None):
         self._open()

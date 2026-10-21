@@ -4,11 +4,13 @@
 
 安装程序提供简体中文和 English，按 Windows 系统界面语言自动选择。升级沿用原账户与资料目录。
 
+启动器可配置独立分享端口，并提供忘记安全入口时的本机关闭操作；网页开关、公网分享地址与恢复范围见[网络设置](network.md)。
+
 ## 安装与启动
 
-当前版本为 0.9.0，支持安装版和便携版；更新内容见 [0.9.0 更新说明](releases/0.9.0.md)。
+当前版本为 0.9.1，支持安装版和便携版；更新内容见 [0.9.1 更新说明](releases/0.9.1.md)。
 
-1. 从 [GitHub Releases](https://github.com/pumpkissster/Gravelle/releases/latest) 下载 `Gravelle-Setup-0.9.0-x64.exe` 并安装。默认仅安装给当前 Windows 用户。
+1. 从 [GitHub Releases](https://github.com/pumpkissster/Gravelle/releases/latest) 下载 `Gravelle-Setup-0.9.1-x64.exe` 并安装。默认仅安装给当前 Windows 用户。
 2. 打开“Gravelle”，选择写真根文件夹，使用“添加文件夹”继续添加其他目录。网页可从这些根文件夹内创建多个写真库。
 3. 设置端口（默认 8080）；需要手机、平板访问时，勾选“允许局域网访问”。
 4. 点击“检查目录与网络”，确认目录可读、端口未被占用。
@@ -16,7 +18,7 @@
 
 恢复任务栏窗口可查看访问地址、重新打开网页或停止服务。关闭启动器会提示并停止它创建的阅读服务；只关闭浏览器不会停止服务。程序不会结束其他软件占用端口的进程，端口冲突时可改用 8081 等端口。
 
-便携包 `Gravelle-Windows-0.9.0-x64.zip` 解压后运行 `Gravelle/Gravelle.exe`，整个文件夹需要一起保留，不要单独移动 exe。便携版同样使用当前用户的资料目录。
+便携包 `Gravelle-Windows-0.9.1-x64.zip` 解压后运行 `Gravelle/Gravelle.exe`，整个文件夹需要一起保留，不要单独移动 exe。便携版同样使用当前用户的资料目录。
 
 安装程序尚未做代码签名，Windows 可能提示“未知发布者”。请从项目 GitHub Releases 获取安装包，并核对发行页提供的 SHA-256 校验值。
 

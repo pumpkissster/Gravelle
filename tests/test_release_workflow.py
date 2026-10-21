@@ -45,9 +45,9 @@ class ReleaseWorkflowTests(unittest.TestCase):
         os.chdir(self.root)
         self.env = {
             'REQUESTED_VERSION': '', 'PUBLISH': 'false', 'EVENT_NAME': 'push',
-            'GITHUB_REF': 'refs/heads/dev/release-0.9.0', 'DEFAULT_BRANCH': 'main',
+            'GITHUB_REF': 'refs/heads/dev/release-0.9.1', 'DEFAULT_BRANCH': 'main',
             'SOURCE_TAG': '', 'GITHUB_OUTPUT': str(self.root / 'github-output'),
-            'RELEASE_VERSION': '0.9.0', 'MACOS_REQUIRED': 'true',
+            'RELEASE_VERSION': '0.9.1', 'MACOS_REQUIRED': 'true',
             'RUNNER_TEMP': str(self.root / 'runner'),
         }
 
@@ -55,7 +55,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         with patch.dict(os.environ, self.env | environment):
             exec(code, {'__name__': '__workflow_validation__'})
 
-    def version_source(self, version='0.9.0', notes=True):
+    def version_source(self, version='0.9.1', notes=True):
         (self.root / 'server.py').write_text('VERSION = ' + repr(version) + '\n', encoding='utf-8')
         if notes:
             directory = self.root / 'docs/releases'
@@ -72,7 +72,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
     def test_candidate_uses_source_version_and_does_not_require_manual_input(self):
         self.version_source()
         output = self.check_version()
-        self.assertEqual(output, {'version': '0.9.0', 'tag': 'v0.9.0',
+        self.assertEqual(output, {'version': '0.9.1', 'tag': 'v0.9.1',
                                   'source_sha': 'a' * 40, 'macos_required': 'true'})
 
     def test_manual_version_and_exact_backfill_tag_must_match_source(self):
@@ -92,12 +92,12 @@ class ReleaseWorkflowTests(unittest.TestCase):
     def test_publish_requires_manual_dispatch_on_default_branch(self):
         self.version_source()
         for values in ({'PUBLISH': 'true'},
-                       {'EVENT_NAME': 'workflow_dispatch', 'REQUESTED_VERSION': '0.9.0', 'PUBLISH': 'true'}):
+                       {'EVENT_NAME': 'workflow_dispatch', 'REQUESTED_VERSION': '0.9.1', 'PUBLISH': 'true'}):
             with self.subTest(values=values), self.assertRaises(AssertionError):
                 self.check_version(**values)
-        output = self.check_version(EVENT_NAME='workflow_dispatch', REQUESTED_VERSION='0.9.0',
+        output = self.check_version(EVENT_NAME='workflow_dispatch', REQUESTED_VERSION='0.9.1',
                                     GITHUB_REF='refs/heads/main', PUBLISH='true')
-        self.assertEqual(output['version'], '0.9.0')
+        self.assertEqual(output['version'], '0.9.1')
 
     def test_missing_description_or_tracked_internal_plan_blocks_release(self):
         self.version_source(notes=False)
@@ -105,7 +105,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
             self.check_version()
         self.version_source()
         with self.assertRaisesRegex(AssertionError, 'Internal development plans'):
-            self.check_version(EVENT_NAME='workflow_dispatch', REQUESTED_VERSION='0.9.0',
+            self.check_version(EVENT_NAME='workflow_dispatch', REQUESTED_VERSION='0.9.1',
                                GITHUB_REF='refs/heads/main', PUBLISH='true', tracked_plan='docs/next-version.md\n')
 
     def test_other_push_branches_are_rejected_and_candidate_cannot_publish(self):
@@ -128,7 +128,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
             source.mkdir(parents=True)
             lines = []
             for extension in ('dmg', 'zip'):
-                name = f'Gravelle-macOS-0.9.0-{arch}.{extension}'
+                name = f'Gravelle-macOS-0.9.1-{arch}.{extension}'
                 payload = ('explicit non-native test fixture: ' + name).encode()
                 (source / name).write_bytes(payload)
                 lines.append(hashlib.sha256(payload).hexdigest() + '  ' + name)
@@ -139,13 +139,13 @@ class ReleaseWorkflowTests(unittest.TestCase):
     def test_mac_selection_copies_only_four_verified_architecture_packages(self):
         destination = self.mac_artifacts()
         self.execute(MAC_SELECTION)
-        expected = {f'Gravelle-macOS-0.9.0-{arch}.{extension}'
+        expected = {f'Gravelle-macOS-0.9.1-{arch}.{extension}'
                     for arch in ('arm64', 'x64') for extension in ('dmg', 'zip')}
         self.assertEqual({path.name for path in destination.iterdir()}, expected)
 
     def test_mac_selection_rejects_tampered_packages(self):
         self.mac_artifacts()
-        (self.root / 'runner/macos-arm64/Gravelle-macOS-0.9.0-arm64.dmg').write_bytes(b'tampered fixture')
+        (self.root / 'runner/macos-arm64/Gravelle-macOS-0.9.1-arm64.dmg').write_bytes(b'tampered fixture')
         with self.assertRaisesRegex(AssertionError, 'checksum mismatch'):
             self.execute(MAC_SELECTION)
 
@@ -161,10 +161,10 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.version_source()
         destination = self.root / 'dist/release'
         destination.mkdir(parents=True)
-        names = {'Gravelle-Setup-0.9.0-x64.exe', 'Gravelle-Windows-0.9.0-x64.zip',
-                 'Gravelle-Docker-0.9.0.zip', 'Gravelle-Source-0.9.0.zip'}
+        names = {'Gravelle-Setup-0.9.1-x64.exe', 'Gravelle-Windows-0.9.1-x64.zip',
+                 'Gravelle-Docker-0.9.1.zip', 'Gravelle-Source-0.9.1.zip'}
         if macos:
-            names.update(f'Gravelle-macOS-0.9.0-{arch}.{extension}'
+            names.update(f'Gravelle-macOS-0.9.1-{arch}.{extension}'
                          for arch in ('arm64', 'x64') for extension in ('dmg', 'zip'))
         lines = []
         for name in sorted(names):
@@ -172,7 +172,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
             (destination / name).write_bytes(payload)
             lines.append(hashlib.sha256(payload).hexdigest() + '  ' + name)
         (destination / 'SHA256SUMS.txt').write_text('\n'.join(lines) + '\n', encoding='ascii')
-        (self.root / 'dist/release-notes.md').write_bytes((self.root / 'docs/releases/0.9.0.md').read_bytes())
+        (self.root / 'dist/release-notes.md').write_bytes((self.root / 'docs/releases/0.9.1.md').read_bytes())
         return destination
 
     def test_combined_checksum_validation_includes_mac_disk_images(self):

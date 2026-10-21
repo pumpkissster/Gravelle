@@ -3,6 +3,7 @@
 !server.py
 !accounts.py
 !password_reset.py
+!network_settings.py
 !transcoding.py
 !image_search.py
 !image_search_features.py

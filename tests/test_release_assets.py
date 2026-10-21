@@ -25,7 +25,7 @@ class ReleaseAssetTests(unittest.TestCase):
             source_names = [
                 'server.py', 'README.md', 'compose.yaml',
                 'compose.optimization.yaml', '.env.example',
-                'docs/docker-release.md', 'packaging/source_manifest.json',
+                'docs/docker-release.md', 'docs/network.md', 'packaging/source_manifest.json',
             ]
             contents = {
                 'server.py': b'VERSION = "0.9.0"\n',
@@ -34,6 +34,7 @@ class ReleaseAssetTests(unittest.TestCase):
                 'compose.optimization.yaml': b'volumes: {}\n',
                 '.env.example': b'GRAVELLE_IMAGE=example/gravelle:0.9.0\n',
                 'docs/docker-release.md': b'Generated deployment instructions.\n',
+                'docs/network.md': b'Generated offline network recovery instructions.\n',
                 'packaging/source_manifest.json': json.dumps(source_names).encode(),
             }
             for name, content in contents.items():
@@ -74,7 +75,7 @@ class ReleaseAssetTests(unittest.TestCase):
                 f'Gravelle-Docker-{version}.zip': {
                     name: contents[name] for name in (
                         'compose.yaml', 'compose.optimization.yaml',
-                        '.env.example', 'docs/docker-release.md')},
+                        '.env.example', 'docs/docker-release.md', 'docs/network.md')},
             }
             for name, expected_members in archive_sources.items():
                 with zipfile.ZipFile(output / name) as archive:

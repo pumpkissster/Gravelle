@@ -14,7 +14,7 @@ import time
 from urllib.error import URLError
 from urllib.request import ProxyHandler, build_opener
 
-from desktop.core import LauncherConfig, LauncherError, check_port
+from desktop.core import LauncherConfig, LauncherError, check_port, reader_url, security_entry_recovery_warnings
 
 
 def _startup_trace(stage: str, *, stream=None, **details) -> None:
@@ -61,7 +61,7 @@ def serve(config: LauncherConfig, data_path: Path, instance: str = "") -> int:
         library = Library(roots[0], data_path, "", 300, roots=roots)
         _startup_trace("service.library_init.end")
         _startup_trace("service.bind.begin")
-        server = ReaderServer((config.host, config.port), library)
+        server = ReaderServer((config.host, config.port), library, share_port=config.share_port, runtime="desktop")
         _startup_trace("service.bind.end")
         # With PyInstaller --onedir the static directory is in _internal.
         server.static = resource_root() / "static"
@@ -105,6 +105,12 @@ class ServerController:
     def running(self) -> bool:
         return self.process is not None and self.process.poll() is None
 
+    @property
+    def reader_url(self) -> str:
+        if self.config is None:
+            raise LauncherError("阅读器尚未启动。")
+        return reader_url(self.config, self.data_path)
+
     def command(self, config: LauncherConfig, instance: str) -> list[str]:
         if self.command_prefix is not None:
             prefix = list(self.command_prefix)
@@ -123,7 +129,8 @@ class ServerController:
             prefix = [sys.executable, str(Path(__file__).resolve().parent / entry)]
         libraries = [argument for path in config.library_paths for argument in ("--library", path)]
         return [*prefix, "--serve", *libraries, "--data", str(self.data_path),
-                "--host", config.host, "--port", str(config.port), "--instance", instance]
+                "--host", config.host, "--port", str(config.port),
+                "--share-port", str(config.share_port), "--instance", instance]
 
     def start(self, config: LauncherConfig, timeout: float = 20) -> str:
         with self.lock:
@@ -206,7 +213,7 @@ class ServerController:
                             health = json.loads(response.read(16384))
                             if health.get("status") == "ok":
                                 _startup_trace("parent.health_ok", stream=self.log_stream)
-                                return config.local_url
+                                return self.reader_url
                     except (OSError, ValueError, URLError):
                         time.sleep(0.1)
                 raise LauncherError("服务健康检查失败，请查看服务日志。")
@@ -262,3 +269,29 @@ class ServerController:
                 return reset_admin_password(self.data_path, password, confirmation)
             except PasswordResetError as error:
                 raise LauncherError(str(error)) from error
+
+    def reset_security_entry(self) -> dict:
+        """Offline recovery stops only this controller's child before taking the data lock."""
+        from network_settings import reset_security_entry
+        with self.lock:
+            self.stop()
+            try:
+                return reset_security_entry(self.data_path)
+            except (OSError, ValueError, RuntimeError) as error:
+                raise LauncherError(str(error)) from error
+
+
+def reset_security_entry_cli(data_path: Path) -> int:
+    """Explicit local recovery; no HTTP route and no process lookup by port/name."""
+    from network_settings import reset_security_entry
+    try:
+        result = reset_security_entry(data_path)
+        payload = {"ok": True, "message": "安全入口已关闭，请重新启动阅读器。 / Security entry disabled. Restart the reader."}
+        warnings = security_entry_recovery_warnings(result)
+        if warnings:
+            payload["warnings"] = warnings
+        print(json.dumps(payload, ensure_ascii=False))
+        return 0
+    except (OSError, ValueError, RuntimeError) as error:
+        print(json.dumps({"ok": False, "error": str(error)}, ensure_ascii=False))
+        return 1

@@ -63,6 +63,34 @@ class MultipleRootWindowTests(unittest.TestCase):
         self.assertEqual(len(self.window.library_values), 1)
         self.assertIn("已经在列表", self.window.status.get())
 
+    def test_share_port_uses_same_entry_style_and_is_saved_disabled_while_running(self):
+        self.window.share_port.set("19081")
+        save_config(self.config_path, self.window._configuration())
+        self.assertEqual(load_config(self.config_path).share_port, 19081)
+        self.assertEqual(self.window.share_port_entry.winfo_class(), self.window.port_entry.winfo_class())
+        with patch.object(ServerController, "running", new_callable=PropertyMock, return_value=True):
+            self.window._set_busy(False)
+            self.assertTrue(self.window.share_port_entry.instate(["disabled"]))
+        self.window._set_busy(False)
+        self.assertFalse(self.window.share_port_entry.instate(["disabled"]))
+
+    def test_security_entry_recovery_requires_confirmation_then_uses_owned_controller(self):
+        with patch("tkinter.messagebox.askokcancel", return_value=False), patch.object(self.window, "_worker") as worker:
+            self.window.reset_security_entry()
+            worker.assert_not_called()
+        with patch("tkinter.messagebox.askokcancel", return_value=True), patch.object(self.window, "_worker") as worker:
+            self.window.reset_security_entry()
+            worker.assert_called_once_with("reset-entry", self.window.controller.reset_security_entry)
+            self.assertTrue(self.window.reset_entry_button.instate(["disabled"]))
+
+    def test_security_entry_recovery_completion_displays_optional_warnings(self):
+        warning = "已保持独立分享端口，请核对网络设置。"
+        self.window.events.put(("reset-entry", True, {"disabled": True, "warnings": [warning]}))
+        with patch("tkinter.messagebox.showinfo") as dialog, patch.object(self.root, "after"):
+            self.window._poll()
+        self.assertIn(warning, dialog.call_args.args[1])
+        self.assertIn("请重新启动", self.window.status.get())
+
     def test_all_root_controls_are_disabled_during_start_and_running(self):
         with patch("tkinter.filedialog.askdirectory", return_value=str(self.second)):
             self.window.add_folder()

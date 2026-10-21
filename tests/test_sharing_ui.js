@@ -9,7 +9,7 @@ const access = { manifest: { title: '<Photo title>', format: 'folder', page_coun
 const response = (value, status = 200) => ({ ok: status >= 200 && status < 300, status, async json() { return value; }, async arrayBuffer() { return Uint8Array.of(1, 2, 3).buffer; } });
 const tick = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
 class Element {
-  constructor(name = 'div') { this.tagName = name.toUpperCase(); this.children = []; this.dataset = {}; this.attributes = {}; this.handlers = new Map(); this.hidden = false; this.disabled = false; this.value = ''; this.textContent = ''; this.className = ''; this.classList = { add: name => { this.className += ' ' + name; } }; }
+  constructor(name = 'div') { this.tagName = name.toUpperCase(); this.children = []; this.dataset = {}; this.attributes = {}; this.handlers = new Map(); this.hidden = false; this.disabled = false; this.value = ''; this.textContent = ''; this.className = ''; this.classList = { add: name => { this.className += ' ' + name; } }; this.style = { values: {}, setProperty(name, value) { this.values[name] = value; } }; }
   append(...nodes) { nodes.forEach(node => { node.parentElement = this; this.children.push(node); }); }
   replaceChildren(...nodes) { this.children = []; this.append(...nodes); }
   addEventListener(type, callback) { this.handlers.set(type, callback); }
@@ -18,7 +18,9 @@ class Element {
   removeAttribute(name) { delete this.attributes[name]; if (name === 'src') this.src = ''; }
   getAttribute(name) { return this.attributes[name] ?? null; }
   reportValidity() { return true; }
-  focus() { this.focused = true; }
+  focus() { this.focused = true; if (this.ownerDocument) this.ownerDocument.activeElement = this; }
+  getBoundingClientRect() { return { top: 0, left: 0, right: 1200, bottom: 800, width: this.clientWidth || 1200, height: this.clientHeight || 800 }; }
+  scrollBy({ top }) { this.scrollTop = Math.max(0, (this.scrollTop || 0) + top); }
   select() { this.selected = true; }
   scrollIntoView() {}
   showModal() { this.open = true; }
@@ -26,13 +28,13 @@ class Element {
 }
 function nodesIn(node) { return [node, ...node.children.flatMap(nodesIn)]; }
 function fixture({ locked = false, responder, decode, storage = new Map() } = {}) {
-  const nodes = new Map(); const body = new Element('body'); const doc = { body, hidden: false, title: '', activeElement: null, handlers: new Map(), createElement: name => new Element(name), createElementNS: (namespace, name) => new Element(name), getElementById(id) { if (!nodes.has(id)) nodes.set(id, new Element(id.includes('form') ? 'form' : id.includes('password') || id.includes('number') ? 'input' : 'div')); return nodes.get(id); }, addEventListener(type, callback) { this.handlers.set(type, callback); } };
-  const requests = [], decryption = [], created = [], revoked = [], written = [], timers = new Map(); let timerIndex = 0;
-  const win = { location: { pathname: '/share/' + token, href: 'http://192.168.1.2:7878/share/' + token }, navigator: {}, AbortController, Blob, URL: { createObjectURL(blob) { const url = 'blob:private-' + (created.length + 1); created.push({ url, blob }); return url; }, revokeObjectURL(url) { revoked.push(url); } }, sessionStorage: { getItem(name) { return storage.get(name) ?? null; }, setItem(name, value) { storage.set(name, value); written.push({ name, value }); }, removeItem(name) { storage.delete(name); } }, setInterval(fn) { timers.set(++timerIndex, fn); return timerIndex; }, clearInterval(id) { timers.delete(id); }, setTimeout(fn) { timers.set(++timerIndex, fn); return timerIndex; }, clearTimeout(id) { timers.delete(id); }, addEventListener(type, callback) { this[type] = callback; } };
+  const nodes = new Map(); const body = new Element('body'); const doc = { body, hidden: false, title: '', activeElement: null, handlers: new Map(), createElement(name) { const node = new Element(name); node.ownerDocument = doc; return node; }, createElementNS: (namespace, name) => new Element(name), getElementById(id) { if (!nodes.has(id)) { const node = this.createElement(id.includes('form') ? 'form' : id.includes('password') || id.includes('number') ? 'input' : 'div'); node.id = id; nodes.set(id, node); } return nodes.get(id); }, addEventListener(type, callback) { this.handlers.set(type, callback); } };
+  const requests = [], decryption = [], created = [], revoked = [], written = [], timers = new Map(), timerDelays = new Map(); let timerIndex = 0;
+  const win = { innerWidth: 1200, innerHeight: 800, location: { pathname: '/share/' + token, href: 'http://192.168.1.2:7878/share/' + token }, navigator: {}, AbortController, Blob, URL: { createObjectURL(blob) { const url = 'blob:private-' + (created.length + 1); created.push({ url, blob }); return url; }, revokeObjectURL(url) { revoked.push(url); } }, sessionStorage: { getItem(name) { return storage.get(name) ?? null; }, setItem(name, value) { storage.set(name, value); written.push({ name, value }); }, removeItem(name) { storage.delete(name); } }, setInterval(fn) { timers.set(++timerIndex, fn); return timerIndex; }, clearInterval(id) { timers.delete(id); }, setTimeout(fn, delay) { timers.set(++timerIndex, fn); timerDelays.set(timerIndex, delay); return timerIndex; }, clearTimeout(id) { timers.delete(id); timerDelays.delete(id); }, addEventListener(type, callback) { this[type] = callback; } };
   const fetch = async (url, options) => { requests.push({ url, options }); if (responder) { const result = await responder(url, options); if (result) return result; } if (url.endsWith('/manifest')) return locked ? response({}, 401) : response(access); if (url.endsWith('/unlock')) return response(access); if (url.endsWith('/logout')) return response({ logged_out: true }); if (/\/pages\/\d+$/.test(url)) return response({}); return response({ status: 'active', requires_password: true }); };
   const crypto = { async decrypt(packet, secret, aad) { decryption.push({ packet, secret, aad }); return decode ? decode(packet, secret, aad) : { data: Uint8Array.of(255, 216, 255), mime: 'image/jpeg' }; } };
   const reader = Reader.create({ document: doc, window: win, fetch, crypto });
-  return { reader, doc, win, nodes, requests, decryption, created, revoked, written, timers, get: id => doc.getElementById(id) };
+  return { reader, doc, win, nodes, requests, decryption, created, revoked, written, timers, timerDelays, get: id => doc.getElementById(id) };
 }
 
 test('share creation allows only 1, 3 or 7 days and always requires an access password at the server', () => {
@@ -391,10 +393,174 @@ test('password clipboard failure selects the visible field but stale failures do
   }
 });
 
+test('share creation and management copy use the configured public origin without the security entry code', async () => {
+  const f = fixture(), copied = []; let networkReads = 0;
+  f.win.location.href = 'http://192.0.2.10:7878/private-entry#/home'; f.win.navigator.clipboard = { async writeText(value) { copied.push(value); } };
+  const share = { id: '6'.repeat(32), token, title: 'Work', status: 'active' };
+  const ui = Management.create({ document: f.doc, window: f.win, isAdmin: () => true, api: async () => ({ shares: [share] }), post: async () => ({ share, password: 'visible-password' }), getNetworkSettings: async () => { networkReads++; return { public_share_url: 'https://photos.example:8443', share_port_enabled: true, share_port: 8081 }; } });
+  try {
+    ui.showCreate({ id: 'work', title: 'Work' }); const form = nodesIn(f.doc.body).find(node => node.id === 'sharing-create-form'); await form.emit('submit');
+    const link = nodesIn(f.doc.body).find(node => node.getAttribute('aria-label') === '分享链接'); assert.equal(link.value, 'https://photos.example:8443/share/' + token); assert.ok(!link.value.includes('private-entry'));
+    ui.showManagement(); await tick(); await nodesIn(f.doc.body).find(node => node.textContent === '复制链接').emit('click'); assert.deepEqual(copied, ['https://photos.example:8443/share/' + token]); assert.equal(networkReads, 2);
+  } finally { ui.reset(); }
+});
+
+test('failed or stale network configuration cannot create a share or copy a private link', async () => {
+  for (const reason of ['failure', 'reset']) {
+    const f = fixture(); let posts = 0, admin = true, finish;
+    const ui = Management.create({ document: f.doc, window: f.win, isAdmin: () => admin, api: async () => ({ shares: [] }), post: async () => { posts++; return {}; }, getNetworkSettings: () => reason === 'failure' ? Promise.reject(new Error('无法读取网络设置')) : new Promise(resolve => { finish = resolve; }) });
+    try {
+      ui.showCreate({ id: 'work' }); const submitting = nodesIn(f.doc.body).find(node => node.id === 'sharing-create-form').emit('submit');
+      if (reason === 'reset') { admin = false; ui.reset(); finish({ public_share_url: 'https://photos.example' }); }
+      await submitting; assert.equal(posts, 0);
+      if (reason === 'failure') assert.ok(nodesIn(f.doc.body).some(node => node.textContent === '无法读取网络设置'));
+    } finally { ui.reset(); }
+  }
+});
+
 test('anonymous document has no account app or external scripts, and never stores credentials', () => {
   const html = fs.readFileSync(require.resolve('../static/share.html'), 'utf8'); const js = fs.readFileSync(require.resolve('../static/share-reader.js'), 'utf8'); const css = fs.readFileSync(require.resolve('../static/sharing-ui.css'), 'utf8');
   assert.ok(!html.includes('/app.js')); assert.ok(!html.includes('https://')); assert.match(html, /no-referrer/); assert.ok(html.indexOf('/vendor/noble-gcm.js') < html.indexOf('/share-crypto.js'));
   assert.ok(!html.includes('class="share-eyebrow"')); assert.ok(!js.includes('无需账号，输入分享者提供的密码即可阅读。'));
   assert.ok(!js.includes('localStorage')); assert.match(js, /sessionStorage\.setItem\(storageKey, String\(page\)\)/);
   assert.match(css, /sharing-body\{[^}]*overflow:auto/); assert.match(css, /sharing-footer\{flex:none/); assert.match(css, /sharing-header\{[^}]*flex:none/);
+});
+
+async function choose(f, name, value) {
+  f.get('share-' + name + '-trigger').emit('click');
+  const option = f.get('share-choice-popover').children.find(node => node.dataset.value === value);
+  assert.ok(option, name + '=' + value + ' is available'); option.emit('click'); await tick();
+  f.doc.activeElement = f.get('share-viewport');
+}
+function loaded(f, index, width = 600, height = 900) {
+  const image = index === undefined ? f.get('share-image-host').children[0] : nodesIn(f.get('share-scroll-view')).find(node => node.tagName === 'IMG' && node.alt.endsWith('第 ' + (index + 1) + ' 页'));
+  assert.ok(image); image.naturalWidth = width; image.naturalHeight = height; image.onload(); return image;
+}
+function keyboard(f, key, extra = {}) { return f.doc.handlers.get('keydown')({ key, target: f.get('share-viewport'), preventDefault() {}, ...extra }); }
+
+test('guest defaults and saved choices are sanitized independently of account preferences', () => {
+  assert.deepEqual(Reader.readingPrefs({ mode: 'bad', direction: 'bad', fit: 'bad', theme: 'bad', password: 'not copied' }, { reading_mode: 'double', reading_direction: 'rtl' }), { mode: 'double', direction: 'rtl', fit: 'height', theme: 'dark', coverAlone: true, offset: false });
+  const prefs = Reader.readingPrefs({ mode: 'webtoon', direction: 'ttb', fit: 'width', theme: 'light', coverAlone: false, offset: true });
+  assert.equal(prefs.mode, 'webtoon'); assert.equal(prefs.coverAlone, false); assert.equal(prefs.offset, true);
+});
+
+test('double spreads preserve the cover and reverse the physical pair for RTL with logical navigation', async () => {
+  const f = fixture({ responder(url) { if (url.endsWith('/manifest')) return response({ ...access, manifest: { ...access.manifest, reading_mode: 'double', reading_direction: 'rtl', page_count: 6 } }); } });
+  await f.reader.start(); assert.equal(f.get('share-image-host').children.length, 1); loaded(f);
+  await f.get('share-next').emit('click'); await tick();
+  assert.deepEqual(f.get('share-image-host').children.map(node => node.alt), ['<Photo title> · 第 3 页', '<Photo title> · 第 2 页']);
+  assert.equal(f.get('share-page-number').value, 2); assert.equal(f.get('share-page-slider').dir, 'rtl');
+  await f.get('share-tap-previous').emit('click'); await tick(); assert.equal(f.get('share-page-number').value, 4);
+  await f.get('share-tap-next').emit('click'); await tick(); assert.equal(f.get('share-page-number').value, 2);
+  assert.ok(f.requests.every(item => !item.url.includes('/api/books') && !item.url.includes('/api/session'))); f.reader.reset();
+});
+
+test('discovered wide pages stand alone and rapid resizes keep the requested double preference', async () => {
+  const storage = new Map([['gravelle-share-prefs:' + token, JSON.stringify({ mode: 'double' })]]);
+  const f = fixture({ storage }); await f.reader.start(); await f.get('share-next').emit('click'); await tick();
+  assert.equal(f.get('share-image-host').children.length, 2); loaded(f, undefined, 1400, 900); await tick();
+  assert.equal(f.get('share-image-host').children.length, 1);
+  f.win.innerWidth = 500; f.win.resize(); f.win.resize(); for (const [id, fn] of [...f.timers]) { f.timers.delete(id); fn(); } await tick();
+  assert.equal(f.get('share-reader').dataset.mode, 'single');
+  assert.equal(f.get('share-mode-value').textContent, '双页');
+  assert.equal(f.get('share-image-host').children.length, 1); f.reader.reset();
+});
+
+test('single vertical paging pans tall pages before turning and a wheel gesture never turns twice', async () => {
+  const f = fixture(); await f.reader.start(); await choose(f, 'direction', 'ttb');
+  const viewport = f.get('share-viewport'); viewport.clientHeight = 500; viewport.scrollHeight = 1200; viewport.scrollTop = 0;
+  keyboard(f, 'ArrowDown'); assert.equal(viewport.scrollTop, 400); assert.equal(f.get('share-page-number').value, 1);
+  viewport.scrollTop = 700; keyboard(f, 'ArrowDown'); await tick(); assert.equal(f.get('share-page-number').value, 2);
+  viewport.scrollHeight = 500; viewport.scrollTop = 0;
+  viewport.emit('wheel', { deltaY: 90, deltaX: 0, deltaMode: 0 }); viewport.emit('wheel', { deltaY: 90, deltaX: 0, deltaMode: 0 }); await tick();
+  assert.equal(f.get('share-page-number').value, 3); f.reader.reset();
+});
+
+test('double mode excludes vertical even on narrow screens without erasing the single-page choice', async () => {
+  const f = fixture(); f.win.innerWidth = 400; await f.reader.start(); await choose(f, 'direction', 'ttb'); await choose(f, 'mode', 'double');
+  assert.equal(f.get('share-reader').dataset.direction, 'ltr'); assert.equal(f.get('share-reader').dataset.paging, 'horizontal');
+  f.get('share-direction-trigger').emit('click'); assert.ok(!f.get('share-choice-popover').children.some(node => node.dataset.value === 'ttb'));
+  f.get('share-choice-popover').emit('keydown', { key: 'Escape' }); await choose(f, 'mode', 'single');
+  assert.equal(f.get('share-reader').dataset.direction, 'ttb'); f.reader.reset();
+});
+
+test('continuous reading uses a bounded virtual window, decoded media budget and exact per-page encryption binding', async () => {
+  const f = fixture({ responder(url) { if (url.endsWith('/manifest')) return response({ ...access, manifest: { ...access.manifest, page_count: 10000, reading_mode: 'webtoon' } }); } });
+  await f.reader.start(); await tick(); assert.equal(f.get('share-paged-view').hidden, true);
+  assert.ok(f.get('share-scroll-view').children.length <= 8); loaded(f, 0); await tick();
+  assert.ok(f.created.length <= 3); assert.equal(f.get('share-direction-trigger').disabled, true);
+  const viewport = f.get('share-viewport'); viewport.emit('wheel', { deltaY: 100, deltaX: 0 }); viewport.scrollTop = 100000; viewport.emit('scroll');
+  for (const [id, fn] of [...f.timers]) { f.timers.delete(id); fn(); } await tick();
+  assert.ok(Number(f.get('share-page-number').value) > 10); assert.ok(f.get('share-scroll-view').children.length <= 8);
+  assert.ok(f.created.length - f.revoked.length <= 3);
+  assert.ok(f.decryption.every(item => /^gravelle-share-v1:S{43}:\d+$/.test(item.aad))); f.reader.reset();
+  assert.equal(f.created.length, f.revoked.length); assert.equal(f.timers.size, 0);
+});
+
+test('failed neighbour loading is not retried in a loop and does not cover a readable scroll page', async () => {
+  let failures = 0; const f = fixture({ responder(url) {
+    if (url.endsWith('/manifest')) return response({ ...access, manifest: { ...access.manifest, reading_mode: 'webtoon' } });
+    if (url.endsWith('/pages/1')) { failures++; return response({ error: 'network broken' }, 500); }
+  } });
+  await f.reader.start(); await tick(); loaded(f, 0); await tick(); await tick();
+  assert.equal(failures, 1); assert.equal(f.get('share-page-message').hidden, true);
+  assert.ok(nodesIn(f.get('share-scroll-view')).some(node => node.textContent === '重试第 2 页')); f.reader.reset();
+});
+
+test('huge decoded scroll images keep only the visible page and do not prefetch more originals', async () => {
+  const f = fixture({ responder(url) { if (url.endsWith('/manifest')) return response({ ...access, manifest: { ...access.manifest, reading_mode: 'webtoon' } }); } });
+  await f.reader.start(); await tick(); loaded(f, 0, 9903, 6959); await tick(); assert.equal(f.created.length, 1); f.reader.reset();
+});
+
+test('closing a scroll share aborts queued images and late decoding cannot refill the reader', async () => {
+  let closed = false, finish; const pending = new Promise(resolve => { finish = resolve; });
+  const f = fixture({ responder(url) { if (url.endsWith('/manifest')) return closed ? response({ status: 'closed' }, 410) : response({ ...access, manifest: { ...access.manifest, reading_mode: 'webtoon' } }); }, decode() { return pending; } });
+  await f.reader.start(); await tick(); closed = true; await f.reader.checkSession(); finish({ data: Uint8Array.of(1), mime: 'image/png' }); await tick();
+  assert.equal(f.get('share-reader').hidden, true); assert.equal(f.created.length, 0); assert.equal(f.get('share-scroll-view').children.length, 0); assert.equal(f.timers.size, 0);
+});
+
+test('guest controls support keyboard choices, slider, help and menu toggling without reloading images for theme', async () => {
+  const f = fixture(); await f.reader.start(); loaded(f); const requests = f.requests.length;
+  f.get('share-theme').emit('click'); assert.equal(f.get('share-reader').dataset.theme, 'light'); assert.equal(f.requests.length, requests);
+  f.get('share-mode-trigger').emit('keydown', { key: 'End' }); assert.equal(f.doc.activeElement.dataset.value, 'webtoon');
+  f.get('share-choice-popover').emit('keydown', { key: 'Escape' }); assert.equal(f.get('share-choice-popover').hidden, true);
+  f.doc.activeElement = f.get('share-viewport'); keyboard(f, 'm'); assert.equal(f.get('share-reader').dataset.controls, 'hidden'); keyboard(f, 'm'); assert.equal(f.get('share-reader').dataset.controls, 'visible');
+  keyboard(f, '?'); assert.equal(f.get('share-help-panel').hidden, false); keyboard(f, 'Escape'); assert.equal(f.get('share-help-panel').hidden, true);
+  f.get('share-page-slider').value = 2; f.get('share-page-slider').emit('change'); await tick(); assert.equal(f.get('share-page-number').value, 3);
+  assert.ok(f.written.filter(item => item.name.startsWith('gravelle-share-prefs:')).every(item => !/password|key|session/.test(item.value))); f.reader.reset();
+});
+
+test('known session expiry clears decrypted media even while a heartbeat is stuck', async () => {
+  let calls = 0, finish; const pending = new Promise(resolve => { finish = resolve; });
+  const f = fixture({ responder(url) { if (url.endsWith('/manifest')) { calls++; return calls === 1 ? response({ ...access, session_expires_at: Date.now() + 10000 }) : pending; } } });
+  await f.reader.start(); loaded(f); const validating = f.reader.checkSession(); await tick();
+  const deadline = [...f.timerDelays].find(([, delay]) => delay > 9000 && delay < 11000); assert.ok(deadline);
+  f.timers.get(deadline[0])(); assert.equal(f.get('share-reader').hidden, true); assert.equal(f.get('share-unlock-form').hidden, false);
+  assert.equal(f.created.length, f.revoked.length); finish(response(access)); await validating;
+  assert.equal(f.get('share-image-host').children.length, 0); assert.equal(f.get('share-reader').hidden, true); f.reader.reset();
+});
+
+test('continuous jump creates its virtual geometry before assigning the browser scroll position', async () => {
+  const f = fixture({ responder(url) { if (url.endsWith('/manifest')) return response({ ...access, manifest: { ...access.manifest, page_count: 100, reading_mode: 'webtoon' } }); } });
+  const viewport = f.get('share-viewport'); let top = 0;
+  Object.defineProperty(viewport, 'scrollTop', { get() { return top; }, set(value) { const height = f.get('share-scroll-view').children.reduce((sum, node) => sum + Number.parseFloat(node.style.values.height || '0'), 0); top = Math.min(Math.max(0, value), Math.max(0, height - 800)); } });
+  await f.reader.start(); await tick(); f.get('share-page-number').value = 80; f.get('share-page-form').emit('submit'); await tick();
+  assert.equal(f.get('share-page-number').value, 80); assert.ok(viewport.scrollTop > 10000); f.reader.reset();
+});
+
+test('scroll jump stays on its target while a neighbouring tall page fills its missing dimensions', async () => {
+  const f = fixture({ responder(url) { if (url.endsWith('/manifest')) return response({ ...access, manifest: { ...access.manifest, page_count: 8, reading_mode: 'webtoon' } }); } });
+  await f.reader.start(); await tick(); f.get('share-page-number').value = 8; f.get('share-page-form').emit('submit'); await tick();
+  loaded(f, 7, 1000, 1450); await tick(); f.get('share-viewport').scrollTop = 500; loaded(f, 6, 1000, 2600); await tick();
+  assert.equal(f.get('share-page-number').value, 8); assert.ok(f.get('share-viewport').scrollTop > 10000); f.reader.reset();
+});
+
+test('reunlocking after expiry starts a new heartbeat even when an older request has not returned', async () => {
+  let count = 0, finish; const pending = new Promise(resolve => { finish = resolve; });
+  const f = fixture({ responder(url) { if (url.endsWith('/manifest')) { count++; if (count === 2) return pending; return response({ ...access, session_expires_at: Date.now() + 10000 }); } } });
+  await f.reader.start(); const oldCheck = f.reader.checkSession(); await tick();
+  const deadline = [...f.timerDelays].find(([, delay]) => delay > 9000 && delay < 11000); f.timers.get(deadline[0])();
+  f.get('share-password').value = 'preview-pass'; await f.get('share-unlock-form').emit('submit');
+  await f.reader.checkSession(); assert.equal(count, 3); assert.equal(f.get('share-reader').hidden, false);
+  finish(response(access)); await oldCheck; assert.equal(f.get('share-reader').hidden, false); f.reader.reset();
 });

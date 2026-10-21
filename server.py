@@ -54,8 +54,10 @@ from cache_manager import CacheManager
 from pdf_reader import PdfManager, page_key as pdf_page_key, source_version as pdf_source_version
 from epub_reader import EpubManager, METADATA_VERSION as EPUB_METADATA_VERSION, legacy_image_page
 from sharing import SharingManager
+from network_settings import (NetworkSettings, ENTRY_COOKIE, ENTRY_SECONDS,
+                              SHARE_STATIC, SHARE_PAGE, SHARE_GET, SHARE_POST)
 
-VERSION = "0.9.0"
+VERSION = "0.9.1"
 MEDIA_TYPES = {"manga_jp", "manga_kr", "comic_us", "photo"}
 IMAGE_TYPES = {
     ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
@@ -105,6 +107,8 @@ STATIC_FILES = {
     "/transcoding-ui.js": "transcoding-ui.js",
     "/image-search-ui.js": "image-search-ui.js",
     "/cache-management-ui.js": "cache-management-ui.js",
+    "/network-settings-ui.js": "network-settings-ui.js",
+    "/network-settings-ui.css": "network-settings-ui.css",
     "/fonts/LibreCaslonText.ttf": "fonts/LibreCaslonText.ttf",
 }
 LOG = logging.getLogger("sumi")
@@ -505,6 +509,7 @@ class Library:
                 if "position" not in {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}:
                     connection.execute(f"ALTER TABLE {table} ADD COLUMN position REAL NOT NULL DEFAULT 0")
         self.signing_key = self._load_secret()
+        self.network = NetworkSettings(self)
         self.task_scheduler = SharedTaskScheduler(self, ReaderError)
         self.transcoding = TranscodingManager(self, ReaderError)
         self.image_search = ImageSearchManager(self, ReaderError)
@@ -2813,8 +2818,20 @@ class ReaderServer(ThreadingHTTPServer):
         TCPServer.server_bind(self)
         self.server_name, self.server_port = self.server_address[:2]
 
-    def __init__(self, address, library):
+    def __init__(self, address, library, *, share_port=8081, runtime=None):
         self.library = library
+        self.network_owner = self
+        self.share_only = False
+        self.runtime = runtime or ("docker" if _container_runtime() else "desktop" if getattr(sys, "frozen", False) else "source")
+        if self.runtime not in {"docker", "desktop", "source"}:
+            raise ValueError("网络运行环境无效。")
+        self.share_port = 8081 if self.runtime == "docker" else share_port
+        if type(self.share_port) is not int or not 1 <= self.share_port <= 65535:
+            raise ValueError("分享端口需要在 1～65535 之间。")
+        self.share_server = None
+        self.share_thread = None
+        self.share_error = ""
+        self.network_closing = False
         self.image_search_slots = threading.BoundedSemaphore(2)
         self.image_search_rate_lock = threading.Lock()
         self.image_search_attempts = {}
@@ -2822,6 +2839,89 @@ class ReaderServer(ThreadingHTTPServer):
         repository, configuration_error = release_configuration()
         self.updates = UpdateChecker(VERSION, repository, configuration_error)
         super().__init__(address, ReaderHandler)
+        if self.library is not None and self.library.network.current()["share_port_enabled"]:
+            try:
+                self._start_share_listener()
+            except OSError:
+                # Never fall back to publishing shares on the management port.
+                self.share_error = "独立分享端口不可用，请检查端口占用和启动配置。"
+                LOG.error(self.share_error)
+
+    def _start_share_listener(self):
+        if self.share_port == self.server_address[1]:
+            raise OSError("独立分享端口不能与阅读器端口相同。")
+        listener = ThreadingHTTPServer.__new__(ReaderServer)
+        listener.library = self.library
+        listener.network_owner = self
+        listener.share_only = True
+        listener.static = self.static
+        ThreadingHTTPServer.__init__(listener, (self.server_address[0], self.share_port), ReaderHandler)
+        thread = threading.Thread(target=listener.serve_forever, kwargs={"poll_interval": .1},
+                                  name="share-http", daemon=True)
+        try:
+            thread.start()
+        except BaseException:
+            ThreadingHTTPServer.server_close(listener)
+            raise
+        self.share_server, self.share_thread = listener, thread
+        self.share_error = ""
+
+    def _stop_share_listener(self):
+        listener, thread = self.share_server, self.share_thread
+        self.share_server = self.share_thread = None
+        if listener is not None:
+            ThreadingHTTPServer.shutdown(listener)
+            ThreadingHTTPServer.server_close(listener)
+        if thread is not None:
+            thread.join(timeout=5)
+
+    def network_snapshot(self):
+        with self.library.network.lock:
+            value = self.library.network.current()
+            return {key: item for key, item in value.items() if key != "entry_epoch"} | {
+                "security_entry_path": "/" + value["security_entry_code"] if value["security_entry_enabled"] else "/",
+                "share_port": self.share_port, "share_listening": bool(self.share_server and self.share_thread and self.share_thread.is_alive()),
+                "share_error": self.share_error, "runtime": self.runtime}
+
+    def configure_network(self, body):
+        with self.library.network.lock:
+            if self.network_closing:
+                raise ReaderError("阅读器正在停止。", 503)
+            try:
+                value = self.library.network.prepare(body)
+            except ValueError as error:
+                raise ReaderError(str(error)) from error
+            started = False
+            if value["share_port_enabled"] and self.share_server is None:
+                try:
+                    self._start_share_listener()
+                    started = True
+                except OSError as error:
+                    raise ReaderError("独立分享端口不可用，设置未保存。请检查端口占用和启动配置。", 409) from error
+            try:
+                self.library.network.persist(value)
+            except BaseException:
+                if started:
+                    self._stop_share_listener()
+                raise
+            if not value["share_port_enabled"]:
+                self._stop_share_listener()
+                self.share_error = ""
+            return self.network_snapshot()
+
+    def shutdown(self):
+        if not self.share_only and self.library is not None:
+            with self.library.network.lock:
+                self.network_closing = True
+                self._stop_share_listener()
+        return ThreadingHTTPServer.shutdown(self)
+
+    def server_close(self):
+        if not self.share_only and self.library is not None:
+            with self.library.network.lock:
+                self.network_closing = True
+                self._stop_share_listener()
+        return ThreadingHTTPServer.server_close(self)
 
 
 class ReaderHandler(BaseHTTPRequestHandler):
@@ -2835,6 +2935,10 @@ class ReaderHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format_string, *args):
         message = re.sub(r"(/(?:api/)?share/)[A-Za-z0-9_-]{43}", r"\1[redacted]", format_string % args)
+        current = self.library.network.current()
+        if getattr(self, "_network_sensitive", False) or current["security_entry_enabled"] or current["security_entry_code"]:
+            # Redact the whole request target, including rejected entry guesses.
+            message = re.sub(r'("[A-Z]+ )[^ ]+( HTTP/[^" ]+")', r'\1[protected]\2', message)
         LOG.info("%s %s", self.client_address[0], message.translate(
             {code: "?" for code in range(32)}))
 
@@ -3038,7 +3142,75 @@ class ReaderHandler(BaseHTTPRequestHandler):
         self._handle(self.post_route)
 
     def do_OPTIONS(self):
-        self.respond({"error": "不允许跨站请求。"}, 405, {"Allow": "GET, HEAD, POST"})
+        self._handle(lambda: self.respond({"error": "不允许跨站请求。"}, 405, {"Allow": "GET, HEAD, POST"}))
+
+    def send_error(self, code, message=None, explain=None):
+        if getattr(self.server, "share_only", False):
+            self.close_connection = True
+            self.respond({"error": "页面不存在。"}, 404)
+            return
+        return super().send_error(code, message, explain)
+
+    def entry_cookie_header(self, clear=False):
+        cookie = SimpleCookie()
+        cookie[ENTRY_COOKIE] = "" if clear else self.library.network.issue_cookie()
+        cookie[ENTRY_COOKIE]["path"] = "/"
+        cookie[ENTRY_COOKIE]["httponly"] = True
+        cookie[ENTRY_COOKIE]["samesite"] = "Strict"
+        cookie[ENTRY_COOKIE]["max-age"] = 0 if clear else ENTRY_SECONDS
+        if self.headers.get("X-Forwarded-Proto", "").lower() == "https":
+            cookie[ENTRY_COOKIE]["secure"] = True
+        return cookie.output(header="").strip()
+
+    def network_gate(self):
+        """Exact listener allowlist runs before account or body processing."""
+        request = urlsplit(self.path)
+        path = request.path
+        try:
+            target = self.raw_requestline.split()[1].decode("ascii")
+        except (IndexError, UnicodeError):
+            raise ReaderError("页面不存在。", 404)
+        canonical = (target == self.path and target.startswith("/") and "#" not in target
+                     and not any(c in path for c in "%\\"))
+        get = self.command in {"GET", "HEAD"}
+        share_route = bool((get and (SHARE_PAGE.fullmatch(path) or SHARE_GET.fullmatch(path)))
+                           or (self.command == "POST" and SHARE_POST.fullmatch(path)))
+        resource = get and path in SHARE_STATIC and not request.query
+        with self.library.network.lock:
+            value = self.library.network.current()
+            self._network_sensitive = (getattr(self, "_network_sensitive", False)
+                                       or value["security_entry_enabled"] or bool(value["security_entry_code"]))
+            if self.server.share_only:
+                if not canonical or not value["share_port_enabled"] or not (share_route or resource):
+                    raise ReaderError("页面不存在。", 404)
+                return
+            if value["share_port_enabled"] and path.startswith(("/share/", "/api/share/")):
+                raise ReaderError("页面不存在。", 404)
+            if share_route:
+                if not canonical or value["share_port_enabled"]:
+                    raise ReaderError("页面不存在。", 404)
+                return
+            if resource:
+                if not canonical:
+                    raise ReaderError("页面不存在。", 404)
+                return
+            if get and path == "/api/health" and canonical and not request.query:
+                return
+            if value["security_entry_enabled"]:
+                if (get and canonical and not request.query
+                        and hmac.compare_digest(path.encode(), ("/" + value["security_entry_code"]).encode())):
+                    self._network_entry = True
+                    self._network_cookie = self.entry_cookie_header()
+                    return
+                cookies = SimpleCookie()
+                try:
+                    cookies.load(self.headers.get("Cookie", ""))
+                    cookie = cookies.get(ENTRY_COOKIE)
+                    authorized = self.library.network.valid_cookie(cookie.value if cookie else "")
+                except Exception:
+                    authorized = False
+                if not canonical or not authorized:
+                    raise ReaderError("页面不存在。", 404)
 
     def _handle(self, callback):
         with self.library.request_condition:
@@ -3050,7 +3222,10 @@ class ReaderHandler(BaseHTTPRequestHandler):
         # A new HTTP request must never inherit the internal administrator
         # default, including a second request on a keep-alive connection.
         self.library.request_context.user_id = None
+        self._network_entry = False
+        self._network_cookie = None
         try:
+            self.network_gate()
             callback()
         except ReaderError as error:
             if self.command == "POST":
@@ -3080,6 +3255,8 @@ class ReaderHandler(BaseHTTPRequestHandler):
     def get_route(self):
         request = urlsplit(self.path)
         path = request.path
+        if self._network_entry:
+            path = "/"
         query = parse_qs(request.query, keep_blank_values=True)
         if path == "/api/health":
             self.respond({"status": "ok", "version": VERSION})
@@ -3116,6 +3293,15 @@ class ReaderHandler(BaseHTTPRequestHandler):
             return
         if path.startswith("/api/"):
             self.require_auth()
+            if path == "/api/network-settings":
+                self.library.require_admin()
+                if request.query:
+                    raise ReaderError("网络设置不接受查询参数。")
+                with self.library.network.lock:
+                    self.network_gate()
+                    result = self.server.network_owner.network_snapshot()
+                self.respond(result)
+                return
             if path == "/api/shares":
                 if request.query:
                     raise ReaderError("分享管理不接受查询参数。")
@@ -3187,7 +3373,13 @@ class ReaderHandler(BaseHTTPRequestHandler):
             if path == "/api/access":
                 self.library.require_admin()
                 secure = self.headers.get("X-Forwarded-Proto", "").lower() == "https"
-                self.respond(access_urls(self.headers.get("Host", ""), secure, self.server.server_address))
+                result = access_urls(self.headers.get("Host", ""), secure, self.server.server_address)
+                value = self.library.network.current()
+                if value["security_entry_enabled"]:
+                    suffix = "/" + value["security_entry_code"]
+                    result = {"lan_url": result["lan_url"] + suffix if result["lan_url"] else None,
+                              "lan_urls": [url + suffix for url in result["lan_urls"]]}
+                self.respond(result)
                 return
             if path == "/api/libraries":
                 self.respond(self.library.libraries())
@@ -3292,7 +3484,9 @@ class ReaderHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", mime)
         self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "no-store" if is_share_page else "no-cache")
+        self.send_header("Cache-Control", "no-store" if is_share_page or self._network_cookie else "no-cache")
+        if self._network_cookie:
+            self.send_header("Set-Cookie", self._network_cookie)
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(data)
@@ -3358,6 +3552,16 @@ class ReaderHandler(BaseHTTPRequestHandler):
             return
         if path not in ("/api/register", "/api/login", "/api/logout"):
             self.require_auth()
+        if path == "/api/network-settings":
+            self.library.require_admin()
+            if request.query:
+                raise ReaderError("网络设置不接受查询参数。")
+            with self.library.network.lock:
+                self.network_gate()
+                result = self.server.network_owner.configure_network(self.read_body())
+                header = self.entry_cookie_header(clear=not result["security_entry_enabled"])
+            self.respond(result, headers={"Set-Cookie": header})
+            return
         if path == "/api/shares":
             if request.query:
                 raise ReaderError("创建分享不接受查询参数。")
@@ -3541,6 +3745,7 @@ class ReaderHandler(BaseHTTPRequestHandler):
 
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    library = None
     try:
         port = int(os.environ.get("PORT", "8080"))
         interval = float(os.environ.get("SCAN_INTERVAL", "300"))
@@ -3551,6 +3756,8 @@ def main():
                           os.environ.get("READER_PASSWORD", ""), interval)
         server = ReaderServer((os.environ.get("HOST", "0.0.0.0"), port), library)
     except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
+        if library is not None:
+            library.close()
         LOG.error("无法启动阅读器：%s", error)
         return 1
 
@@ -3578,4 +3785,7 @@ if __name__ == "__main__":
     if sys.argv[1:2] == ["--pdf-worker"]:
         from pdf_reader import worker_main
         raise SystemExit(worker_main(sys.argv[2:]))
+    if sys.argv[1:2] == ["--reset-security-entry"]:
+        from network_settings import main as reset_security_entry_main
+        raise SystemExit(reset_security_entry_main(sys.argv[2:]))
     raise SystemExit(main())

@@ -18,13 +18,16 @@ import hashlib
 import http.cookiejar
 from io import BytesIO
 import json
+import locale
 import math
 from pathlib import Path
 import random
 import re
+import secrets
 import socket
 import sqlite3
 import struct
+import subprocess
 import sys
 import tempfile
 import time
@@ -184,9 +187,41 @@ def sample_epub() -> bytes:
 
 
 def random_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as candidate:
-        candidate.bind(("127.0.0.1", 0))
-        return candidate.getsockname()[1]
+    return random_ports(1)[0]
+
+
+def random_ports(count: int) -> list[int]:
+    """Reserve all selected ports together so the service listeners differ."""
+    sockets = []
+    try:
+        for _ in range(count):
+            candidate = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sockets.append(candidate)
+            candidate.bind(("127.0.0.1", 0))
+        return [candidate.getsockname()[1] for candidate in sockets]
+    finally:
+        for candidate in sockets:
+            candidate.close()
+
+
+def ports_released(config: LauncherConfig) -> bool:
+    """Check only the disposable listeners selected by this smoke run."""
+    sockets = []
+    try:
+        for port in (config.port, config.share_port):
+            candidate = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sockets.append(candidate)
+            # Match the server's Unix restart policy without permitting a
+            # second active listener. Windows keeps exclusive bind semantics.
+            if sys.platform != 'win32':
+                candidate.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            candidate.bind(("127.0.0.1", port))
+        return True
+    except OSError:
+        return False
+    finally:
+        for candidate in sockets:
+            candidate.close()
 
 
 class Client:
@@ -221,6 +256,150 @@ class Client:
 def require(condition, message):
     if not condition:
         raise AssertionError(message)
+
+
+def network_settings_smoke(client: Client, url: str, config: LauncherConfig,
+                           book_id: str, expected_image: bytes) -> dict:
+    """Probe the packaged service's boundaries without importing its policy.
+
+    Runs after ordinary account/share checks because it intentionally leaves the
+    disposable database protected by an entry and a separate share listener.
+    All entry codes, passwords, tokens and cookies stay out of the report.
+    """
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    status, settings, _ = client.request('/api/network-settings')
+    require(status == 200 and settings.get('runtime') == 'desktop'
+            and settings.get('share_port') == config.share_port
+            and settings.get('security_entry_enabled') is False
+            and settings.get('share_port_enabled') is False,
+            'Frozen network settings did not use the launcher share port and defaults')
+    for route, marker in (('/network-settings-ui.js', b'GravelleNetworkSettings'),
+                          ('/network-settings-ui.css', b'.network-settings')):
+        status, content, _ = client.request(route)
+        require(status == 200 and marker in content,
+                'Frozen network settings browser resource is missing: ' + route)
+    require(Client(url).request('/api/network-settings')[0] == 401,
+            'Frozen network settings must require an administrator')
+    require(client.request('/api/network-settings', {'share_port': config.share_port + 1})[0] == 400,
+            'Frozen web settings unexpectedly accepted a listener port change')
+
+    code = secrets.token_urlsafe(18)
+    payload = {'security_entry_enabled': True, 'security_entry_code': code,
+               'share_port_enabled': True, 'public_share_url': 'https://share.example.com'}
+    status, settings, _ = client.request('/api/network-settings', payload)
+    require(status == 200 and settings.get('share_listening') is True
+            and all(settings.get(key) == value for key, value in payload.items()),
+            'Frozen service could not save entry/share settings or bind its second listener')
+    cookie = client.last_headers.get('Set-Cookie', '')
+    require('gravelle_entry=' in cookie and 'HttpOnly' in cookie and 'SameSite=Strict' in cookie,
+            'Frozen network save did not grant the administrator a protected entry cookie')
+    require(client.request('/api/network-settings')[0] == 200,
+            'Frozen network save locked its current administrator out')
+
+    anonymous = Client(url)
+    for route in ('/', '/index.html', '/api/session', '/api/network-settings'):
+        require(anonymous.request(route)[0] == 404,
+                'Frozen security entry leaked an ordinary route: ' + route)
+    require(anonymous.request('/api/login', {'username': 'unused', 'password': 'unused'})[0] == 404,
+            'Frozen security entry left the login endpoint reachable')
+    require(anonymous.request('/api/health')[0] == 200,
+            'Frozen security entry prevented the launcher health probe')
+    status, html, mime = anonymous.request('/' + code)
+    require(status == 200 and mime == 'text/html' and b'/network-settings-ui.js' in html,
+            'Frozen configured entry did not serve the ordinary reader shell')
+    require(anonymous.request('/api/network-settings')[0] == 401,
+            'Frozen entry cookie bypassed account authentication')
+
+    status, created, _ = client.request('/api/shares', {'book_id': book_id, 'mode': 'time', 'days': 1})
+    require(status == 201 and isinstance(created.get('password'), str),
+            'Frozen network administrator could not create the isolated share fixture')
+    token = created.get('share', {}).get('token')
+    require(isinstance(token, str) and re.fullmatch(r'[A-Za-z0-9_-]{43}', token),
+            'Frozen network share fixture returned no usable capability')
+    page_path, base = '/share/' + token, '/api/share/' + token
+    for route in (page_path, base, base + '/manifest', base + '/pages/0'):
+        require(client.request(route)[0] == 404,
+                'Frozen management listener still exposed a separate-port share')
+
+    share_url = 'http://127.0.0.1:' + str(config.share_port)
+    guest = Client(share_url)
+    for route in ('/', '/index.html', '/api/health', '/api/session', '/api/network-settings',
+                  '/api/library', '/app.js', '/network-settings-ui.js', '/' + code):
+        require(guest.request(route)[0] == 404,
+                'Frozen share listener exposed an ordinary route: ' + route)
+    require(guest.request('/api/login', {'username': 'unused', 'password': 'unused'})[0] == 404,
+            'Frozen share listener exposed account login')
+    status, html, mime = guest.request(page_path)
+    require(status == 200 and mime == 'text/html' and b'/reader-model.js' in html,
+            'Frozen separate-port share did not serve the complete reader shell')
+    # The exact dependencies of share.html are intentionally checked instead of
+    # importing SHARE_STATIC: a stale policy must fail this independent probe.
+    for route, marker in (('/styles.css', b'.reader'), ('/reader-model.js', b'SumiReaderModel'),
+                          ('/share-reader.css', b'.share-reader'),
+                          ('/share-reader.js', b'GravelleShareReader'),
+                          ('/share-crypto.js', b'GravelleShareCrypto'),
+                          ('/vendor/noble-gcm.js', b'GravelleNobleGCM'),
+                          ('/gravelle-icon.png', b'\x89PNG\r\n\x1a\n'),
+                          ('/gravelle-wordmark.svg', b'<svg')):
+        status, content, _ = guest.request(route)
+        require(status == 200 and marker in content,
+                'Frozen isolated share reader resource is missing: ' + route)
+    status, visitor, _ = guest.request(base + '/unlock', {'password': created['password']})
+    require(status == 200 and isinstance(visitor.get('key'), str),
+            'Frozen independent share listener could not unlock its fixture')
+    status, packet, mime = guest.request(base + '/pages/0')
+    require(status == 200 and mime == 'application/octet-stream' and packet[:4] == b'GSH1',
+            'Frozen independent share listener returned no encrypted page')
+    plaintext = AESGCM(base64.urlsafe_b64decode(visitor['key'] + '=')).decrypt(
+        packet[4:16], packet[17:], packet[:17] + ('gravelle-share-v1:' + token + ':0').encode())
+    require(plaintext == expected_image,
+            'Frozen independent share page did not decrypt to the generated source')
+    require(client.request('/api/shares/' + created['share']['id'] + '/close', {})[0] == 200
+            and guest.request(base + '/pages/0')[0] == 410,
+            'Frozen independent share remained readable after closure')
+    return {'entry_gate_and_cookie': True, 'administrator_required': True,
+            'web_port_changes_rejected': True, 'separate_listener_bound': True,
+            'management_share_routes_closed': True, 'share_admin_routes_closed': True,
+            'complete_share_reader_resources': True, 'independent_page_decrypted': True,
+            'closed_share_rejected': True}
+
+
+def network_recovery_smoke(executable: Path, data: Path) -> dict:
+    """Exercise recovery in the frozen CLI, while its service is stopped."""
+    def snapshot(database):
+        with closing(sqlite3.connect(database)) as connection:
+            return (json.loads(connection.execute('SELECT settings FROM network_settings WHERE id=1').fetchone()[0]),
+                    connection.execute('SELECT COUNT(*) FROM owner_account').fetchone()[0],
+                    connection.execute('SELECT COUNT(*) FROM shares').fetchone()[0])
+
+    before, accounts, shares = snapshot(data / 'library.sqlite3')
+    require(before['security_entry_enabled'] is True and before['share_port_enabled'] is True,
+            'Frozen entry/share configuration was not persisted before recovery')
+    backups = set((data / 'backups').glob('before-security-entry-reset-*.sqlite3'))
+    child = subprocess.run([str(executable), '--reset-security-entry', '--data', str(data)],
+                           stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, timeout=45)
+    try:
+        output = child.stdout.decode('utf8')
+    except UnicodeDecodeError:
+        # The recovery CLI's localized message may use the Windows console
+        # encoding; its ASCII JSON keys still require an exact successful CLI.
+        output = child.stdout.decode(locale.getpreferredencoding(False))
+    require(child.returncode == 0 and json.loads(output).get('ok') is True,
+            'Frozen offline recovery CLI failed')
+    after, restored_accounts, restored_shares = snapshot(data / 'library.sqlite3')
+    require(after['security_entry_enabled'] is False and after['security_entry_code'] == ''
+            and after['entry_epoch'] != before['entry_epoch']
+            and after['share_port_enabled'] is True
+            and after['public_share_url'] == before['public_share_url']
+            and restored_accounts == accounts and restored_shares == shares,
+            'Frozen recovery did not rotate the entry while preserving accounts and share isolation')
+    added = set((data / 'backups').glob('before-security-entry-reset-*.sqlite3')) - backups
+    require(len(added) == 1 and snapshot(next(iter(added))) == (before, accounts, shares),
+            'Frozen entry recovery did not back up the exact original configuration and accounts')
+    return {'offline_cli': True, 'backup_verified': True, 'entry_epoch_rotated': True,
+            'share_isolation_preserved': True, 'accounts_and_shares_preserved': True}
 
 
 def sharing_smoke(client: Client, url: str, book_id: str, expected_image: bytes) -> dict:
@@ -469,7 +648,9 @@ def run_smoke(executable: Path, work_root: Path) -> dict:
         second_source.write_bytes(second_image)
         data = test_root / "data"
         log_path = test_root / "server.log"
-        config = LauncherConfig(port=random_port(), library_paths=[str(media), str(second_media)])
+        port, share_port = random_ports(2)
+        config = LauncherConfig(port=port, share_port=share_port,
+                                library_paths=[str(media), str(second_media)])
         report["port"] = config.port
         controller = ServerController(data, log_path, command_prefix=[str(executable)])
         try:
@@ -1006,10 +1187,14 @@ def run_smoke(executable: Path, work_root: Path) -> dict:
             passed('frozen_encrypted_share_create_unlock_decrypt_and_close',
                    source_unmodified=True, **share_checks)
 
+            network_checks = network_settings_smoke(client, url, config, book['id'], image)
+            passed('frozen_network_entry_and_independent_share_listener', **network_checks)
+
             child = controller.process
             controller.stop()
             require(child.returncode == 0, f"stdin stop returned exit code {child.returncode}")
             require(check_port(config)["available"], "Service port was not released after stop")
+            require(ports_released(config), 'Frozen service did not release both listeners after stop')
             passed("stdin_stop_and_port_release", returncode=child.returncode)
             with closing(sqlite3.connect(data / "library.sqlite3")) as connection:
                 require(connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok",
@@ -1021,12 +1206,27 @@ def run_smoke(executable: Path, work_root: Path) -> dict:
             passed("sqlite_integrity_and_persistence")
 
             controller.start(config, timeout=35)
+            require(Client(url).request('/')[0] == 404
+                    and Client('http://127.0.0.1:' + str(config.share_port)).request('/reader-model.js')[0] == 200,
+                    'Frozen network settings or isolated reader resources did not survive a service restart')
+            passed('frozen_network_settings_survive_restart')
             child = controller.process
             child.stdin.close()
             require(child.wait(timeout=20) == 0, "EOF on parent pipe did not gracefully stop the frozen server")
             controller.stop()
             require(check_port(config)["available"], "Service port was not released after parent pipe EOF")
+            require(ports_released(config), 'Frozen service did not release both listeners after parent pipe EOF')
             passed("stdin_eof_and_port_release", returncode=child.returncode)
+            passed('frozen_offline_security_entry_recovery', **network_recovery_smoke(executable, data))
+            controller.start(config, timeout=35)
+            require(Client(url).request('/')[0] == 200
+                    and Client(url).request('/api/network-settings')[0] == 401
+                    and Client('http://127.0.0.1:' + str(config.share_port)).request('/')[0] == 404
+                    and Client('http://127.0.0.1:' + str(config.share_port)).request('/reader-model.js')[0] == 200,
+                    'Frozen recovery restart did not restore the login shell with share isolation intact')
+            controller.stop()
+            require(ports_released(config), 'Frozen recovery service did not release both listeners')
+            passed('frozen_recovery_restart_and_dual_port_release')
             report["status"] = "passed"
         except Exception as error:
             report["status"] = "failed"

@@ -31,8 +31,13 @@ class LauncherConfig:
     port: int = 8080
     lan_enabled: bool = False
     library_paths: tuple[str, ...] | None = None
+    share_port: int | None = None
 
     def __post_init__(self):
+        # Older configurations could already use 8081 for the main service.
+        # Resolve only an omitted share port; an explicit collision still fails.
+        if self.share_port is None:
+            object.__setattr__(self, "share_port", 8082 if self.port == 8081 else 8081)
         # Keep the original positional argument and JSON key for older
         # launchers, while the ordered array is authoritative for new ones.
         values = (self.library_path,) if self.library_paths is None else self.library_paths
@@ -69,6 +74,10 @@ class LauncherConfig:
     def validate(self, require_directory: bool = True) -> "LauncherConfig":
         if not isinstance(self.port, int) or isinstance(self.port, bool) or not 1 <= self.port <= 65535:
             raise LauncherError("端口需要是 1 至 65535 之间的整数。")
+        if not isinstance(self.share_port, int) or isinstance(self.share_port, bool) or not 1 <= self.share_port <= 65535:
+            raise LauncherError("分享端口需要是 1 至 65535 之间的整数。")
+        if self.share_port == self.port:
+            raise LauncherError("分享端口不能与服务端口相同。")
         if not isinstance(self.lan_enabled, bool):
             raise LauncherError("局域网访问设置无效。")
         if require_directory:
@@ -149,12 +158,41 @@ def lan_addresses() -> list[str]:
     return result
 
 
-def network_diagnostics(config: LauncherConfig, running: bool = False) -> dict:
+def reader_url(config: LauncherConfig, data_path: Path | None = None, address="127.0.0.1") -> str:
+    """Read the current entry on demand, so changing it in the web UI is reflected."""
+    path = "/"
+    if data_path is not None:
+        from network_settings import read_security_entry_path
+        path = read_security_entry_path(data_path)
+    return f"http://{address}:{config.port}{path}"
+
+
+def security_entry_recovery_warnings(result: dict, language="zh") -> list[str]:
+    """Only recovery notices are displayed; the original damaged settings stay private."""
+    warnings = result.get("warnings", []) if isinstance(result, dict) else []
+    if not isinstance(warnings, list):
+        return []
+    warnings = [value for value in warnings if isinstance(value, str) and value.strip()]
+    if language == "zh":
+        return warnings
+    translations = {
+        "share_isolation_preserved": "The previous share port setting could not be verified. The separate share port remains enabled. Check Network Settings; shares will not fall back to the reader port.",
+        "public_share_url_cleared": "The previous public share address could not be verified and has been cleared. Enter the correct address in Network Settings.",
+    }
+    codes = result.get("warning_codes", [])
+    localized = [translations[code] for code in codes if isinstance(code, str) and code in translations] if isinstance(codes, list) else []
+    if warnings and not localized:
+        localized = ["Some network settings required recovery. Check Network Settings before sharing again."]
+    return localized
+
+
+def network_diagnostics(config: LauncherConfig, running: bool = False, data_path: Path | None = None) -> dict:
     config.validate()
     addresses = lan_addresses() if config.lan_enabled else []
-    urls = [f"http://{address}:{config.port}/" for address in addresses]
-    result = {"local_url": config.local_url, "lan_enabled": config.lan_enabled,
+    urls = [reader_url(config, data_path, address) for address in addresses]
+    result = {"local_url": reader_url(config, data_path), "lan_enabled": config.lan_enabled,
               "lan_urls": urls, "port": config.port, "firewall_verified": False,
+              "share_port": config.share_port,
               "library_paths": list(config.library_paths),
               "directories": [{"path": path, "readable": True} for path in config.library_paths]}
     if running:

@@ -45,12 +45,17 @@ class Catalogue:
                 CREATE TABLE users(id INTEGER PRIMARY KEY,role TEXT,enabled INTEGER);
                 INSERT INTO users VALUES(1,'admin',1),(2,'user',1),(3,'admin',1);
                 CREATE TABLE books(id TEXT PRIMARY KEY,title TEXT,title_override TEXT,
-                    format TEXT,page_count INTEGER,active INTEGER,removed INTEGER,published INTEGER);
+                    format TEXT,page_count INTEGER,active INTEGER,removed INTEGER,published INTEGER,
+                    library_id TEXT);
+                CREATE TABLE media_libraries(id TEXT PRIMARY KEY,reading_mode TEXT,reading_direction TEXT);
+                INSERT INTO media_libraries VALUES('fixture','single','ltr');
+                CREATE TABLE book_metadata(book_id TEXT PRIMARY KEY,reading_mode_override TEXT,
+                    reading_direction_override TEXT);
             """)
             with c:
                 for identifier, format_name in (("a"*24, "folder"), ("b"*24, "pdf"), ("c"*24, "epub"),
                                                 ("d"*24, "archive"), ("e"*24, "zip"), ("f"*24, "cbz")):
-                    c.execute("INSERT INTO books VALUES(?,?,NULL,?,3,1,0,1)", (identifier, "Generated photo work", format_name))
+                    c.execute("INSERT INTO books VALUES(?,?,NULL,?,3,1,0,1,'fixture')", (identifier, "Generated photo work", format_name))
 
     def connect(self):
         c = sqlite3.connect(self.database, timeout=10)
@@ -287,8 +292,10 @@ class SharingTests(unittest.TestCase):
             result = self.manager.manifest(share["token"], guest["session"])
             self.assertIsNone(self.library.request_context.user_id)
         self.assertEqual(set(result), {"manifest", "key", "session_expires_at", "encryption"})
-        self.assertEqual(set(result["manifest"]), {"title", "page_count", "format"})
+        self.assertEqual(set(result["manifest"]), {"title", "page_count", "format", "reading_mode", "reading_direction"})
         self.assertEqual(result["manifest"]["format"], "folder")
+        self.assertEqual(result["manifest"]["reading_mode"], "single")
+        self.assertEqual(result["manifest"]["reading_direction"], "ltr")
         self.assertEqual(len(base64.urlsafe_b64decode(result["key"]+"=")), 32)
         self.assertNotIn("session", result)
         row = self.statement("SELECT * FROM share_sessions")[0]
@@ -303,6 +310,35 @@ class SharingTests(unittest.TestCase):
         self.assertEqual(self.statement("SELECT COUNT(*) FROM share_sessions")[0][0], 0)
         self.assertEqual(self.manager.listing()["shares"][0]["visits"], 0)
         self.assertIn("session", self.unlock(share))
+
+    def test_manifest_reading_defaults_follow_library_then_work_overrides(self):
+        share = self.create()["share"]
+        guest = self.unlock(share)
+        def preferences():
+            manifest = self.manager.manifest(share["token"], guest["session"])["manifest"]
+            return manifest["reading_mode"], manifest["reading_direction"]
+        self.assertEqual(preferences(), ("single", "ltr"))
+        self.statement("UPDATE media_libraries SET reading_mode='double',reading_direction='rtl'")
+        self.assertEqual(preferences(), ("double", "rtl"))
+        self.statement("INSERT INTO book_metadata VALUES(?,'single','ttb')", ("a" * 24,))
+        self.assertEqual(preferences(), ("single", "ttb"))
+        self.statement("UPDATE book_metadata SET reading_direction_override=NULL")
+        self.assertEqual(preferences(), ("single", "rtl"))
+        self.statement("UPDATE book_metadata SET reading_mode_override=NULL,reading_direction_override='ltr'")
+        self.assertEqual(preferences(), ("double", "ltr"))
+
+    def test_manifest_normalizes_modes_and_invalid_defaults(self):
+        share = self.create()["share"]
+        guest = self.unlock(share)
+        for mode, direction, expected in (("webtoon", "rtl", ("webtoon", "ttb")),
+                                           ("double", "ttb", ("double", "ltr")),
+                                           ("single", "ttb", ("single", "ttb")),
+                                           ("unexpected", "unexpected", ("single", "ltr")),
+                                           (None, None, ("single", "ltr"))):
+            with self.subTest(mode=mode, direction=direction):
+                self.statement("UPDATE media_libraries SET reading_mode=?,reading_direction=?", (mode, direction))
+                manifest = self.manager.manifest(share["token"], guest["session"])["manifest"]
+                self.assertEqual((manifest["reading_mode"], manifest["reading_direction"]), expected)
 
     def test_existing_session_reuse_keeps_key_and_does_not_create_another_session(self):
         share = self.create(days=3)["share"]

@@ -23,15 +23,25 @@
     return labels.active;
   }
   function rule(share) { return share.expires_at ? `有效至 ${date(share.expires_at)}` : '—'; }
-  function shareUrl(share, baseUrl) {
+  function shareUrl(share, baseUrl, network = {}) {
     const base = new URL(baseUrl || globalThis.location?.href || 'http://localhost/');
+    if (!['http:', 'https:'].includes(base.protocol) || base.username || base.password) throw new Error('分享地址必须使用 http 或 https。');
     const token = String(share.token || '');
-    if (token && /^[A-Za-z0-9_-]{43}$/.test(token)) return new URL('/share/' + token, base).href;
-    const value = new URL(share.url || '', base);
-    if (value.origin !== base.origin || !/^\/share\/[A-Za-z0-9_-]{43}$/.test(value.pathname) || value.search || value.hash) throw new Error('分享地址格式不正确。');
-    return value.href;
+    let path;
+    if (token && /^[A-Za-z0-9_-]{43}$/.test(token)) path = '/share/' + token;
+    else { const value = new URL(share.url || '', base); if (value.origin !== base.origin || !/^\/share\/[A-Za-z0-9_-]{43}$/.test(value.pathname) || value.search || value.hash) throw new Error('分享地址格式不正确。'); path = value.pathname; }
+    let origin = base.origin;
+    if (network.public_share_url) {
+      const text = String(network.public_share_url); let configured; try { configured = new URL(text); } catch (_) { throw new Error('公网分享地址格式不正确，请在网络设置中修改。'); }
+      if (/[\s\\]/.test(text) || !['http:', 'https:'].includes(configured.protocol) || configured.username || configured.password || configured.pathname !== '/' || configured.search || configured.hash) throw new Error('公网分享地址只能包含 http / https 的域名与端口。');
+      origin = configured.origin;
+    } else if (network.share_port_enabled) {
+      if (!Number.isInteger(network.share_port) || network.share_port < 1 || network.share_port > 65535) throw new Error('独立分享端口配置不正确，请检查网络设置。');
+      base.port = String(network.share_port); origin = base.origin;
+    }
+    return new URL(path, origin).href;
   }
-  function create({ api, post, isAdmin, toast = () => {}, baseUrl, managementHost, document: injectedDocument, window: injectedWindow } = {}) {
+  function create({ api, post, isAdmin, toast = () => {}, baseUrl, managementHost, getNetworkSettings = async () => ({}), document: injectedDocument, window: injectedWindow } = {}) {
     const doc = injectedDocument || managementHost?.ownerDocument || document; const win = injectedWindow || doc.defaultView || window;
     let generation = 0, createEpoch = 0, managementEpoch = 0, operationEpoch = 0;
     let createBusy = false, managementBusy = false, operationBusy = false, managementActive = false, currentBook = null, pendingOperation = null, timer = null, selectedDays = 1, createFromManagement = false;
@@ -61,7 +71,7 @@
       }); duration.append(control); return control;
     });
     daysLabel.append(durationLabel, duration); form.append(passwordLabel, daysLabel);
-    const result = element('section', 'sharing-result'); result.hidden = true; const resultTitle = element('h3', '', '分享已创建'); const resultLink = element('input'); resultLink.readOnly = true; resultLink.setAttribute('aria-label', '分享链接'); const resultPassword = element('input'); resultPassword.readOnly = true; resultPassword.setAttribute('aria-label', '分享访问密码'); const resultRule = element('p', 'sharing-hint'); const copyAll = button('复制链接和密码', () => copy(`分享链接：${resultLink.value}\n访问密码：${resultPassword.value}`, resultLink), true); result.append(resultTitle, element('label', 'sharing-label', '分享链接'), resultLink, element('label', 'sharing-label', '访问密码'), resultPassword, resultRule, copyAll);
+    const result = element('section', 'sharing-result'); result.hidden = true; const resultTitle = element('h3', '', '分享已创建'); const resultLink = element('input'); resultLink.readOnly = true; resultLink.setAttribute('aria-label', '分享链接'); const resultPassword = element('input'); resultPassword.readOnly = true; resultPassword.setAttribute('aria-label', '分享访问密码'); const resultRule = element('p', 'sharing-hint'); const resultNetworkHint = element('p', 'sharing-hint'); resultNetworkHint.hidden = true; const copyAll = button('复制链接和密码', () => copy(`分享链接：${resultLink.value}\n访问密码：${resultPassword.value}`, resultLink), true); result.append(resultTitle, element('label', 'sharing-label', '分享链接'), resultLink, element('label', 'sharing-label', '访问密码'), resultPassword, resultRule, resultNetworkHint, copyAll);
     body.append(error, bookName, form, result);
     const footer = element('footer', 'sharing-footer'); const cancel = button('取消', () => closeCreate()); const submit = element('button', 'button button-primary', '创建分享'); submit.type = 'submit'; submit.setAttribute('form', form.id); footer.append(cancel, submit); dialog.append(header, body, footer); doc.body.append(dialog);
 
@@ -89,8 +99,11 @@
       try { data = payload(currentBook, { password: password.value, duration_days: selectedDays }); } catch (problem) { showError(error, problem.message); return; }
       const account = generation, epoch = createEpoch; setCreateBusy(true); showError(error, '');
       try {
+        const network = await getNetworkSettings(); if (account !== generation || epoch !== createEpoch || !authorized()) return;
+        // Validate the origin before creating a server-side share.
+        shareUrl({ token: 'S'.repeat(43) }, baseUrl || win.location.href, network);
         const value = await post('/api/shares', data); if (account !== generation || epoch !== createEpoch || !authorized()) return;
-        const share = value.share || value; resultLink.value = shareUrl(share, baseUrl || win.location.href); resultPassword.value = String(value.password || data.password || ''); if (!resultPassword.value) throw new Error('服务端未返回访问密码，请关闭该分享后重试。'); resultRule.textContent = rule(share); form.hidden = submit.hidden = true; result.hidden = false; cancel.textContent = '完成'; password.value = ''; resultLink.focus(); if (managementActive) await load(true);
+        const share = value.share || value; resultLink.value = shareUrl(share, baseUrl || win.location.href, network); resultPassword.value = String(value.password || data.password || ''); if (!resultPassword.value) throw new Error('服务端未返回访问密码，请关闭该分享后重试。'); resultRule.textContent = rule(share); resultNetworkHint.hidden = !network.share_port_enabled || Boolean(network.public_share_url); resultNetworkHint.textContent = '链接使用当前主机与分享端口。外网访问时，请在“网络设置”填写实际公网分享地址。'; form.hidden = submit.hidden = true; result.hidden = false; cancel.textContent = '完成'; password.value = ''; resultLink.focus(); if (managementActive) await load(true);
       } catch (problem) { if (account === generation && epoch === createEpoch) showError(error, problem.message || '创建失败，请重试。'); }
       finally { if (account === generation && epoch === createEpoch) setCreateBusy(false); }
     });
@@ -139,7 +152,7 @@
         for (const share of shares) {
           const card = element('article', 'sharing-card'); const top = element('div', 'sharing-card-top'); const name = element('strong', '', share.title || '作品'); const badge = element('span', 'sharing-badge', status(share)); badge.dataset.status = share.status || 'active'; top.append(name, badge);
           const info = element('p', 'sharing-meta', `创建于 ${date(share.created_at)}`); const limit = element('p', 'sharing-meta', rule(share)); const visits = element('p', 'sharing-meta sharing-visits', `访问 ${Number.isSafeInteger(share.visits) && share.visits >= 0 ? share.visits : 0} 次`); visits.title = '成功建立阅读会话计数，刷新和翻页不重复计数。'; const actions = element('div', 'sharing-card-actions'); let copyField = null;
-          actions.append(button('复制链接', () => { try { const url = shareUrl(share, baseUrl || win.location.href); if (!copyField) { copyField = element('input', 'sharing-copy-field'); copyField.readOnly = true; card.append(copyField); } copyField.value = url; copy(url, copyField); } catch (problem) { showError(managementError, problem.message); } }));
+          actions.append(button('复制链接', async () => { const account = generation, epoch = managementEpoch; try { const network = await getNetworkSettings(); if (account !== generation || epoch !== managementEpoch || !managementActive || !authorized()) return; const url = shareUrl(share, baseUrl || win.location.href, network); if (!copyField) { copyField = element('input', 'sharing-copy-field'); copyField.readOnly = true; card.append(copyField); } copyField.value = url; await copy(url, copyField); if (network.share_port_enabled && !network.public_share_url) toast('已复制。外网转发或端口映射请先在网络设置填写公网分享地址。'); } catch (problem) { if (account === generation && epoch === managementEpoch && managementActive && authorized()) showError(managementError, problem.message); } }));
           if ([labels.active, labels.exhausted].includes(status(share))) actions.append(button('关闭分享', () => promptOperation('close', share)));
           if (share.status === 'closed') {
             const recreate = button('重新分享', () => showCreate({ id: share.book_id, title: share.title })); recreate.disabled = !share.book_id; const remove = button('删除记录', () => promptOperation('delete', share)); remove.classList.add('sharing-danger'); actions.append(recreate, remove);

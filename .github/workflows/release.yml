@@ -3,11 +3,11 @@ name: Build and release Gravelle
 on:
   push:
     branches:
-      - dev/release-0.9.0
+      - dev/release-0.9.1
   workflow_dispatch:
     inputs:
       release_version:
-        description: "版本号，必须与 server.py 的 VERSION 一致，例如 0.9.0"
+        description: "版本号，必须与 server.py 的 VERSION 一致，例如 0.9.1"
         required: true
         type: string
       publish:
@@ -73,7 +73,7 @@ jobs:
           if os.environ['EVENT_NAME'] == 'workflow_dispatch':
               assert os.environ['REQUESTED_VERSION'] == version, 'Requested version must match server.VERSION'
           else:
-              assert os.environ['EVENT_NAME'] == 'push' and os.environ['GITHUB_REF'] == 'refs/heads/dev/release-0.9.0', 'Automatic builds are restricted to the release candidate branch'
+              assert os.environ['EVENT_NAME'] == 'push' and os.environ['GITHUB_REF'] == 'refs/heads/dev/release-0.9.1', 'Automatic builds are restricted to the release candidate branch'
           source_tag = os.environ['SOURCE_TAG']
           assert not source_tag or source_tag == 'v' + version, 'source_tag must be the exact existing stable version tag'
           source_sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()

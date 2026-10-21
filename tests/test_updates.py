@@ -209,6 +209,14 @@ class UpdateHttpTests(unittest.TestCase):
         library.request_context = threading.local()
         library.request_stopping = False
         library.active_requests = 0
+        # Match the real network-settings contract while keeping this auth-only
+        # fixture free of databases and independent HTTP listeners.
+        library.network.lock = threading.RLock()
+        library.network.current.return_value = {
+            "security_entry_enabled": False, "security_entry_code": "",
+            "share_port_enabled": False, "public_share_url": "",
+            "entry_epoch": "0" * 64,
+        }
         library.session.side_effect = lambda token: {
             "authenticated": token in ("update-test-session", "child-test-session"),
             "user": {"id": 1 if token == "update-test-session" else 2}
