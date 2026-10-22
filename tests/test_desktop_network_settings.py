@@ -1,7 +1,7 @@
 """Desktop network settings preserve service ownership and keep entry codes out of diagnostics."""
 from __future__ import annotations
 
-from io import StringIO
+from io import BytesIO, StringIO, TextIOWrapper
 import errno
 import json
 from pathlib import Path
@@ -147,6 +147,31 @@ class DesktopNetworkSettingsTests(unittest.TestCase):
         with patch("network_settings.reset_security_entry", return_value=result), patch("sys.stdout", StringIO()) as output:
             self.assertEqual(reset_security_entry_cli(Path.cwd() / "unused-data"), 0)
         self.assertEqual(json.loads(output.getvalue())["warnings"], result["warnings"])
+
+    def test_recovery_cli_preserves_success_and_localized_errors_in_western_windows_pipes(self):
+        from desktop.runtime import reset_security_entry_cli
+        cases = (
+            ({'disabled': True, 'warnings': ['公网分享地址已清空。'],
+              'warning_codes': ['public_share_url_cleared']}, None, 0),
+            (None, RuntimeError('本地恢复失败，请停止服务。'), 1),
+        )
+        for result, error, exit_code in cases:
+            with self.subTest(success=exit_code == 0):
+                output = BytesIO()
+                stream = TextIOWrapper(output, encoding='cp1252', errors='strict')
+                with patch('network_settings.reset_security_entry', return_value=result, side_effect=error), \
+                        patch('sys.stdout', stream):
+                    self.assertEqual(reset_security_entry_cli(Path.cwd() / 'unused-data'), exit_code)
+                    stream.flush()
+                payload = output.getvalue()
+                self.assertTrue(payload.isascii())
+                decoded = json.loads(payload)
+                self.assertEqual(decoded['ok'], exit_code == 0)
+                if error:
+                    self.assertEqual(decoded['error'], str(error))
+                else:
+                    self.assertIn('安全入口已关闭', decoded['message'])
+                    self.assertEqual(decoded['warnings'], result['warnings'])
 
     def test_mac_state_persists_share_port_and_validates_bad_typed_values(self):
         with tempfile.TemporaryDirectory() as temporary:

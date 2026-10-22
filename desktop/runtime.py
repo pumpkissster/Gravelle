@@ -290,8 +290,11 @@ def reset_security_entry_cli(data_path: Path) -> int:
         warnings = security_entry_recovery_warnings(result)
         if warnings:
             payload["warnings"] = warnings
-        print(json.dumps(payload, ensure_ascii=False))
+        # This is a JSON protocol also consumed through frozen Windows pipes.
+        # Escaping localized text prevents an English ANSI console from turning
+        # an already completed recovery into an apparent encoding failure.
+        print(json.dumps(payload, ensure_ascii=True))
         return 0
     except (OSError, ValueError, RuntimeError) as error:
-        print(json.dumps({"ok": False, "error": str(error)}, ensure_ascii=False))
+        print(json.dumps({"ok": False, "error": str(error)}, ensure_ascii=True))
         return 1
