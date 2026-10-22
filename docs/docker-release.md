@@ -16,8 +16,8 @@
 | 配置 | 内容 |
 | --- | --- |
 | `GRAVELLE_IMAGE` | `pumpkissster/gravelle:0.9.1` |
-| `COMICS_PATH` | 宿主机写真根目录，例如 `/volume1/photosets` |
-| `DATA_PATH` | 宿主机资料目录，模板为 `/volume1/docker/sumi-reader/data`；已有安装保留原值 |
+| `COMICS_PATH` | 宿主机写真根目录，例如 `/path/to/photos` |
+| `DATA_PATH` | 宿主机资料目录，例如 `/path/to/data`；已有安装保留原值 |
 | `PUID` / `PGID` | 对作品目录有读取权限、对资料目录有读写权限的用户 UID / GID |
 | `WEB_PORT` | 外部访问端口，默认 `8080` |
 
@@ -34,7 +34,7 @@ docker compose ps
 
 群晖可使用 Container Manager 的“项目”功能，在同一项目目录导入 `compose.yaml` 和 `.env`。`PUID`、`PGID` 可通过 SSH 执行 `id 用户名` 查询；不要随意把资料目录改成所有人可写。
 
-作品目录只读挂载到 `/library`，资料目录可写挂载到 `/data`。宿主机路径与网页容器路径不同，例如 `/volume1/photosets/模特甲` 在网页中选择 `/library/模特甲`。启动前确认目录已存在，避免错误路径被创建为空目录。公开镜像的安装不需要自行创建 Docker Hub 仓库或配置推送令牌。
+作品目录只读挂载到 `/library`，资料目录可写挂载到 `/data`。宿主机路径与网页容器路径不同，例如 `/path/to/photos/模特甲` 在网页中选择 `/library/模特甲`。启动前确认目录已存在，避免错误路径被创建为空目录。公开镜像的安装不需要自行创建 Docker Hub 仓库或配置推送令牌。
 
 一个宿主机根目录下可以存放多个写真库。若作品分散在不同磁盘，给 Compose 增加只读挂载到 `/library/目录名`，再在网页选择对应容器路径。
 
@@ -57,7 +57,7 @@ docker compose -f compose.build.yaml up -d --build
 在 `.env` 中填写已经创建的独立目录，例如：
 
 ```dotenv
-OPTIMIZED_PATH=/volume2/gravelle/optimized
+OPTIMIZED_PATH=/path/to/transcoded
 ```
 
 **仅填写 `OPTIMIZED_PATH` 不会启用独立存储。** 将 [compose.optimization.yaml](../compose.optimization.yaml) 放在现有 Compose 项目目录，通过两个 `-f` 同时加载。容器仍使用 `/data/transcoded`，覆盖配置只增加这个子目录的可读写绑定挂载，保留 `/library` 的只读挂载及 `/data` 的原数据挂载。Compose 根据挂载的 `target` 合并条目，新增子目录不会替换 `/data`。[Docker Compose 合并规则](https://docs.docker.com/reference/compose-file/merge/#unique-resources)
@@ -100,7 +100,7 @@ docker compose -f compose.yaml -f compose.optimization.yaml ps
 
 旧图片搜索索引升级后自动在后台逐页补充截图／裁剪匹配特征，无需手动重建，期间仍可使用已收录页面的整图搜索。图片优化与图片索引默认共用一个处理名额；管理员可在性能设置改为 1～8，并发越高资源占用越大。
 
-旧版的 Compose 服务名 `sumi-reader`、`COMICS_PATH` 变量和已有 `/data` 布局继续保留。升级时使用原来的项目目录或项目名称，保留原 `DATA_PATH`、`COMICS_PATH` 与运行用户配置，再替换 Compose 文件；不要创建第二个项目同时使用同一资料目录。历史资料目录名含 `sumi-reader` 无需改名。
+部署模板的默认服务名为 `gravelle`。已有安装升级时沿用原来的项目名称、服务名、`DATA_PATH`、`COMICS_PATH` 和运行用户配置；使用新模板前，将模板服务名调整为当前部署实际使用的服务名。不要创建第二个项目或服务同时使用同一资料目录，也不需要为软件改名而移动已有资料目录。
 
 如果升级后的数据库结构发生变化，回退时恢复升级前的完整资料备份，并使用对应旧镜像版本。
 

@@ -1,7 +1,7 @@
 # 源码构建专用：docker compose -f compose.build.yaml up -d --build
 # 服务名、挂载与正式拉取版保持一致，方便保留已有资料。
 services:
-  sumi-reader:
+  gravelle:
     build:
       context: .
       args:
@@ -11,6 +11,9 @@ services:
     user: "${PUID:-1000}:${PGID:-1000}"
     ports:
       - "${WEB_PORT:-8080}:8080"
+      # 可选：取消注释并重新创建容器，再在网页开启独立分享端口。
+      # 左侧宿主机端口可改；右侧容器端口固定为 8081。
+      # - "${SHARE_WEB_PORT:-8081}:8081"
     environment:
       LIBRARY_PATH: /library
       DATA_PATH: /data

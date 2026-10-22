@@ -17,15 +17,15 @@
 - Windows／macOS：启动器中的“关闭安全入口”会先停止它自己启动的阅读器，再备份资料并关闭安全入口。完成后可重新启动，从普通地址进入并重新设置。
 - Docker：先停止容器，再通过同一部署配置运行离线维护命令。该命令使用原资料挂载和运行用户，不启动阅读器、扫描媒体或重置账号密码。
 
-以本项目 Compose 文件中 `sumi-reader` 服务为例：
+以默认 Compose 服务 `gravelle` 为例：
 
 ```sh
-docker compose stop sumi-reader
-docker compose run --rm --no-deps sumi-reader python server.py --reset-security-entry --data /data
-docker compose up -d sumi-reader
+docker compose stop gravelle
+docker compose run --rm --no-deps gravelle python server.py --reset-security-entry --data /data
+docker compose up -d gravelle
 ```
 
-如果你的服务名是 `gravelle`，将命令中的 `sumi-reader` 换成 `gravelle`。恢复前保存部署配置与完整资料备份；不要手工删除数据库、密钥或资料目录锁文件，也不要同时启动两个服务打开同一资料目录。
+如果你自行修改过 Compose 服务名，请在上述命令中使用实际服务名。恢复前保存部署配置与完整资料备份；不要手工删除数据库、密钥或资料目录锁文件，也不要同时启动两个服务打开同一资料目录。
 
 ## 独立分享端口
 

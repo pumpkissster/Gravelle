@@ -1,5 +1,5 @@
 services:
-  sumi-reader:
+  gravelle:
     # 正式发布后填写 Docker Hub 完整镜像名与版本；未配置时明确停止。
     image: "${GRAVELLE_IMAGE:?请在 .env 中设置已发布的 GRAVELLE_IMAGE 镜像地址}"
     restart: unless-stopped

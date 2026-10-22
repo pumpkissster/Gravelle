@@ -57,9 +57,9 @@ python password_reset.py --data /path/to/gravelle-data
 Docker 需先停止正常服务容器，再使用同一数据卷运行一次性工具。采用本项目默认 Compose 服务名和数据路径时：
 
 ```sh
-docker compose stop sumi-reader
-docker compose run --rm -it --no-deps --entrypoint python sumi-reader /app/password_reset.py --data /data
-docker compose up -d sumi-reader
+docker compose stop gravelle
+docker compose run --rm -it --no-deps --entrypoint python gravelle /app/password_reset.py --data /data
+docker compose up -d gravelle
 ```
 
 Windows 安装版也支持在终端运行：
