@@ -51,6 +51,7 @@ INDEX_WORKER_IDLE = 10
 INDEX_WORKER_RECYCLE_RSS = 512 * MIB
 INDEX_PROTOCOL = 1
 INDEX_MAX_REQUEST = 16 * 1024
+AVATAR_TIMEOUT_SECONDS = 15
 
 
 class _UnsupportedImage(ValueError):
@@ -375,6 +376,7 @@ def worker_main(argv=None):
     parser.add_argument("--preview", action="store_true")
     parser.add_argument("--match", action="store_true")
     parser.add_argument("--serve-index", action="store_true")
+    parser.add_argument("--avatar-crop", action="store_true")
     args = parser.parse_args(argv)
     try:
         from transcoding import _restrict_worker, _lower_background_priority
@@ -384,6 +386,13 @@ def worker_main(argv=None):
         if args.source or args.serve_index:
             _lower_background_priority()
         limit_handle = _restrict_worker(MEMORY_MB * MIB)
+        if args.avatar_crop:
+            if not args.stdin or args.source or args.preview or args.match or args.serve_index:
+                raise ValueError("头像任务输入无效。")
+            from avatar_face_crop import MAX_INPUT_BYTES, crop_payload
+            result = crop_payload(sys.stdin.buffer.read(MAX_INPUT_BYTES + 1))
+            print(json.dumps(result, separators=(",", ":")))
+            return 0
         if args.serve_index and (args.stdin or args.source or args.preview or args.match):
             raise ValueError("索引进程参数无效。")
         if args.match:
@@ -1187,12 +1196,29 @@ class ImageSearchManager:
                     raise self._error("图片识别进程失败或内存不足，请重试。", 422) from error
                 raise
 
-    def _decode(self, data=None, *, source_path=None, preview=False, generation=None, reusable=False):
+    def avatar_preview(self, covers):
+        """Foreground avatar work shares decoder capacity, independently of indexing."""
+        from avatar_face_crop import MAX_COVERS, MAX_COVER_BYTES, MAX_INPUT_BYTES
+        if (not isinstance(covers, list) or not 1 <= len(covers) <= MAX_COVERS
+                or any(not isinstance(cover, bytes) or not 0 < len(cover) <= MAX_COVER_BYTES for cover in covers)):
+            raise self._error("头像封面输入无效。", 422)
+        payload = json.dumps({"covers": [base64.b64encode(cover).decode("ascii") for cover in covers]},
+                             separators=(",", ":")).encode("ascii")
+        if len(payload) > MAX_INPUT_BYTES:
+            raise self._error("头像任务超过安全上限。", 422)
+        result = self._decode(payload, avatar=True)
+        if not 0 <= result["index"] < len(covers):
+            raise self._error("头像生成结果无效。", 422)
+        return result
+
+    def _decode(self, data=None, *, source_path=None, preview=False, generation=None, reusable=False, avatar=False):
         query = data is not None
         active = False
         def cancelled():
             if self.stop_event.is_set() or self.library.stop_event.is_set():
                 return True
+            if avatar:
+                return False
             if not query:
                 return not self._current(generation)
             with closing(self.library.connect()) as connection:
@@ -1210,14 +1236,15 @@ class ImageSearchManager:
                     active = True
                 if query:
                     self._stop_index_worker()  # Free the idle batch before a foreground query.
-                return self._decode_exclusive(data, source_path=source_path, preview=preview, generation=generation, reusable=reusable)
+                return self._decode_exclusive(data, source_path=source_path, preview=preview, generation=generation,
+                                              reusable=reusable, avatar=avatar)
         finally:
             with self.decoder_condition:
                 if active:
                     self.decoder_active = False
                 self.decoder_condition.notify_all()
 
-    def _decode_exclusive(self, data=None, *, source_path=None, preview=False, generation=None, matching=False, reusable=False):
+    def _decode_exclusive(self, data=None, *, source_path=None, preview=False, generation=None, matching=False, reusable=False, avatar=False):
         if reusable and source_path is not None and data is None and generation is not None and not matching:
             return self._decode_reusable_index(source_path, preview, generation)
         prefix = [sys.executable, "--image-search-worker"] if getattr(sys, "frozen", False) else [sys.executable, str(Path(__file__).resolve()), "--worker"]
@@ -1226,6 +1253,8 @@ class ImageSearchManager:
             command.append("--preview")
         if matching:
             command.append("--match")
+        if avatar:
+            command.append("--avatar-crop")
         flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         # stdout is small bounded metadata. stderr is discarded, never logged
         # with private paths, upload bytes or decoder-dependent exceptions.
@@ -1243,11 +1272,11 @@ class ImageSearchManager:
         try:
             if data is not None:
                 try:
-                    output, _ = process.communicate(data, timeout=TIMEOUT_SECONDS)
+                    output, _ = process.communicate(data, timeout=AVATAR_TIMEOUT_SECONDS if avatar else TIMEOUT_SECONDS)
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.communicate()
-                    raise self._error("图片识别超时，请缩小图片后重试。", 422)
+                    raise self._error("头像生成超时，请稍后重试。" if avatar else "图片识别超时，请缩小图片后重试。", 422)
             else:
                 # SELECT checks do not retain a transaction across polls, so
                 # pause/clear remain visible without reconnecting at 10 Hz.
@@ -1269,6 +1298,8 @@ class ImageSearchManager:
                             continue
                     else:
                         output, _ = process.communicate()
+            if avatar:
+                return self._parse_avatar_result(output, returncode=process.returncode)
             return self._parse_worker_result(output, preview=preview, matching=matching, returncode=process.returncode)
         finally:
             if process.poll() is None:
@@ -1279,6 +1310,36 @@ class ImageSearchManager:
                     pipe.close()
             with self.lock:
                 self.processes.discard(process)
+
+    def _parse_avatar_result(self, output, *, returncode=0):
+        from avatar_face_crop import AVATAR_SIDE, MAX_AVATAR_BYTES, MAX_COVERS
+        from transcoding import _worker_exit_message
+        resource_error = _worker_exit_message(returncode)
+        if resource_error:
+            raise self._error(resource_error, 422)
+        try:
+            if not isinstance(output, bytes) or len(output) > MAX_AVATAR_BYTES * 2:
+                raise ValueError
+            result = json.loads(output)
+            if not isinstance(result, dict) or type(result.get("ok")) is not bool:
+                raise ValueError
+            if returncode or not result["ok"]:
+                message = result.get("error")
+                raise self._error(message[:300] if isinstance(message, str) else "头像生成失败，请重试。", 422)
+            if (set(result) != {"ok", "avatar", "index", "face_found"}
+                    or type(result["index"]) is not int or not 0 <= result["index"] < MAX_COVERS
+                    or type(result["face_found"]) is not bool or not isinstance(result["avatar"], str)):
+                raise ValueError
+            avatar = base64.b64decode(result["avatar"], validate=True)
+            if not 0 < len(avatar) <= MAX_AVATAR_BYTES:
+                raise ValueError
+            # Header-only verification keeps native image inference in the child.
+            with Image.open(BytesIO(avatar)) as image:
+                if image.format != "JPEG" or image.size != (AVATAR_SIDE, AVATAR_SIDE):
+                    raise ValueError
+            return {"avatar": avatar, "index": result["index"], "face_found": result["face_found"]}
+        except (ValueError, TypeError, OSError, UnicodeError):
+            raise self._error("头像生成结果无效。", 422) from None
 
     def _parse_worker_result(self, output, *, preview=False, matching=False, returncode=0, strict=False):
         from transcoding import _worker_exit_message

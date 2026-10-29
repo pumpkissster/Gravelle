@@ -30,10 +30,10 @@ class LibraryCoverTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.media = self.root / "media"
         self.media.mkdir()
-        for index in range(6):
+        for index in range(8):
             directory = self.media / f"book-{index}"
             directory.mkdir()
-            image = Image.new("RGB", (160, 240), (20 + index * 35, 50, 180 - index * 25))
+            image = Image.new("RGB", (160, 240), (20 + index * 30, 50, 180 - index * 20))
             image.save(directory / "1.jpg", "JPEG")
             image.transpose(Image.Transpose.ROTATE_180).save(directory / "2.jpg", "JPEG")
         self.hashes = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in self.media.rglob("*.jpg")}
@@ -90,7 +90,7 @@ class LibraryCoverTests(unittest.TestCase):
         self.assertEqual(self.record()["selection"], original["selection"])
         self.assertEqual(self.record()["generation"], original["generation"])
 
-    def test_shuffle_above_four_always_changes_group(self):
+    def test_shuffle_with_eight_books_replaces_the_entire_group(self):
         self.ready()
         for _ in range(10):
             before = set(json.loads(self.record()["selection"]))
@@ -98,9 +98,39 @@ class LibraryCoverTests(unittest.TestCase):
             after = json.loads(self.record()["selection"])
             self.assertEqual(len(after), 4)
             self.assertEqual(len(set(after)), 4)
-            self.assertNotEqual(set(after), before)
+            self.assertTrue(set(after).isdisjoint(before))
             self.ready()
         self.assertEqual(len(self.manager.cache_entries()), 1)
+
+    def test_shuffle_with_five_to_seven_books_uses_every_fresh_candidate_first(self):
+        with closing(self.app.connect()) as connection:
+            ids = [row[0] for row in connection.execute("SELECT id FROM books ORDER BY id")]
+        for count in (5, 6, 7):
+            with self.subTest(count=count):
+                with closing(self.app.connect()) as connection, connection:
+                    connection.execute("UPDATE books SET active=0")
+                    connection.executemany("UPDATE books SET active=1 WHERE id=?", [(value,) for value in ids[:count]])
+                self.manager.metadata(self.library_id)
+                before = set(json.loads(self.record()["selection"]))
+                self.manager.shuffle(self.library_id)
+                after = json.loads(self.record()["selection"])
+                self.assertEqual(len(after), 4)
+                self.assertEqual(len(set(after)), 4)
+                self.assertEqual(set(after) - before, set(ids[:count]) - before)
+                self.assertEqual(len(set(after) & before), 8 - count)
+
+    def test_shuffle_with_four_books_changes_layout_even_when_random_order_repeats(self):
+        self.manager.metadata(self.library_id)
+        before = json.loads(self.record()["selection"])
+        with closing(self.app.connect()) as connection, connection:
+            connection.execute("UPDATE books SET active=0")
+            connection.executemany("UPDATE books SET active=1 WHERE id=?", [(value,) for value in before])
+        with patch.object(self.manager.random, "sample", side_effect=lambda population, count: before[:count]), \
+                patch.object(self.manager.random, "shuffle", return_value=None):
+            self.manager.shuffle(self.library_id)
+        after = json.loads(self.record()["selection"])
+        self.assertEqual(set(after), set(before))
+        self.assertNotEqual(after, before)
 
     def test_zero_one_and_three_candidates_never_duplicate_fill(self):
         with closing(self.app.connect()) as connection, connection:

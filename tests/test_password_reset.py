@@ -9,6 +9,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import Mock, patch
 
@@ -230,28 +231,53 @@ class DataDirectoryLockTests(unittest.TestCase):
                 pass
 
     def test_other_process_and_crash_release_lock_without_deleting_file(self):
-        with tempfile.TemporaryDirectory() as folder:
-            data = Path(folder)
+        temporary = tempfile.TemporaryDirectory()
+        process = None
+        try:
+            data = Path(temporary.name)
             script = "from pathlib import Path; import sys; from password_reset import DataDirectoryLock; lock=DataDirectoryLock(Path(sys.argv[1])); assert lock.acquire(); print('locked',flush=True); sys.stdin.read()"
             process = subprocess.Popen([sys.executable, "-u", "-c", script, str(data)],
                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                        text=True, cwd=Path(__file__).resolve().parents[1])
-            self.addCleanup(lambda: process.poll() is None and process.kill())
-            try:
-                self.assertEqual(process.stdout.readline().strip(), "locked")
-                with self.assertRaisesRegex(PasswordResetError, "先停止服务"):
-                    with DataDirectoryLock(data):
-                        self.fail("must not acquire a lock held by another process")
-                process.kill()
-                process.wait(timeout=5)
+            self.assertEqual(process.stdout.readline().strip(), "locked")
+            with self.assertRaisesRegex(PasswordResetError, "先停止服务"):
                 with DataDirectoryLock(data):
-                    pass
-            finally:
+                    self.fail("must not acquire a lock held by another process")
+            process.kill()
+            process.wait(timeout=5)
+            # Windows may finish releasing the killed process's byte lock
+            # shortly after wait() signals completion. It must become free.
+            deadline = time.monotonic() + 2
+            while True:
+                try:
+                    with DataDirectoryLock(data):
+                        pass
+                    break
+                except PasswordResetError:
+                    if (os.name != 'nt' or process.poll() is None
+                            or time.monotonic() >= deadline):
+                        raise
+                    time.sleep(0.025)
+        finally:
+            if process is not None:
                 if process.poll() is None:
                     process.kill()
                     process.wait(timeout=5)
                 for stream in (process.stdin, process.stdout, process.stderr):
                     stream.close()
+            # A killed Windows process can briefly retain a file handle after
+            # wait() returns. Keep every lock assertion above unchanged.
+            deadline = time.monotonic() + 2
+            while True:
+                try:
+                    temporary.cleanup()
+                    break
+                except PermissionError as error:
+                    if (os.name != 'nt' or getattr(error, 'winerror', None) != 32
+                            or process is None or process.poll() is None
+                            or time.monotonic() >= deadline):
+                        raise
+                    time.sleep(0.025)
 
 
 class ServiceLockIntegrationTests(unittest.TestCase):

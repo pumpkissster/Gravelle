@@ -335,7 +335,7 @@ def network_settings_smoke(client: Client, url: str, config: LauncherConfig,
             'Frozen separate-port share did not serve the complete reader shell')
     # The exact dependencies of share.html are intentionally checked instead of
     # importing SHARE_STATIC: a stale policy must fail this independent probe.
-    for route, marker in (('/styles.css', b'.reader'), ('/reader-model.js', b'SumiReaderModel'),
+    for route, marker in (('/styles.css', b'.reader'), ('/reader-model.js', b'GravelleReaderModel'),
                           ('/share-reader.css', b'.share-reader'),
                           ('/share-reader.js', b'GravelleShareReader'),
                           ('/share-crypto.js', b'GravelleShareCrypto'),

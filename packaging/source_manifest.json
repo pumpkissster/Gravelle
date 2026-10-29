@@ -1,5 +1,7 @@
 [
-  "server.py", "accounts.py", "password_reset.py", "network_settings.py", "transcoding.py", "image_search.py", "image_search_features.py", "task_scheduler.py", "library_covers.py", "cache_manager.py", "epub_reader.py", "pdf_reader.py", "release.json", "requirements.txt", "README.md", "LICENSE",
+  "server.py", "accounts.py", "password_reset.py", "network_settings.py", "transcoding.py", "image_search.py", "image_search_features.py", "avatar_face_crop.py", "task_scheduler.py", "library_covers.py", "cache_manager.py", "epub_reader.py", "pdf_reader.py", "release.json", "requirements.txt", "README.md", "LICENSE",
+  "models/yunet/face_detection_yunet_2023mar.onnx", "models/yunet/LICENSE", "models/yunet/provenance.json", "models/yunet/README.md",
+  "tests/test_avatar_face_crop.py", "tests/test_avatar_face_worker.py", "tests/test_avatar_face_packaging.py", "tests/test_model_avatar_regeneration.py", "tests/test_model_avatar_ui.js", "static/board-skin.css", "tests/test_interface_skin.js", "static/vendor/remixicon-LICENSE.txt", "static/vendor/remixicon-provenance.json",
   "Dockerfile", "compose.yaml", "compose.build.yaml", "compose.optimization.yaml", ".env.example", ".dockerignore", ".gitignore", ".gitattributes",
   ".github/workflows/release.yml",
   ".github/workflows/macos-build.yml",
@@ -39,5 +41,6 @@
   "tests/test_multiuser.py", "tests/test_multiuser_security.py", "tests/test_password_reset.py", "tests/test_multi_roots.py", "tests/test_batch_models.py", "tests/test_transcoding.py", "tests/test_transcoding_security.py", "tests/test_transcoding_colour.py", "tests/test_transcoding_migration.py", "tests/test_image_search.py", "tests/test_image_search_api.py", "tests/test_task_scheduler.py", "tests/test_shared_tasks.py", "tests/test_performance_api.py",
   "tests/test_image_search_crops.py", "tests/test_image_search_catalogue.py", "tests/test_image_search_activity.py", "tests/test_image_search_page_io.py", "tests/test_image_search_png_metadata.py",
   "tests/test_reader_model.js", "tests/test_performance_settings.js", "tests/test_reader_end.js", "tests/test_avatar_ui.js", "tests/test_user_management.js", "tests/test_batch_selection.js", "tests/test_page_router.js", "tests/test_transcoding_ui.js", "tests/test_image_search_ui.js",
+  "docs/releases/0.9.2.md",
   "tests/test_release_assets.py", "tests/test_release_workflow.py", "packaging/source_manifest.json", "packaging/package_source.py", "packaging/check_docker_context.py", "packaging/smoke_image_workers.py"
 ]

@@ -4,7 +4,11 @@ This distribution includes Python, Tcl/Tk and Pillow so users do not need to ins
 
 Local screenshot and crop matching uses NumPy (BSD-3-Clause), OpenCV (Apache-2.0) and the opencv-python-headless packaging scripts (MIT). Package license files, including notices for components shipped by these wheels, are included in `licenses` and the bundled runtime directories. Matching runs locally on the CPU; no model download or GPU runtime is included.
 
+Model-avatar generation additionally uses the bundled YuNet face detector (MIT), copyright (c) 2020 Shiqi Yu. The unchanged model, complete upstream license, and pinned provenance are included under `_internal/models/yunet/`. It runs locally on the CPU only for avatar cropping; it is not used for image-search indexing and is never downloaded at runtime.
+
 The Libre Caslon Text font includes its SIL Open Font License at `_internal/static/fonts/OFL.txt`. Gravelle's own license is in `LICENSE`.
+
+The optional Board interface skin uses selected Remix Icon 4.9.0 icons as functional UI elements, copyright (c) 2017–2026 Remix Design, under the Remix Icon License v1.0. The complete license and pinned source record are included in `static/vendor/remixicon-LICENSE.txt` and `static/vendor/remixicon-provenance.json` (under `_internal/` in the Windows bundle). These icons remain under their upstream license; Gravelle's own logo and application icon are separate assets. The skin's CSS is independently implemented from BoardUI's public design guidance.
 
 PDF reading uses pypdfium2 5.14.0 (Apache-2.0 or BSD-3-Clause) and its bundled PDFium renderer. The complete PDFium license and the notices of all components shipped with that wheel, including the libjpeg-turbo IJG license, are preserved under `licenses/pypdfium2/`. Rendering runs locally without downloading a model or executing PDF JavaScript.
 

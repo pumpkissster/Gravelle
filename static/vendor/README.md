@@ -16,3 +16,9 @@ python packaging/build_share_crypto.py --esbuild /path/to/esbuild
 The build checks the input hashes and exact output hash. Source modules remain in the source export; Docker and desktop apps only need the committed bundle and its notice. The esbuild tool is build-only and is not redistributed with Gravelle.
 
 `share-crypto.js` uses browser WebCrypto when available. On HTTP LAN addresses where WebCrypto is unavailable it uses this local library. That supports the same authenticated envelope; it does not make HTTP resistant to interception or modification. Noble has a public audit history, which does not mean the complete 2.4.0 release or this application integration was audited.
+
+## Interface icons
+
+The optional Board skin embeds a small selection of functional icons from [Remix Icon 4.9.0](https://github.com/Remix-Design/RemixIcon/tree/v4.9.0) into `index.html`. They are served locally with the application, without a font, CDN, React dependency, or runtime download. Original Gravelle symbols remain available for the classic skin.
+
+Remix Icon uses the **Remix Icon License v1.0**, not the application's MIT license. The complete upstream notice is preserved in `remixicon-LICENSE.txt`; the pinned source, selected icon mappings and hashes are recorded in `remixicon-provenance.json`. These assets are functional UI elements and are not used for Gravelle's logo or application icon.

@@ -1,7 +1,7 @@
 /* Shared catalogue order and intentional end-of-book boundaries. */
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) module.exports = factory();
-  else root.SumiReaderEnd = factory();
+  else root.GravelleReaderEnd = factory();
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
   const collator = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' });

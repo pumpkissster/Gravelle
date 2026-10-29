@@ -6,9 +6,9 @@
   const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
   const collator = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' });
   const defaultPrefs = { fit: 'height', theme: 'dark' };
-  const Model = window.SumiReaderModel;
-  const End = window.SumiReaderEnd;
-  const Performance = window.SumiPerformance;
+  const Model = window.GravelleReaderModel;
+  const End = window.GravelleReaderEnd;
+  const Performance = window.GravellePerformance;
   const Avatars = window.GravelleAvatars;
   const Users = window.GravelleUsers;
   const Batch = window.GravelleBatchSelection;
@@ -73,17 +73,9 @@
     if (!allowed) toast('当前账号没有此操作的权限。');
     return allowed;
   }
-  function stored(name) {
-    if (!activeUser) return null;
-    try {
-      const key = Users.storageKey(name, activeUser);
-      let value = localStorage.getItem(key);
-      if (value === null && Users.isAdmin(activeUser) && Number(activeUser.id) === 1) {
-        value = localStorage.getItem(name);
-        if (value !== null) localStorage.setItem(key, value);
-      }
-      return value;
-    } catch (_) { return null; }
+  function stored(name, legacyName) {
+    try { return Users.readPreference(localStorage, name, activeUser, legacyName); }
+    catch (_) { return null; }
   }
   function storePreference(name, value) {
     try { if (activeUser) localStorage.setItem(Users.storageKey(name, activeUser), value); } catch (_) { /* Optional device preference. */ }
@@ -121,33 +113,57 @@
     state.prefs = { mode: 'single', direction: 'ltr', ...readPrefs() };
     librarySorts.clear(); readLibrarySorts().forEach((value, key) => librarySorts.set(key, value));
     applyInterfaceTheme(interfaceTheme());
+    applyInterfaceSkin(interfaceSkin());
     Performance.setUser(activeUser);
     catalogPaging.signature = ''; chapterPaging.signature = ''; renderedLibraryData = '';
   }
 
   function readLibrarySorts() {
     try {
-      const saved = JSON.parse(stored('sumi-library-sorts') || '{}');
+      const saved = JSON.parse(stored('library-sorts', 'sumi-library-sorts') || '{}');
       return new Map(Object.entries(saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : {}).map(([id, sort]) => [id, End.normalizeSort(sort)]));
     } catch (_) { return new Map(); }
   }
   function librarySort(id) { return librarySorts.get(String(id)) || 'added'; }
   function saveLibrarySort(id, sort) {
     librarySorts.set(String(id), End.normalizeSort(sort));
-    storePreference('sumi-library-sorts', JSON.stringify(Object.fromEntries(librarySorts)));
+    storePreference('library-sorts', JSON.stringify(Object.fromEntries(librarySorts)));
   }
 
   function interfaceTheme() {
-    try { return stored('sumi-interface-theme') === 'light' ? 'light' : 'dark'; }
+    try { return stored('interface-theme', 'sumi-interface-theme') === 'light' ? 'light' : 'dark'; }
     catch (_) { return 'dark'; }
   }
   function applyInterfaceTheme(theme) {
     const value = theme === 'light' ? 'light' : 'dark';
     document.documentElement.dataset.interfaceTheme = value;
-    document.querySelector('meta[name="theme-color"]')?.setAttribute('content', value === 'light' ? '#fcf8fa' : '#19161a');
-    storePreference('sumi-interface-theme', value);
+    updateInterfaceThemeColor();
+    storePreference('interface-theme', value);
+  }
+  function interfaceSkin() {
+    return stored('interface-skin') === 'board' ? 'board' : 'classic';
+  }
+  function updateInterfaceThemeColor() {
+    const light = document.documentElement.dataset.interfaceTheme === 'light';
+    const board = document.documentElement.dataset.interfaceSkin === 'board';
+    document.querySelector('meta[name="theme-color"]')?.setAttribute('content', board ? light ? '#f7f7f7' : '#121212' : light ? '#fcf8fa' : '#19161a');
+  }
+  function syncInterfaceSkinPicker(value = document.documentElement.dataset.interfaceSkin) {
+    const skin = value === 'board' ? 'board' : 'classic';
+    $$('#interface-skin-picker input[name="interface-skin"]').forEach(input => {
+      input.checked = input.value === skin;
+      input.closest('.skin-option')?.classList.toggle('is-selected', input.checked);
+    });
+  }
+  function applyInterfaceSkin(skin) {
+    const value = skin === 'board' ? 'board' : 'classic';
+    document.documentElement.dataset.interfaceSkin = value;
+    storePreference('interface-skin', value);
+    syncInterfaceSkinPicker(value);
+    updateInterfaceThemeColor();
   }
   applyInterfaceTheme(interfaceTheme());
+  applyInterfaceSkin(interfaceSkin());
 
   function node(tag, className, content) {
     const element = document.createElement(tag);
@@ -176,7 +192,7 @@
 
   function readPrefs() {
     let saved = {};
-    try { saved = JSON.parse(stored('sumi-preferences') || '{}') || {}; } catch (_) { /* Storage may be disabled. */ }
+    try { saved = JSON.parse(stored('preferences', 'sumi-preferences') || '{}') || {}; } catch (_) { /* Storage may be disabled. */ }
     const prefs = { ...defaultPrefs };
     Object.keys(defaultPrefs).forEach(key => { if (allowedPrefs[key].includes(saved[key])) prefs[key] = saved[key]; });
     return prefs;
@@ -185,7 +201,7 @@
   function savePref(key, value) {
     if (!allowedPrefs[key]?.includes(value)) return;
     state.prefs[key] = value;
-    storePreference('sumi-preferences', JSON.stringify(Object.fromEntries(Object.keys(defaultPrefs).map(key => [key, state.prefs[key]]))));
+    storePreference('preferences', JSON.stringify(Object.fromEntries(Object.keys(defaultPrefs).map(key => [key, state.prefs[key]]))));
   }
 
   class ApiError extends Error {
@@ -373,20 +389,24 @@
     avatarEdits[kind]?.controller.abort();
     avatarEdits[kind] = { controller: new AbortController(), data: null, reset: false, pending: false, invalid: false };
     $('#' + kind + '-avatar-upload').value = ''; $('#' + kind + '-save').disabled = false;
+    if (kind === 'model') { $('#model-avatar-status').hidden = true; $('#model-avatar-status').textContent = ''; syncModelAvatarRegenerate(); }
   }
   function beginAvatarEdit(kind, entity) {
     clearAvatarEdit(kind);
     const fallback = kind === 'model' && entity?.cover_book_id ? bookUrl(entity.cover_book_id) + '/cover' : '/default-avatar.png';
     avatarEdits[kind].fallback = fallback;
+    if (kind === 'model') avatarEdits[kind].sourceBook = entity?.avatar_url?.startsWith('/api/avatars/models/') ? null : entity?.cover_book_id || null;
     $('#' + kind + '-avatar-preview').src = Avatars.source(entity, fallback);
   }
   async function readAvatarEdit(kind, file) {
     const fallback = avatarEdits[kind]?.fallback || '/default-avatar.png';
     const previous = avatarEdits[kind];
     clearAvatarEdit(kind); const edit = avatarEdits[kind]; edit.fallback = fallback;
-    if (!file) { edit.data = previous?.data || null; edit.reset = previous?.reset || false; return; }
+    edit.sourceBook = previous?.sourceBook || null;
+    if (!file) { edit.data = previous?.data || null; edit.reset = previous?.reset || false; edit.invalid = previous?.invalid || false; $('#' + kind + '-save').disabled = edit.invalid || (kind === 'model' && modelMutationBusy); if (kind === 'model') syncModelAvatarRegenerate(); return; }
     const error = $('#' + kind + '-error'); error.hidden = true;
     edit.pending = true; $('#' + kind + '-save').disabled = true;
+    if (kind === 'model') syncModelAvatarRegenerate();
     try {
       edit.data = await Avatars.readFile(file, { signal: edit.controller.signal });
       if (avatarEdits[kind] !== edit) return;
@@ -395,7 +415,7 @@
       if (avatarEdits[kind] !== edit || failure.name === 'AbortError') return;
       edit.invalid = true; error.textContent = failure.message; error.hidden = false;
     } finally {
-      if (avatarEdits[kind] === edit) { edit.pending = false; $('#' + kind + '-save').disabled = edit.invalid || (kind === 'model' && modelMutationBusy); }
+      if (avatarEdits[kind] === edit) { edit.pending = false; $('#' + kind + '-save').disabled = edit.invalid || (kind === 'model' && modelMutationBusy); if (kind === 'model') syncModelAvatarRegenerate(); }
     }
   }
   function resetAvatarEdit(kind) {
@@ -408,6 +428,34 @@
     if (edit?.pending) throw new Error('正在读取头像，请稍后保存。');
     if (edit?.invalid) throw new Error('请选择有效头像，或恢复默认头像。');
     return edit?.data ? { avatar_upload: edit.data } : edit?.reset ? { avatar_reset: true } : {};
+  }
+  function syncModelAvatarRegenerate() {
+    const button = $('#model-avatar-regenerate');
+    const model = state.models.find(item => String(item.id) === String(state.editingModel));
+    button.hidden = !model;
+    button.disabled = modelMutationBusy || Boolean(avatarEdits.model?.pending) || !model?.book_count;
+    $('span', button).textContent = avatarEdits.model?.generating ? '正在生成…' : '重新生成头像';
+    button.title = model && !model.book_count ? '关联作品后可生成头像' : '';
+  }
+  async function regenerateModelAvatar() {
+    if (!requireAccess('manage_models') || modelMutationBusy || avatarEdits.model?.pending || !state.editingModel) return;
+    const id = state.editingModel, auth = authGeneration, previous = avatarEdits.model;
+    clearAvatarEdit('model'); const edit = avatarEdits.model;
+    Object.assign(edit, { fallback: previous?.fallback, data: previous?.data || null, reset: previous?.reset || false, invalid: previous?.invalid || false, sourceBook: previous?.sourceBook || null, pending: true, generating: true });
+    $('#model-save').disabled = true; $('#model-error').hidden = true; syncModelAvatarRegenerate();
+    $('#model-avatar-status').textContent = '正在查找合适的人脸并生成头像…'; $('#model-avatar-status').hidden = false;
+    try {
+      const result = await post('/api/models/' + encodeURIComponent(id) + '/avatar/regenerate', edit.sourceBook ? { exclude_book_id: edit.sourceBook } : {}, { signal: edit.controller.signal });
+      if (avatarEdits.model !== edit || auth !== authGeneration || state.editingModel !== id || !$('#model-dialog').open) return;
+      if (!/^data:image\/jpeg;base64,[A-Za-z0-9+/]+=*$/.test(result.avatar_upload || '')) throw new Error('无法生成头像，请重试。');
+      edit.data = result.avatar_upload; edit.reset = false; edit.invalid = false; edit.sourceBook = result.cover_book_id;
+      $('#model-avatar-preview').src = edit.data;
+      $('#model-avatar-status').textContent = result.crop_method === 'face' ? '已围绕人脸裁切，保存后生效。' : '未找到合适的人脸，已使用居中裁切。可以重新生成或上传头像。';
+    } catch (error) {
+      if (avatarEdits.model === edit && auth === authGeneration && error.name !== 'AbortError') { $('#model-error').textContent = error.message; $('#model-error').hidden = false; $('#model-avatar-status').hidden = true; }
+    } finally {
+      if (avatarEdits.model === edit) { edit.pending = false; edit.generating = false; $('#model-save').disabled = modelMutationBusy || edit.invalid; syncModelAvatarRegenerate(); }
+    }
   }
   function showProfileForm() {
     closeAccountMenu();
@@ -632,6 +680,11 @@
     const title = state.view === 'library' ? currentLibrary()?.name || '写真库' : state.view === 'model' ? currentModel()?.name || '模特作品' : state.view === 'settings' && state.settingsSection ? settingsSectionLabels[state.settingsSection] || '设置' : viewLabels[state.view];
     $('.library-heading').hidden = state.view === 'home';
     $('#library-title').textContent = title;
+    const model = state.view === 'model' ? currentModel() : null;
+    const portrait = $('#model-heading-avatar'); portrait.hidden = !model;
+    $('.library-heading').classList.toggle('is-model', Boolean(model));
+    const portraitKey = model ? JSON.stringify([model.id, model.avatar_url, model.cover_book_id]) : '';
+    if (portrait.dataset.source !== portraitKey) { portrait.replaceChildren(...(model ? [modelAvatar(model)] : [])); portrait.dataset.source = portraitKey; }
     const description = {
       libraries: `${state.libraries.length} 个写真库 · ${state.books.length} 本作品。`,
       library: `${typeLabels[currentLibrary()?.media_type] || '日漫'} · ${scopedBooks().length} 本作品`
@@ -639,6 +692,7 @@
     $('#heading-description').textContent = description; $('#heading-description').hidden = !description;
     $('#create-library').hidden = state.view !== 'libraries' || !isAdmin();
     $('#edit-library').hidden = state.view !== 'library' || !currentLibrary() || !isAdmin();
+    $('#edit-model').hidden = !model || !can('manage_models');
     $('#create-model').hidden = state.view !== 'models' || !can('manage_models');
   }
   function makeCover(book, containerClass, lazy = true) {
@@ -1014,7 +1068,7 @@
     const items = {};
     Object.entries(settingsSectionLabels).filter(([section]) => !['service', 'users', 'shares'].includes(section)).forEach(([section, title]) => {
       const entry = node('button', 'settings-menu-item'); entry.type = 'button'; entry.dataset.settingsSection = section;
-      const symbol = node('span', 'settings-menu-icon'); symbol.append(icon({ service: 'folder', users: 'person', interface: 'sun', performance: 'settings', reading: 'book', transcoding: 'refresh', 'image-search': 'search', cache: 'folder', network: 'settings' }[section]));
+      const symbol = node('span', 'settings-menu-icon'); symbol.append(icon({ service: 'folder', users: 'person', interface: 'sun', performance: 'performance', reading: 'book', transcoding: 'optimization', 'image-search': 'image-search', cache: 'cache', network: 'network', shares: 'share' }[section]));
       const content = node('span', 'settings-menu-content'); content.append(node('strong', '', title)); const detail = node('small'); content.append(detail); const badge = node('span', 'settings-menu-badge'); badge.hidden = true; entry.append(symbol, content, badge, icon('right')); entry.addEventListener('click', () => navigate('settings', { section })); index.append(entry); items[section] = { entry, detail, badge };
     });
     const transcode = node('section'); transcode.id = 'transcoding-settings'; transcode.hidden = true;
@@ -1034,7 +1088,7 @@
     settingsLayout.items.cache.entry.hidden = !isAdmin();
     settingsLayout.items.network.entry.hidden = !isAdmin();
     renderOptimizationReminders();
-    const subtitles = { service: '版本、连接与访问地址', users: state.session?.user?.username || '当前账户与子账户', interface: interfaceTheme() === 'light' ? '亮色主题' : '暗色主题', performance: '加载、缓存与列表', reading: '图片适配与阅读背景', transcoding: '规则、作品与后台任务', 'image-search': '图片索引与后台任务', cache: '空间占用与缓存清理', network: '安全入口、独立分享端口与公网地址' };
+    const subtitles = { service: '版本、连接与访问地址', users: state.session?.user?.username || '当前账户与子账户', interface: (document.documentElement.dataset.interfaceSkin === 'board' ? 'Board' : '经典') + ' · ' + (interfaceTheme() === 'light' ? '亮色主题' : '暗色主题'), performance: '加载、缓存与列表', reading: '图片适配与阅读背景', transcoding: '规则、作品与后台任务', 'image-search': '图片索引与后台任务', cache: '空间占用与缓存清理', network: '安全入口、独立分享端口与公网地址' };
     Object.entries(settingsLayout.items).forEach(([key, value]) => { value.detail.textContent = subtitles[key]; });
     $('#subaccounts-setting').hidden = !isAdmin();
     renderSubaccountSummary();
@@ -1043,9 +1097,10 @@
     $('#settings-connection').textContent = state.libraryError ? '连接异常 · ' + state.libraryError : '已连接';
     $('#settings-connection').classList.toggle('connection-error', Boolean(state.libraryError));
     $('#interface-theme').value = interfaceTheme();
+    syncInterfaceSkinPicker();
     renderAccount();
     if (!section) loadSettingsAccess();
-    if (section === 'performance') window.SumiPerformance?.render();
+    if (section === 'performance') window.GravellePerformance?.render();
     if (section === 'transcoding' && isAdmin()) transcodingUI.show(state.settingsTab); else transcodingUI.hide();
     imageSearchSettings.hidden = section !== 'image-search' || !isAdmin();
     if (section === 'image-search' && isAdmin()) imageSearchUI.showSettings(); else imageSearchUI.hideSettings();
@@ -1327,7 +1382,16 @@
     if (!state.session?.authenticated) { try { state.session = await api('/api/session'); if (!state.session.authenticated) { showLogin(); return; } showLibrary(); } catch (error) { if (error.status !== 401) { state.libraryError = error.message; renderNotice(); } return; } } await refreshLibrary();
   }
   function renderLibraryNavigation() {
-    $('#library-nav').replaceChildren(...state.libraries.map(library => { const button = node('button', 'library-nav-item'); button.type = 'button'; button.append(node('span', 'library-type-dot', typeLabels[library.media_type] === '写真' ? '◈' : '▤'), node('span', '', library.name)); button.classList.toggle('active', state.view === 'library' && String(library.id) === String(state.libraryId)); if (button.classList.contains('active')) button.setAttribute('aria-current', 'page'); button.addEventListener('click', () => selectLibrary(library.id)); return button; }));
+    $('#library-nav').replaceChildren(...state.libraries.map(library => {
+      const button = node('button', 'library-nav-item'); button.type = 'button';
+      const marker = node('span', 'library-type-dot'); marker.setAttribute('aria-hidden', 'true');
+      marker.append(node('span', 'classic-icon-text', typeLabels[library.media_type] === '写真' ? '◈' : '▤'));
+      const boardMarker = icon(library.media_type === 'photo' ? 'grid' : 'book'); boardMarker.classList.add('board-icon-only'); marker.append(boardMarker);
+      button.append(marker, node('span', '', library.name));
+      button.classList.toggle('active', state.view === 'library' && String(library.id) === String(state.libraryId));
+      if (button.classList.contains('active')) button.setAttribute('aria-current', 'page');
+      button.addEventListener('click', () => selectLibrary(library.id)); return button;
+    }));
   }
   function selectLibrary(id) { navigate('library', { libraryId: id }); }
   let libraryBrowseInput = null;
@@ -1589,8 +1653,9 @@
     modelMutationBusy = busy;
     ['model-name', 'model-avatar-upload', 'model-avatar-reset', 'model-remove', 'model-close'].forEach(id => { $('#' + id).disabled = busy; });
     $('#model-save').disabled = busy || Boolean(avatarEdits.model?.pending || avatarEdits.model?.invalid);
+    syncModelAvatarRegenerate();
   }
-  function showModelForm(model = null) { if (!requireAccess('manage_models') || modelMutationBusy) return; beginAvatarEdit('model', model); setModelMutationBusy(false); state.editingModel = model?.id || null; $('#model-dialog-title').textContent = model ? '编辑模特' : '新建模特'; $('#model-name').value = model?.name || ''; $('#model-remove').hidden = !model; $('#model-error').hidden = true; $('#model-dialog').showModal(); $('#model-name').focus(); }
+  function showModelForm(model = null) { if (!requireAccess('manage_models') || modelMutationBusy) return; state.editingModel = model?.id || null; beginAvatarEdit('model', model); setModelMutationBusy(false); $('#model-dialog-title').textContent = model ? '编辑模特' : '新建模特'; $('#model-name').value = model?.name || ''; $('#model-remove').hidden = !model; $('#model-error').hidden = true; $('#model-dialog').showModal(); $('#model-name').focus(); }
   function showBookmarkForm() { if (!reader.book || reader.loadedPage === null) { toast('请等当前图片加载完成。'); return; } state.bookmarkTarget = { bookId: reader.book.id, page: reader.index }; $('#bookmark-page-label').textContent = `《${reader.book.title}》 · 第 ${reader.index + 1} 页`; $('#bookmark-note').value = ''; $('#bookmark-error').hidden = true; $('#bookmark-dialog').showModal(); $('#bookmark-note').focus(); }
 
   function readerMessage(message, type = 'info', actionLabel, action) {
@@ -2607,6 +2672,9 @@
   $('#optimization-notice-view').addEventListener('click', () => { $('#optimization-notice-dialog').close(); if (isAdmin()) navigate('settings', { section: 'transcoding' }); });
   document.addEventListener('close', () => { if (optimizationNotice.waiting.size) setTimeout(maybeShowOptimizationNotice, 0); }, true);
   $('#interface-theme').addEventListener('change', event => applyInterfaceTheme(event.target.value));
+  $('#interface-skin-picker').addEventListener('change', event => {
+    if (event.target.matches('input[name="interface-skin"]') && event.target.checked) applyInterfaceSkin(event.target.value);
+  });
   $('#check-updates').addEventListener('click', checkUpdates);
   $('#manage-users').addEventListener('click', showUsersList);
   ['users-close', 'users-done'].forEach(id => $('#' + id).addEventListener('click', () => { if (!userManagement.busy) $('#users-dialog').close(); }));
@@ -2725,6 +2793,8 @@
     $('#' + kind + '-avatar-reset').addEventListener('click', () => resetAvatarEdit(kind));
   });
   $('#model-dialog').addEventListener('close', () => clearAvatarEdit('model'));
+  $('#model-avatar-regenerate').addEventListener('click', regenerateModelAvatar);
+  $('#edit-model').addEventListener('click', () => showModelForm(currentModel()));
   $('#edit-library').addEventListener('click', () => showLibraryForm(currentLibrary()));
   $$('#side-nav [data-view]').forEach(button => button.addEventListener('click', () => navigate(button.dataset.view)));
   $('#nav-toggle').addEventListener('click', () => {
@@ -2768,7 +2838,7 @@
       optimizationNotice.tracker.expectScan();
       if (state.refreshPromise) await state.refreshPromise;
       state.libraryId = String(result.library.id); state.query = ''; state.series = ''; $('#search').value = '';
-      storePreference('sumi-library', state.libraryId);
+      storePreference('library', state.libraryId);
       $('#library-dialog').close();
       resetSelection(); state.view = 'library'; state.sort = librarySort(state.libraryId); $('#sort').value = state.sort; state.loading = true; syncViewRoute(); await refreshLibrary();
       toast(state.editingLibrary ? '写真库设置已保存，正在重新扫描。' : '写真库已创建，正在整理你的作品。');
@@ -3065,7 +3135,7 @@
       if (reader.open && !Performance.get().chapterPageSize) renderChapters();
     }, 180);
   });
-  window.addEventListener('sumi-performance-change', () => {
+  window.addEventListener('gravelle-performance-change', () => {
     catalogPaging.signature = ''; chapterPaging.signature = '';
     if (state.session?.authenticated && state.view !== 'settings') renderLibrary();
     if (reader.open && reader.book) {

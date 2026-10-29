@@ -19,16 +19,46 @@ test('performance settings migrate legacy preferences only for the original admi
   try {
     Performance.setUser({ id: 2, role: 'user' }); assert.deepEqual(Performance.get(), defaults);
     Performance.update({ bookPageSize: 12 });
-    assert.equal(JSON.parse(records.get('gravelle-user-2-sumi-performance')).bookPageSize, 12);
+    assert.equal(JSON.parse(records.get('gravelle-user-2-performance')).bookPageSize, 12);
     Performance.setUser({ id: 1, role: 'admin' }); assert.equal(Performance.get().bookPageSize, 25); assert.equal(Performance.get().imageCacheLimit, 8);
     Performance.update({ bookPageSize: 30 });
     Performance.setUser({ id: 2, role: 'user' }); assert.equal(Performance.get().bookPageSize, 12); assert.equal(Performance.get().imageCacheLimit, 0);
     Performance.setUser(null); assert.deepEqual(Performance.get(), defaults);
     Performance.update({ bookPageSize: 99 });
-    assert.equal(records.has('gravelle-user-signed-out-sumi-performance'), false);
+    assert.equal(records.has('gravelle-user-signed-out-performance'), false);
     Performance.setUser({ id: 1, role: 'admin' }); assert.equal(Performance.get().bookPageSize, 30);
     records.set('gravelle-user-3-sumi-performance', '{broken'); Performance.setUser({ id: 3, role: 'user' }); assert.deepEqual(Performance.get(), defaults);
   } finally { Performance.setUser(null); global.localStorage = previousStorage; }
+});
+
+test('performance branding migration retains existing child settings and prefers values already saved with the current brand', () => {
+  const previousStorage = global.localStorage;
+  const legacy = JSON.stringify({ ...defaults, coverConcurrency: 7, bookPageSize: 42 });
+  const records = new Map([['gravelle-user-2-sumi-performance', legacy]]);
+  global.localStorage = { getItem: key => records.get(key) ?? null, setItem: (key, value) => records.set(key, value) };
+  try {
+    Performance.setUser({ id: 2, role: 'user' });
+    assert.equal(Performance.get().coverConcurrency, 7);
+    assert.equal(Performance.get().bookPageSize, 42);
+    assert.equal(records.get('gravelle-user-2-performance'), legacy);
+    Performance.update({ bookPageSize: 18 });
+    Performance.setUser({ id: 3, role: 'user' }); assert.deepEqual(Performance.get(), defaults);
+    Performance.setUser({ id: 2, role: 'user' }); assert.equal(Performance.get().bookPageSize, 18);
+    assert.equal(records.get('gravelle-user-2-sumi-performance'), legacy);
+  } finally { Performance.setUser(null); global.localStorage = previousStorage; }
+});
+
+test('browser modules expose Gravelle globals and notify current performance listeners', () => {
+  const fs = require('node:fs'), vm = require('node:vm'); const events = [];
+  const browser = { AbortController, CustomEvent: class { constructor(type, options) { this.type = type; this.detail = options.detail; } }, dispatchEvent: event => events.push(event) };
+  browser.window = browser; vm.createContext(browser);
+  for (const file of ['reader-model.js', 'reader-end.js', 'user-management.js', 'performance-settings.js']) vm.runInContext(fs.readFileSync(require.resolve('../static/' + file), 'utf8'), browser, { filename: file });
+  assert.equal(typeof browser.GravelleReaderModel.createWheelPager, 'function');
+  assert.equal(browser.GravelleReaderEnd.normalizeSort('added'), 'added');
+  assert.equal(typeof browser.GravellePerformance.createCache, 'function');
+  assert.equal(Object.keys(browser).some(name => name.startsWith('Sumi')), false);
+  browser.GravellePerformance.update({ bookPageSize: 17 });
+  assert.equal(events.length, 1); assert.equal(events[0].type, 'gravelle-performance-change'); assert.equal(events[0].detail.bookPageSize, 17);
 });
 
 test('valid number input saves immediately, keeps the same controls, and rejects empty or invalid edits', () => {
@@ -110,7 +140,7 @@ test('administrator task controls load once, preserve unfinished edits, save exp
   assert.equal(input.value, 5); assert.equal(save.disabled, false);
   assert.equal(fixture.find(item => item.className === 'performance-server-status').textContent, '已保存');
   Performance.update({ bookPageSize: 12 });
-  assert.equal(JSON.parse(records.get('gravelle-user-1-sumi-performance')).bookPageSize, 12);
+  assert.equal(JSON.parse(records.get('gravelle-user-1-performance')).bookPageSize, 12);
   assert.equal(Object.hasOwn(Performance.get(), 'taskConcurrency'), false);
   for (const value of records.values()) assert.equal(Object.hasOwn(JSON.parse(value), 'taskConcurrency'), false);
 }));

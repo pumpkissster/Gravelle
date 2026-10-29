@@ -1,4 +1,4 @@
-.network-settings-page, .network-settings-form { display: flex; flex-direction: column; gap: 20px; }
+.network-settings-page, .network-settings-form { display: flex; flex-direction: column; gap: 20px; width: 100%; min-width: 0; }
 .network-card.settings-panel { margin: 0; }
 .network-card h2 { margin-bottom: 22px; }
 .network-toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 24px; cursor: pointer; }

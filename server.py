@@ -57,7 +57,7 @@ from sharing import SharingManager
 from network_settings import (NetworkSettings, ENTRY_COOKIE, ENTRY_SECONDS,
                               SHARE_STATIC, SHARE_PAGE, SHARE_GET, SHARE_POST)
 
-VERSION = "0.9.1"
+VERSION = "0.9.2"
 MEDIA_TYPES = {"manga_jp", "manga_kr", "comic_us", "photo"}
 IMAGE_TYPES = {
     ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
@@ -109,6 +109,7 @@ STATIC_FILES = {
     "/cache-management-ui.js": "cache-management-ui.js",
     "/network-settings-ui.js": "network-settings-ui.js",
     "/network-settings-ui.css": "network-settings-ui.css",
+    "/board-skin.css": "board-skin.css",
     "/fonts/LibreCaslonText.ttf": "fonts/LibreCaslonText.ttf",
 }
 LOG = logging.getLogger("sumi")
@@ -2373,6 +2374,84 @@ class Library:
         models.sort(key=lambda model: natural_key(model["name"]))
         return {"models": models}
 
+    def regenerate_model_avatar(self, model_id, body):
+        """Return a small draft avatar; saving the model is a separate action."""
+        from avatar_face_crop import MAX_COVERS, MAX_COVER_BYTES, MAX_AVATAR_BYTES
+        with self.avatar_lock, closing(self.connect()) as connection:
+            model = self._model_access(connection, model_id, editing=True)
+            self.require_permission("manage_models", connection)
+            if not isinstance(body, dict) or set(body) - {"exclude_book_id"}:
+                raise ReaderError("重新生成头像只接受上一次选择的作品编号。")
+            excluded = body.get("exclude_book_id")
+            if excluded is not None and (not isinstance(excluded, str)
+                                         or not re.fullmatch(r"[a-f0-9]{24}", excluded)):
+                raise ReaderError("头像来源的作品编号无效。")
+            access, arguments = self._access_sql(connection)
+            eligible = f'''SELECT b.id FROM book_models bm JOIN books b ON b.id=bm.book_id
+                WHERE bm.model_id=? AND b.active=1 AND b.removed=0 AND {access}'''
+            candidates = [row["id"] for row in connection.execute(
+                eligible + " ORDER BY b.id", [model_id, *arguments])]
+            if not candidates:
+                raise ReaderError("此模特还没有可用于生成头像的已入库作品。", 422)
+            avoided = excluded or (candidates[0] if not model["avatar_file"] else None)
+            choices = [book_id for book_id in candidates if book_id != avoided] or candidates
+            secrets.SystemRandom().shuffle(choices)
+
+        # Avatar reads/saves remain available while the isolated CPU worker is
+        # running or waiting for a shared task slot. Only bounded cached covers
+        # enter the detector; neither originals nor arbitrary paths are passed.
+        covers, sources = [], []
+        last_error = None
+        for book_id in choices[:MAX_COVERS]:
+            try:
+                data, mime, _ = self.cover(book_id)
+                if mime != "image/jpeg" or not data or len(data) > MAX_COVER_BYTES:
+                    raise ReaderError("作品封面无效，请重新生成作品封面。", 422)
+                with Image.open(BytesIO(data)) as image:
+                    if image.format != "JPEG" or not (0 < image.width <= 400 and 0 < image.height <= 600):
+                        raise ReaderError("作品封面尺寸无效，请重新生成作品封面。", 422)
+                covers.append(data)
+                sources.append(book_id)
+            except ReaderError as error:
+                if error.status in (401, 403):
+                    raise
+                last_error = error
+            except (UnidentifiedImageError, OSError, ValueError, SyntaxError) as error:
+                last_error = error
+        while covers:
+            result = self.image_search.avatar_preview(covers)
+            if (not isinstance(result, dict) or type(result.get("index")) is not int
+                    or not 0 <= result["index"] < len(covers)
+                    or type(result.get("face_found")) is not bool
+                    or not isinstance(result.get("avatar"), bytes)
+                    or not 0 < len(result["avatar"]) <= MAX_AVATAR_BYTES):
+                raise ReaderError("头像生成结果无效，请重试。", 422)
+            avatar, index = result["avatar"], result["index"]
+            try:
+                with Image.open(BytesIO(avatar)) as image:
+                    if image.format != "JPEG" or image.size != (256, 256):
+                        raise ValueError("Invalid avatar dimensions")
+                    image.load()
+            except (UnidentifiedImageError, OSError, ValueError, SyntaxError) as error:
+                raise ReaderError("头像生成结果无效，请重试。", 422) from error
+            book_id = sources[index]
+            with self.avatar_lock, closing(self.connect()) as connection:
+                self._model_access(connection, model_id, editing=True)
+                self.require_permission("manage_models", connection)
+                access, arguments = self._access_sql(connection)
+                valid = connection.execute(f'''SELECT 1 FROM book_models bm JOIN books b ON b.id=bm.book_id
+                    WHERE bm.model_id=? AND b.id=? AND b.active=1 AND b.removed=0 AND {access}''',
+                    [model_id, book_id, *arguments]).fetchone()
+            if not valid:
+                # The chosen work may have been removed while processing. Drop
+                # it and try the remaining bounded batch, never expose its draft.
+                covers.pop(index)
+                sources.pop(index)
+                continue
+            return {"avatar_upload": "data:image/jpeg;base64," + base64.b64encode(avatar).decode("ascii"),
+                    "cover_book_id": book_id, "crop_method": "face" if result["face_found"] else "center"}
+        raise ReaderError("暂时无法从关联作品封面生成头像，请检查作品封面后重试。", 422) from last_error
+
     def save_model(self, body, model_id=None):
         with self.avatar_lock, closing(self.connect()) as connection, connection:
             if model_id is not None:
@@ -3705,6 +3784,12 @@ class ReaderHandler(BaseHTTPRequestHandler):
         if path == "/api/models":
             payload, status = self.library.save_model(body)
             self.respond(payload, status)
+            return
+        match = re.fullmatch(r"/api/models/([a-f0-9]{24})/avatar/regenerate", path)
+        if match:
+            if request.query:
+                raise ReaderError("重新生成模特头像不接受查询参数。")
+            self.respond(self.library.regenerate_model_avatar(match[1], body))
             return
         match = re.fullmatch(r"/api/models/([a-f0-9]{24})/remove", path)
         if match:

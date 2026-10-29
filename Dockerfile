@@ -45,6 +45,8 @@ RUN python -m pip install --no-cache-dir -r requirements.txt \
     && python -c "from cryptography.hazmat.primitives.ciphers.aead import AESGCM; c=AESGCM(bytes(32)); assert c.decrypt(bytes(12),c.encrypt(bytes(12),b'build-only',b''),b'')==b'build-only'"
 
 COPY server.py accounts.py password_reset.py network_settings.py transcoding.py image_search.py image_search_features.py task_scheduler.py library_covers.py cache_manager.py sharing.py share_crypto.py share_passwords.py epub_reader.py pdf_reader.py ./
+COPY avatar_face_crop.py ./
+COPY models/yunet ./models/yunet
 COPY desktop/licenses/OpenSSL-4.0.2-LICENSE.txt ./licenses/cryptography/OpenSSL-4.0.2-LICENSE.txt
 COPY release.json LICENSE ./
 COPY static ./static

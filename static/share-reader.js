@@ -1,6 +1,6 @@
 /* Anonymous transport, shared reader model and appearance. No account state is loaded. */
 ((root, factory) => {
-  const api = factory(typeof module === 'object' && module.exports ? require('./reader-model.js') : root.SumiReaderModel);
+  const api = factory(typeof module === 'object' && module.exports ? require('./reader-model.js') : root.GravelleReaderModel);
   if (typeof module === 'object' && module.exports) module.exports = api;
   else { root.GravelleShareReader = api; if (root.document) api.create({ window: root, document: root.document }).start(); }
 })(typeof window === 'undefined' ? globalThis : window, Model => {

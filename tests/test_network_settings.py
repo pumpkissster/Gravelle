@@ -114,7 +114,7 @@ class NetworkHTTPTests(unittest.TestCase):
         self.assertEqual(status, 200, value)
         self.assertIn("HttpOnly", headers["Set-Cookie"])
         self.assertIn("SameSite=Strict", headers["Set-Cookie"])
-        for path in ("/", "/index.html", "/app.js", "/api/session", "/api/library", "/api/network-settings"):
+        for path in ("/", "/index.html", "/app.js", "/board-skin.css", "/api/session", "/api/library", "/api/network-settings"):
             with self.subTest(path=path):
                 self.assertEqual(self.request(path, cookie=self.admin)[0], 404)
         self.assertEqual(self.request("/api/login", {"username": "network-admin", "password": "network-test-password"})[0], 404)
@@ -129,6 +129,10 @@ class NetworkHTTPTests(unittest.TestCase):
         self.assertEqual(self.request("/api/library", cookie=entry)[0], 401)
         self.assertEqual(self.request("/api/library", cookie=entry + "; " + self.admin)[0], 200)
         self.assertEqual(self.request("/app.js", cookie=entry)[0], 200)
+        status, stylesheet, stylesheet_headers = self.request("/board-skin.css", cookie=entry)
+        self.assertEqual(status, 200)
+        self.assertIn(b'data-interface-skin', stylesheet)
+        self.assertTrue(stylesheet_headers["Content-Type"].startswith("text/css"))
         for path in ("//secret_Entry-123", "/%73ecret_Entry-123", "/secret_Entry-123/", "/secret_Entry-123?x=1"):
             self.assertEqual(self.request(path)[0], 404)
 
@@ -171,7 +175,7 @@ class NetworkHTTPTests(unittest.TestCase):
             self.assertEqual(self.request(path + "?x=1", port=self.share_port)[0], 404, path)
             self.assertEqual(self.request("/%" + format(ord(path[1]), "02x") + path[2:], port=self.share_port)[0], 404, path)
         for path in ("/", "/index.html", "/app.js", "/api/session", "/api/library", "/api/health", "/api/network-settings",
-                     "/network-settings-ui.js", "/reader-end.js", "/reader-end.css", "/page-router.js",
+                     "/network-settings-ui.js", "/reader-end.js", "/reader-end.css", "/page-router.js", "/board-skin.css",
                      "/share-reader.js?x=1", "/%73hare-reader.js", "//share-reader.js", "/share/../index.html"):
             self.assertEqual(self.request(path, port=self.share_port, cookie=self.admin)[0], 404, path)
         for method in ("OPTIONS", "PUT", "DELETE", "PATCH", "TRACE", "CONNECT"):

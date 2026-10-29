@@ -8,6 +8,21 @@
   const isAdmin = user => user?.role === 'admin' && user.enabled !== false;
   const can = user => isAdmin(user);
   const storageKey = (name, user) => `gravelle-user-${encodeURIComponent(String(user?.id ?? 'signed-out'))}-${name}`;
+  function readPreference(storage, name, user, legacyName) {
+    if (!user) return null;
+    const key = storageKey(name, user);
+    let value = null;
+    try {
+      value = storage.getItem(key);
+      if (value !== null) return value;
+      if (value === null && legacyName) value = storage.getItem(storageKey(legacyName, user));
+      if (value === null && legacyName && isAdmin(user) && Number(user.id) === 1) value = storage.getItem(legacyName);
+    } catch (_) { return null; }
+    // Keep historical records intact for older clients. Failed migration writes
+    // must not discard an otherwise readable preference (for example at quota).
+    if (value !== null) { try { storage.setItem(key, value); } catch (_) { /* Applies to this visit. */ } }
+    return value;
+  }
   const canManage = user => Boolean(user && user.role === 'user' && Number(user.id) !== 1);
   function payload(values, { creating = false, libraries = [] } = {}) {
     const fail = (message, field) => { const error = new Error(message); error.field = field; throw error; };
@@ -57,5 +72,5 @@
       return { profileSaved, visibilitySaved };
     } catch (error) { error.profileSaved = profileSaved; error.visibilitySaved = visibilitySaved; throw error; }
   }
-  return { isAdmin, can, storageKey, canManage, payload, visibilityPayload, readingDirection, profilePayload, saveChanges };
+  return { isAdmin, can, storageKey, readPreference, canManage, payload, visibilityPayload, readingDirection, profilePayload, saveChanges };
 });

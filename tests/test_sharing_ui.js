@@ -27,13 +27,13 @@ class Element {
   close() { this.open = false; }
 }
 function nodesIn(node) { return [node, ...node.children.flatMap(nodesIn)]; }
-function fixture({ locked = false, responder, decode, storage = new Map() } = {}) {
+function fixture({ locked = false, responder, decode, storage = new Map(), readerApi = Reader } = {}) {
   const nodes = new Map(); const body = new Element('body'); const doc = { body, hidden: false, title: '', activeElement: null, handlers: new Map(), createElement(name) { const node = new Element(name); node.ownerDocument = doc; return node; }, createElementNS: (namespace, name) => new Element(name), getElementById(id) { if (!nodes.has(id)) { const node = this.createElement(id.includes('form') ? 'form' : id.includes('password') || id.includes('number') ? 'input' : 'div'); node.id = id; nodes.set(id, node); } return nodes.get(id); }, addEventListener(type, callback) { this.handlers.set(type, callback); } };
   const requests = [], decryption = [], created = [], revoked = [], written = [], timers = new Map(), timerDelays = new Map(); let timerIndex = 0;
   const win = { innerWidth: 1200, innerHeight: 800, location: { pathname: '/share/' + token, href: 'http://192.168.1.2:7878/share/' + token }, navigator: {}, AbortController, Blob, URL: { createObjectURL(blob) { const url = 'blob:private-' + (created.length + 1); created.push({ url, blob }); return url; }, revokeObjectURL(url) { revoked.push(url); } }, sessionStorage: { getItem(name) { return storage.get(name) ?? null; }, setItem(name, value) { storage.set(name, value); written.push({ name, value }); }, removeItem(name) { storage.delete(name); } }, setInterval(fn) { timers.set(++timerIndex, fn); return timerIndex; }, clearInterval(id) { timers.delete(id); }, setTimeout(fn, delay) { timers.set(++timerIndex, fn); timerDelays.set(timerIndex, delay); return timerIndex; }, clearTimeout(id) { timers.delete(id); timerDelays.delete(id); }, addEventListener(type, callback) { this[type] = callback; } };
   const fetch = async (url, options) => { requests.push({ url, options }); if (responder) { const result = await responder(url, options); if (result) return result; } if (url.endsWith('/manifest')) return locked ? response({}, 401) : response(access); if (url.endsWith('/unlock')) return response(access); if (url.endsWith('/logout')) return response({ logged_out: true }); if (/\/pages\/\d+$/.test(url)) return response({}); return response({ status: 'active', requires_password: true }); };
   const crypto = { async decrypt(packet, secret, aad) { decryption.push({ packet, secret, aad }); return decode ? decode(packet, secret, aad) : { data: Uint8Array.of(255, 216, 255), mime: 'image/jpeg' }; } };
-  const reader = Reader.create({ document: doc, window: win, fetch, crypto });
+  const reader = readerApi.create({ document: doc, window: win, fetch, crypto });
   return { reader, doc, win, nodes, requests, decryption, created, revoked, written, timers, timerDelays, get: id => doc.getElementById(id) };
 }
 
@@ -73,6 +73,23 @@ test('anonymous path and manifest validation reject lookalike routes and unsuppo
   assert.equal(Reader.validManifest({ ...access, manifest: { ...access.manifest, page_count: 0 } }), false);
   assert.equal(Reader.validManifest({ ...access, manifest: { ...access.manifest, format: 'epub' } }), true);
   assert.equal(Reader.validManifest({ ...access, manifest: { ...access.manifest, format: 'unknown' } }), false);
+});
+
+test('browser share reader consumes the Gravelle model global for navigation without CommonJS aliases', async () => {
+  const vm = require('node:vm'); const browser = {};
+  browser.window = browser; vm.createContext(browser);
+  for (const file of ['reader-model.js', 'share-reader.js']) vm.runInContext(fs.readFileSync(require.resolve('../static/' + file), 'utf8'), browser, { filename: file });
+  assert.equal(typeof browser.GravelleShareReader.create, 'function');
+  assert.equal(Object.keys(browser).some(name => name.startsWith('Sumi')), false);
+  const f = fixture({ readerApi: browser.GravelleShareReader });
+  try {
+    await f.reader.start(); await tick();
+    assert.equal(f.get('share-reader').hidden, false);
+    assert.equal(f.get('share-page-number').value, 1);
+    f.get('share-next').emit('click'); await tick();
+    assert.equal(f.get('share-page-number').value, 2);
+    assert.ok(f.requests.some(item => item.url.endsWith('/pages/1')));
+  } finally { f.reader.reset(); }
 });
 
 test('anonymous reader unlocks without an account and binds ciphertext to this share and exact page', async () => {

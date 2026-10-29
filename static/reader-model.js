@@ -2,7 +2,7 @@
 (function (root, factory) {
   const model = factory();
   if (typeof module === 'object' && module.exports) module.exports = model;
-  else root.SumiReaderModel = model;
+  else root.GravelleReaderModel = model;
 }(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
   function buildSpreads(pages, options = {}) {

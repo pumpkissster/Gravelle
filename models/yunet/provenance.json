@@ -1,0 +1,17 @@
+{
+  "name": "YuNet face detector",
+  "file": "face_detection_yunet_2023mar.onnx",
+  "repository": "https://github.com/opencv/opencv_zoo",
+  "commit": "f12e12798e8314f7c074a6656816c048dcc95b7a",
+  "upstream_path": "models/face_detection_yunet/face_detection_yunet_2023mar.onnx",
+  "source_url": "https://media.githubusercontent.com/media/opencv/opencv_zoo/f12e12798e8314f7c074a6656816c048dcc95b7a/models/face_detection_yunet/face_detection_yunet_2023mar.onnx",
+  "pointer_url": "https://raw.githubusercontent.com/opencv/opencv_zoo/f12e12798e8314f7c074a6656816c048dcc95b7a/models/face_detection_yunet/face_detection_yunet_2023mar.onnx",
+  "sha256": "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4",
+  "size_bytes": 232589,
+  "license": "MIT",
+  "license_url": "https://raw.githubusercontent.com/opencv/opencv_zoo/f12e12798e8314f7c074a6656816c048dcc95b7a/models/face_detection_yunet/LICENSE",
+  "license_sha256": "c83b8120c50ccbd4c4f96edf53141bdd566ebb8f8e9227e415326aa1b1aba958",
+  "modifications": "None. Upstream model and license bytes are unchanged.",
+  "purpose": "Local CPU face detection for model-avatar cropping only.",
+  "runtime_downloads": false
+}

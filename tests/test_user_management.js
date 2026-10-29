@@ -75,6 +75,36 @@ test('device preference storage remains independent of usernames, logout and oth
   assert.notEqual(Users.storageKey('preferences', child), Users.storageKey('performance', child));
 });
 
+test('brand preference migration preserves each account and only the original administrator may inherit unscoped records', () => {
+  const records = new Map([
+    ['sumi-preferences', 'first-account-legacy'],
+    ['gravelle-user-2-sumi-preferences', 'child-legacy'],
+    ['gravelle-user-3-sumi-preferences', 'older-setting'],
+    ['gravelle-user-3-preferences', 'current-setting']
+  ]);
+  const storage = { getItem: key => records.get(key) ?? null, setItem: (key, value) => records.set(key, value) };
+  assert.equal(Users.readPreference(storage, 'preferences', null, 'sumi-preferences'), null);
+  assert.equal(Users.readPreference(storage, 'preferences', { id: 4, role: 'user' }, 'sumi-preferences'), null);
+  assert.equal(Users.readPreference(storage, 'preferences', { id: 5, role: 'admin' }, 'sumi-preferences'), null);
+  assert.equal(Users.readPreference(storage, 'preferences', { id: 1, role: 'user' }, 'sumi-preferences'), null);
+  assert.equal(Users.readPreference(storage, 'preferences', { id: 1, role: 'admin', enabled: false }, 'sumi-preferences'), null);
+  assert.equal(Users.readPreference(storage, 'preferences', { id: 1, role: 'admin' }, 'sumi-preferences'), 'first-account-legacy');
+  assert.equal(records.get('gravelle-user-1-preferences'), 'first-account-legacy');
+  assert.equal(Users.readPreference(storage, 'preferences', { id: 2, role: 'user' }, 'sumi-preferences'), 'child-legacy');
+  assert.equal(records.get('gravelle-user-2-preferences'), 'child-legacy');
+  assert.equal(Users.readPreference(storage, 'preferences', { id: 3, role: 'user' }, 'sumi-preferences'), 'current-setting');
+  assert.equal(records.get('gravelle-user-3-sumi-preferences'), 'older-setting');
+  assert.equal(records.get('sumi-preferences'), 'first-account-legacy');
+  assert.equal(records.has('gravelle-user-signed-out-preferences'), false);
+});
+
+test('preference migration keeps readable settings when storage writes fail and degrades safely when reads fail', () => {
+  const user = { id: 2, role: 'user' };
+  const storage = { getItem: key => key === 'gravelle-user-2-sumi-interface-theme' ? 'light' : null, setItem() { throw new Error('QuotaExceededError'); } };
+  assert.equal(Users.readPreference(storage, 'interface-theme', user, 'sumi-interface-theme'), 'light');
+  assert.equal(Users.readPreference({ getItem() { throw new Error('SecurityError'); } }, 'interface-theme', user, 'sumi-interface-theme'), null);
+});
+
 test('reader direction honors the current user preference and effective book direction before library defaults', () => {
   assert.equal(Users.readingDirection({ reading_preferences: { reading_direction: 'rtl' }, reading_direction: 'ltr' }, { reading_direction: 'ltr' }), 'rtl');
   assert.equal(Users.readingDirection({ reading_preferences: { reading_direction: null }, reading_direction: 'rtl' }, { reading_direction: 'ltr' }), 'rtl');

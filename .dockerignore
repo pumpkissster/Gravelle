@@ -7,6 +7,7 @@
 !transcoding.py
 !image_search.py
 !image_search_features.py
+!avatar_face_crop.py
 !task_scheduler.py
 !library_covers.py
 !cache_manager.py
@@ -21,5 +22,11 @@
 !requirements.txt
 !release.json
 !LICENSE
+!models/
+!models/yunet/
+!models/yunet/face_detection_yunet_2023mar.onnx
+!models/yunet/LICENSE
+!models/yunet/provenance.json
+!models/yunet/README.md
 !static/
 !static/**

@@ -141,14 +141,20 @@ class LibraryCoverManager:
         old = json.loads(row["selection"]) if row else []
         selected = [item for item in old if item in candidates][:4]
         count = min(4, len(candidates))
-        if shuffle and len(candidates) > 4:
-            # Replace at least one member rather than gambling on repeated draws.
-            replacements = [item for item in candidates if item not in selected]
-            if selected and replacements:
-                selected[self.random.randrange(len(selected))] = self.random.choice(replacements)
-                self.random.shuffle(selected)
-        elif shuffle:
+        if shuffle:
+            # Refresh the group, not just one panel: use as many books outside
+            # the previous montage as possible before reusing any of its books.
+            fresh = [item for item in candidates if item not in selected]
+            previous = selected
+            selected = self.random.sample(fresh, min(count, len(fresh)))
+            if len(selected) < count:
+                selected.extend(self.random.sample(previous, count - len(selected)))
             self.random.shuffle(selected)
+            # Small libraries cannot replace every member. Still make an
+            # explicit shuffle visibly change the layout when more than one
+            # book exists, even if the random draw kept the same order.
+            if len(selected) > 1 and selected == old:
+                selected = selected[1:] + selected[:1]
         available = [item for item in candidates if item not in selected]
         if len(selected) < count:
             selected.extend(self.random.sample(available, count - len(selected)))

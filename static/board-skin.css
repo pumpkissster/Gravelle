@@ -1,0 +1,874 @@
+@charset "UTF-8";
+/* Gravelle's optional Board skin. Independently authored from BoardUI's public
+   visual language: neutral surfaces, inset navigation and soft edged controls.
+   All collection styles are opt-in; the reader keeps its own display theme.
+   Metrics follow BoardUI's public free component tokens (2026-10-23,
+   source ec5c5eb3e29c2441be63b9422cd54f411ef23466):
+   14/20 body, 13/18 secondary, 12/16 caption; 36px regular controls;
+   8/10/12px control radii and 20/24px inset panels. Touch controls stay 40px.
+   Component surfaces and states checked through BoardUI MCP 0.5.8 on
+   2026-10-26, mapped to the existing native controls and pink accent. */
+
+/* These inherited variables also reach SVG <use> instance trees. */
+.classic-icon { display: var(--classic-icon-display, inline); }
+.board-icon { display: var(--board-icon-display, none); fill: currentColor; stroke: none; }
+.board-icon > * { fill: currentColor; stroke: none; }
+.classic-icon-text { display: var(--classic-icon-display, inline); }
+.board-icon-only { display: var(--board-icon-display, none); width: 20px; height: 20px; }
+
+/* Skin choices remain usable while the original skin is selected. */
+.skin-picker {
+  display: block;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  margin: 20px 0 8px;
+}
+.skin-picker > legend { padding: 0; font-size: 14px; font-weight: 600; }
+.skin-picker > .settings-intro { margin: 8px 0 16px; }
+.skin-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.skin-option {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--paper);
+  color: var(--ink);
+  cursor: pointer;
+  transition: border-color .15s, box-shadow .15s;
+}
+.skin-option:has(input:checked) {
+  border-color: var(--text-accent, var(--accent));
+  box-shadow: 0 0 0 1px var(--text-accent, var(--accent));
+}
+.skin-option:has(input:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+}
+.skin-option > input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: 0;
+  opacity: 0;
+}
+.skin-option-content { display: block; padding-right: 28px; }
+.skin-option-check {
+  position: absolute;
+  right: 12px;
+  bottom: 20px;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--surface);
+  color: transparent;
+}
+.skin-option-check svg { width: 12px; height: 12px; stroke-width: 2; }
+.skin-option:has(input:checked) .skin-option-check { background: var(--accent); border-color: var(--accent); color: #fff; }
+.skin-preview-sidebar > i {
+  display: block;
+  height: 5px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--muted) 30%, transparent);
+}
+.skin-preview {
+  display: flex;
+  gap: 10px;
+  height: 104px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper);
+  overflow: hidden;
+  pointer-events: none;
+}
+.skin-preview-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 0 0 26%;
+  padding: 9px 6px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--ink) 6%, var(--paper));
+}
+.skin-preview-sidebar > i:first-child { background: var(--accent); }
+.skin-preview-main {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  gap: 10px;
+  padding-top: 4px;
+}
+.skin-preview-toolbar { width: 53%; height: 5px; border-radius: 3px; background: var(--muted); opacity: .35; }
+.skin-preview-cards {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+.skin-preview-cards > i {
+  height: 54px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--muted) 14%, var(--surface));
+}
+.skin-option[data-skin="board"] .skin-preview { background: var(--surface); }
+.skin-option[data-skin="board"] .skin-preview-sidebar {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  box-shadow: 0 2px 4px #0000000a;
+  border-radius: 8px;
+}
+.skin-option[data-skin="board"] .skin-preview-sidebar > i:first-child { height: 9px; }
+.skin-option[data-skin="board"] .skin-preview-cards > i { border-radius: 7px; }
+.skin-option strong { font-size: 13px; font-weight: 600; line-height: 1.5; }
+.skin-option small { display: block; color: var(--muted); font-size: 12px; line-height: 1.65; }
+
+html[data-interface-skin="board"] {
+  --classic-icon-display: none;
+  --board-icon-display: inline;
+  --paper: #121212;
+  --surface: #262626;
+  --ink: #f7f7f7;
+  --muted: #a3a3a3;
+  --line: #3d3d3d;
+  --accent: #c52d75;
+  --accent-dark: #ad2264;
+  --accent-soft: #392631;
+  --text-accent: #f18bbd;
+  --text-danger: #f2a0ad;
+  --text-warning: #e5b576;
+  --on-accent: #fff;
+  --board-raised: #303030;
+  --board-hover: #363636;
+  --board-input: #1f1f1f;
+  --board-select: var(--surface);
+  --board-border-hover: #737373;
+  --board-disabled: #1f1f1f;
+  --board-disabled-ink: #858585;
+  --board-primary-top: #cf3b83;
+  --board-primary-bottom: #b82469;
+  --board-shadow: 0 1px 1px #00000026;
+  --board-shadow-hover: 0 1px 1px #00000018, 0 4px 8px #00000024;
+  --board-shadow-sidebar: 0 1px 0 #00000005, 0 1px 12px #00000024, 0 0 1px #00000052;
+  --board-shadow-dialog: 0 24px 80px #00000066, 0 2px 10px #00000040;
+  --board-focus: #f18bbd;
+  --board-radius: 20px;
+  --board-control-height: 36px;
+  --settings-content-width: 1120px;
+  color-scheme: dark;
+  color: var(--ink);
+  background: var(--paper);
+  letter-spacing: 0;
+}
+html[data-interface-skin="board"][data-interface-theme="light"] {
+  --paper: #f7f7f7;
+  --surface: #fff;
+  --ink: #1a1a1a;
+  --muted: #6e6e6e;
+  --line: #e5e5e5;
+  --accent: #b9276a;
+  --accent-dark: #a41c5a;
+  --accent-soft: #fcecf3;
+  --text-accent: #a91c5c;
+  --text-danger: #ad3047;
+  --text-warning: #8a5917;
+  --on-accent: #fff;
+  --board-raised: #fff;
+  --board-hover: #f5f5f5;
+  --board-input: #e5e5e5;
+  --board-border-hover: #b8b8b8;
+  --board-disabled: #f7f7f7;
+  --board-disabled-ink: #999;
+  --board-primary-top: #c33175;
+  --board-primary-bottom: #ad205f;
+  --board-shadow: 0 1px 1px #0000000d;
+  --board-shadow-hover: 0 1px 1px #0000000a, 0 4px 8px #00000005;
+  --board-shadow-sidebar: 0 1px 0 #00000005, 0 1px 12px #0000000f, 0 0 1px #00000052;
+  --board-shadow-dialog: 0 24px 80px #1923352b, 0 2px 10px #1923350a;
+  --board-focus: #b9276a;
+  color-scheme: light;
+}
+html[data-interface-skin="board"] body { background: var(--paper); }
+html[data-interface-skin="board"] ::selection { background: var(--accent-soft); color: var(--text-accent); }
+html[data-interface-skin="board"] :is(#app, #login-screen, .settings-dialog, .sharing-dialog) { font-family: var(--sans); font-size: 14px; line-height: 20px; }
+
+/* Inset navigation and quiet main canvas. */
+html[data-interface-skin="board"] .app-shell { grid-template-columns: 272px minmax(0, 1fr); }
+html[data-interface-skin="board"] .sidebar {
+  top: 12px;
+  margin: 12px 0 12px 12px;
+  height: calc(100dvh - 24px);
+  padding: 24px 12px 16px;
+  border: 1px solid var(--line);
+  border-radius: 24px;
+  background: var(--surface);
+  box-shadow: var(--board-shadow-sidebar);
+  scrollbar-color: var(--line) transparent;
+  overflow: visible;
+}
+html[data-interface-skin="board"] .sidebar .brand { margin: 0 8px 32px; width: calc(100% - 16px); flex-shrink: 0; }
+html[data-interface-skin="board"] .sidebar .brand-wordmark { width: 155px; }
+html[data-interface-skin="board"] .main-nav { gap: 8px; flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+html[data-interface-skin="board"] #app .main-nav :is(button, a):focus-visible { outline-offset: -2px; }
+html[data-interface-skin="board"] #app .main-nav .nav-item.active:focus-visible { outline-color: var(--on-accent); outline-offset: -3px; }
+html[data-interface-skin="board"] #app .nav-item {
+  min-height: 40px;
+  padding: 9px 12px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 500;
+}
+html[data-interface-skin="board"] #app .nav-item svg { width: 20px; height: 20px; }
+html[data-interface-skin="board"] #app :is(.nav-item:hover, .library-nav-item:hover) { background: var(--board-hover); color: var(--ink); }
+html[data-interface-skin="board"] #app .nav-item.active {
+  background: linear-gradient(180deg, var(--board-primary-top), var(--board-primary-bottom));
+  border-color: var(--board-primary-bottom);
+  color: var(--on-accent);
+  box-shadow: inset 0 1px 0 #ffffff24, 0 1px 2px #00000010;
+  font-weight: 600;
+}
+html[data-interface-skin="board"] #app .nav-item.active :is(svg, small) { color: inherit; }
+html[data-interface-skin="board"] #app .nav-item small {
+  min-width: 20px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--board-hover);
+  color: var(--muted);
+  font: 600 12px/16px var(--sans);
+  text-align: center;
+  flex-shrink: 0;
+}
+html[data-interface-skin="board"] #app .nav-item.active small { background: color-mix(in srgb, var(--on-accent) 18%, transparent); color: var(--on-accent); }
+html[data-interface-skin="board"] .library-nav { margin: 0 0 8px 24px; padding-left: 12px; border-color: var(--line); }
+html[data-interface-skin="board"] #app .library-nav-item { min-height: 32px; padding: 7px 8px; border-radius: 8px; color: var(--muted); font-size: 13px; line-height: 18px; }
+html[data-interface-skin="board"] #app .library-nav-item.active { background: var(--accent-soft); color: var(--text-accent); }
+html[data-interface-skin="board"] #app .library-nav-item.active svg { color: inherit; }
+html[data-interface-skin="board"] #app .library-nav-item > .library-type-dot { color: inherit; }
+html[data-interface-skin="board"] #app .library-type-dot .board-icon-only { width: 14px; height: 14px; vertical-align: middle; }
+html[data-interface-skin="board"] .sidebar-user-area { padding-top: 24px; }
+html[data-interface-skin="board"] .sidebar-bottom.account-area { border-color: var(--line); padding-top: 12px; }
+html[data-interface-skin="board"] .account-toggle { border-radius: 10px; }
+html[data-interface-skin="board"] .account-toggle:hover { background: var(--board-hover); }
+html[data-interface-skin="board"] .account-menu { padding: 10px; border-radius: 16px; box-shadow: var(--board-shadow-hover); background: var(--board-raised); }
+html[data-interface-skin="board"] .account-menu button { min-height: var(--board-control-height); padding: 8px; gap: 8px; border-radius: 10px; font: 500 14px/20px var(--sans); }
+html[data-interface-skin="board"] .account-menu button + button { margin-top: 4px; }
+html[data-interface-skin="board"] .account-menu button:is(:hover, :focus-visible) { background: var(--board-hover); }
+html[data-interface-skin="board"] .main-content { max-width: 1880px; padding: 0 36px 36px; }
+html[data-interface-skin="board"] .library-heading { padding: 32px 0 28px; gap: 20px; }
+html[data-interface-skin="board"] .library-heading h1 { font: 600 24px/34px var(--sans); letter-spacing: -.4px; }
+html[data-interface-skin="board"] #app .heading-description { margin-top: 8px; font-size: 13px; line-height: 18px; color: var(--muted); }
+html[data-interface-skin="board"] .library-actions { gap: 8px; }
+html[data-interface-skin="board"] .model-heading-avatar { border: 3px solid var(--surface); box-shadow: 0 0 0 1px var(--line); }
+html[data-interface-skin="board"] .section-label { margin-bottom: 16px; }
+html[data-interface-skin="board"] :is(.section-label h2, #shelf-heading) { font: 600 18px/26px var(--sans); letter-spacing: -.25px; }
+html[data-interface-skin="board"] .shelf-tools { border-color: var(--line); gap: 16px; }
+html[data-interface-skin="board"] .shelf-meta { color: var(--muted); padding: 16px 0 20px; }
+
+/* Consistent controls, including dialogs mounted outside the app shell. */
+html[data-interface-skin="board"] :is(#app, #login-screen, .settings-dialog, .sharing-dialog) .button {
+  border-radius: 10px;
+  min-height: var(--board-control-height);
+  padding: 7px 12px;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 20px;
+  box-shadow: 0 1px 2px #00000006;
+  transition: background-color .15s, color .15s, border-color .15s, box-shadow .15s, transform .15s;
+}
+html[data-interface-skin="board"] :is(#app, #login-screen, .settings-dialog, .sharing-dialog) .button svg { width: 20px; height: 20px; flex: 0 0 20px; }
+html[data-interface-skin="board"] :is(#app, #login-screen, .settings-dialog, .sharing-dialog) .button-primary {
+  color: var(--on-accent);
+  background: linear-gradient(180deg, var(--board-primary-top), var(--board-primary-bottom));
+  border: 1px solid var(--board-primary-bottom);
+  box-shadow: inset 0 1px 0 #ffffff24, 0 1px 2px #00000012;
+}
+html[data-interface-skin="board"] :is(#app, #login-screen, .settings-dialog, .sharing-dialog) .button-primary:hover:not(:disabled) {
+  color: var(--on-accent);
+  background: var(--accent-dark);
+  border-color: var(--accent-dark);
+}
+html[data-interface-skin="board"] :is(#app, #login-screen, .settings-dialog, .sharing-dialog) .button-secondary {
+  color: var(--ink);
+  background: var(--board-raised);
+  border: 1px solid var(--line);
+  box-shadow: inset 0 1px 0 #ffffff06, 0 1px 2px #00000006;
+}
+html[data-interface-skin="board"] :is(#app, #login-screen, .settings-dialog, .sharing-dialog) .button-secondary:hover:not(:disabled) {
+  color: var(--ink);
+  border-color: var(--board-border-hover);
+  background: var(--board-hover);
+}
+html[data-interface-skin="board"] :is(#app, .settings-dialog, .sharing-dialog) .button-danger {
+  color: var(--text-danger);
+  background: color-mix(in srgb, var(--text-danger) 7%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--text-danger) 35%, var(--line));
+}
+html[data-interface-skin="board"] :is(#app, .settings-dialog, .sharing-dialog) .icon-button { border-radius: 10px; }
+html[data-interface-skin="board"] :is(#app, .settings-dialog, .sharing-dialog) .icon-button:hover { color: var(--ink); background: var(--board-hover); }
+html[data-interface-skin="board"] :is(#app, #login-screen, .settings-dialog, .sharing-dialog) :is(button, a, input, select, textarea):focus-visible {
+  outline-width: 2px;
+  outline-style: solid;
+  outline-color: var(--board-focus);
+  outline-offset: 2px;
+}
+html[data-interface-skin="board"] :is(#app, #login-screen, .settings-dialog, .sharing-dialog) :is(button, input, select, textarea):disabled {
+  color: var(--board-disabled-ink);
+  background: var(--board-disabled);
+  border-color: var(--line);
+  box-shadow: none;
+  opacity: 1;
+  cursor: not-allowed;
+}
+html[data-interface-skin="board"] :is(#app, #login-screen, .settings-dialog, .sharing-dialog) .button:active:not(:disabled) { transform: scale(.98); }
+html[data-interface-skin="board"] .search-box {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--board-input);
+  padding: 8px 12px;
+  box-shadow: 0 1px 2px #00000004;
+}
+html[data-interface-skin="board"] .search-box:focus-within { border-color: var(--board-focus); box-shadow: 0 0 0 3px var(--accent-soft); }
+html[data-interface-skin="board"] #app .search-box :is(input, svg, kbd) { color: var(--muted); }
+html[data-interface-skin="board"] #app .search-box input { color: var(--ink); background: transparent; }
+html[data-interface-skin="board"] .search-box kbd { border-color: var(--line); background: var(--paper); border-radius: 4px; }
+/* The outer search surface is the control; its input must not get a second
+   focus outline or retain the classic toolbar's 44px minimum height. */
+html[data-interface-skin="board"] #app .shelf-tools:has(> .search-box:not([hidden])) {
+  align-items: center;
+  gap: 12px;
+  min-height: var(--board-control-height);
+  padding-bottom: 16px;
+}
+html[data-interface-skin="board"] #app .shelf-tools > .search-box {
+  height: var(--board-control-height);
+  min-height: var(--board-control-height);
+  margin: 0;
+  padding: 0 10px;
+  gap: 8px;
+  border-radius: 10px;
+  box-sizing: border-box;
+  transition: border-color .15s, box-shadow .15s;
+  border-color: transparent;
+  box-shadow: none;
+}
+html[data-interface-skin="board"] #app .shelf-tools > .search-box:hover { box-shadow: inset 0 0 0 2px var(--board-border-hover); }
+html[data-interface-skin="board"] #app .shelf-tools > .search-box:focus-within {
+  border-color: transparent;
+  box-shadow: inset 0 0 0 2px var(--board-focus);
+}
+html[data-interface-skin="board"] #app .shelf-tools > .search-box input {
+  appearance: none;
+  height: 20px;
+  min-height: 0;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  outline: none;
+  box-shadow: none;
+  font: 400 14px/20px var(--sans);
+}
+html[data-interface-skin="board"] #app .shelf-tools > .search-box svg { width: 18px; height: 18px; flex-shrink: 0; }
+html[data-interface-skin="board"] #app .search-box input::-webkit-search-cancel-button {
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  margin-left: 4px;
+  background: var(--muted);
+  mask: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Cpath%20d%3D%22M11.9997%2010.5865L16.9495%205.63672L18.3637%207.05093L13.4139%2012.0007L18.3637%2016.9504L16.9495%2018.3646L11.9997%2013.4149L7.04996%2018.3646L5.63574%2016.9504L10.5855%2012.0007L5.63574%207.05093L7.04996%205.63672L11.9997%2010.5865Z%22%3E%3C%2Fpath%3E%3C%2Fsvg%3E") center / 14px 14px no-repeat;
+  cursor: pointer;
+}
+html[data-interface-skin="board"] #app .shelf-tools > .search-box kbd {
+  display: grid;
+  place-items: center;
+  height: 18px;
+  min-width: 18px;
+  padding: 0 4px;
+  flex-shrink: 0;
+  font: 400 11px/16px var(--sans);
+}
+html[data-interface-skin="board"] #app .shelf-tools > .select-tools select {
+  height: var(--board-control-height);
+  min-height: var(--board-control-height);
+  box-sizing: border-box;
+  padding: 0 10px;
+  font: 400 14px/20px var(--sans);
+  border-radius: 10px;
+}
+html[data-interface-skin="board"] :is(#app, #login-screen, .settings-dialog, .sharing-dialog) :where(
+  .select-tools select, .setting-row select, .library-switcher > select,
+  .library-dialog input:not([type="checkbox"]):not([type="file"]),
+  .library-dialog select, .library-dialog textarea, .login-card input,
+  .transcode-filter input, .transcode-filter select, .transcode-rule-field input,
+  .transcode-rule-field select, .network-field input, .sharing-field input,
+  .sharing-result > input, .cache-limit-input input, .sharing-password-value,
+  .performance-row input, .performance-task-actions input,
+  .image-search-failures-filter input, .image-search-failures-filter select
+) {
+  color: var(--ink);
+  background-color: var(--board-input);
+  border: 1px solid transparent;
+  border-radius: 10px;
+  min-height: var(--board-control-height);
+  padding: 7px 10px;
+  font-size: 14px;
+  line-height: 20px;
+  box-shadow: none;
+}
+html[data-interface-skin="board"] :is(#app, #login-screen, .settings-dialog, .sharing-dialog) :where(select) {
+  background-color: var(--board-select);
+  border-color: var(--line);
+  box-shadow: 0 1px 2px #00000004;
+}
+html[data-interface-skin="board"] :is(#app, #login-screen, .settings-dialog, .sharing-dialog) textarea {
+  min-height: 84px;
+  line-height: 20px;
+  resize: vertical;
+}
+html[data-interface-skin="board"] :is(#app, .settings-dialog) input[type="date"] {
+  height: var(--board-control-height);
+  padding-block: 6px;
+}
+html[data-interface-skin="board"] :is(#app, #login-screen, .settings-dialog, .sharing-dialog) :where(
+  input:not([type="checkbox"]):not([type="radio"]):not([type="file"]):not([type="range"]):not([type="color"]),
+  textarea, select
+):is(input, textarea, select):focus {
+  outline: none;
+  border-color: transparent;
+  box-shadow: inset 0 0 0 2px var(--board-focus);
+}
+html[data-interface-skin="board"] :is(#app, #login-screen, .settings-dialog, .sharing-dialog) :is(input, textarea)::placeholder { color: var(--muted); opacity: .85; }
+html[data-interface-skin="board"] :is(.select-tools select, .setting-row select) { min-height: var(--board-control-height); }
+html[data-interface-skin="board"] body select:not([multiple]):not([size]) {
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background-color: var(--board-select);
+  color: var(--ink);
+  min-height: var(--board-control-height);
+  padding: 7px 10px;
+  font: 400 14px/20px var(--sans);
+}
+html[data-interface-skin="board"] body select:not([multiple]):not([size]):hover:not(:disabled),
+html[data-interface-skin="board"] body select:not([multiple]):not([size]):open { border-color: var(--board-border-hover); }
+@supports (appearance: base-select) {
+  html[data-interface-skin="board"] body select:not([multiple]):not([size])::picker(select) {
+    border-radius: 16px;
+    padding: 10px;
+    border-color: var(--line);
+    background: var(--board-raised);
+    box-shadow: var(--board-shadow-hover);
+  }
+  html[data-interface-skin="board"] body select option {
+    min-height: var(--board-control-height);
+    padding: 7px 10px;
+    border-radius: 8px;
+    font: 400 14px/20px var(--sans);
+  }
+  html[data-interface-skin="board"] body select option:checked { color: var(--text-accent); background: var(--accent-soft); }
+  html[data-interface-skin="board"] body select option:hover,
+  html[data-interface-skin="board"] body select option:focus { background: var(--board-hover); }
+}
+html[data-interface-skin="board"] :is(.library-dialog, .settings-dialog) input[type="file"]::file-selector-button {
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--board-raised);
+  color: var(--ink);
+  height: var(--board-control-height);
+  min-height: var(--board-control-height);
+  padding: 0 12px;
+  font: 400 14px/20px var(--sans);
+}
+html[data-interface-skin="board"] :is(#app, #login-screen, .settings-dialog, .sharing-dialog) input[type="file"] {
+  height: var(--board-control-height);
+  min-height: var(--board-control-height);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--muted);
+  font: 400 13px/var(--board-control-height) var(--sans);
+}
+html[data-interface-skin="board"] :is(.library-dialog, .settings-dialog) input[type="file"]:not(:disabled)::file-selector-button:hover { background: var(--board-hover); }
+html[data-interface-skin="board"] :is(.library-dialog, .settings-dialog) input[type="file"]:disabled::file-selector-button {
+  background: var(--board-disabled);
+  color: var(--board-disabled-ink);
+  cursor: not-allowed;
+}
+
+/* Native checkboxes and switches keep their existing labels and behavior. */
+html[data-interface-skin="board"] #app :where(
+  .transcode-select-all input, .transcode-book-select input,
+  .image-search-failure-check, .image-search-failure-select input
+) {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  border: 1px solid var(--board-border-hover);
+  border-radius: 4px;
+  background: var(--board-select);
+  box-shadow: var(--board-shadow);
+}
+html[data-interface-skin="board"] #app :where(
+  .transcode-select-all input, .transcode-book-select input,
+  .image-search-failure-check, .image-search-failure-select input
+):is(input):is(:checked, :indeterminate) {
+  border-color: var(--board-primary-bottom);
+  background: linear-gradient(180deg, var(--board-primary-top), var(--board-primary-bottom));
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--on-accent) 20%, transparent), var(--board-shadow);
+}
+html[data-interface-skin="board"] #app :where(
+  .transcode-select-all input, .transcode-book-select input,
+  .image-search-failure-check, .image-search-failure-select input
+):is(input):disabled { opacity: .5; cursor: not-allowed; }
+html[data-interface-skin="board"] .network-toggle { width: 42px; height: 24px; flex-basis: 42px; }
+html[data-interface-skin="board"] :is(.visibility-switch, .network-toggle-track, .image-search-toggle) {
+  position: relative;
+  width: 42px;
+  height: 24px;
+  flex: 0 0 42px;
+  padding: 0;
+  border: 0;
+  border-radius: 99px;
+  background: linear-gradient(180deg, var(--line), var(--board-border-hover));
+  box-shadow: inset 0 1px 2px color-mix(in srgb, var(--ink) 12%, transparent);
+}
+html[data-interface-skin="board"] .network-toggle-track { flex-basis: auto; }
+html[data-interface-skin="board"] .image-search-toggle { appearance: none; -webkit-appearance: none; margin: 0; }
+html[data-interface-skin="board"] :is(.visibility-switch, .network-toggle-track, .image-search-toggle)::after {
+  content: '';
+  display: block;
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--on-accent);
+  box-shadow: 0 1px 3px #0002;
+  transform: none;
+  transition: transform .16s;
+}
+html[data-interface-skin="board"] input:checked + :is(.visibility-switch, .network-toggle-track),
+html[data-interface-skin="board"] .image-search-toggle:checked { background: linear-gradient(180deg, var(--board-primary-top), var(--board-primary-bottom)); }
+html[data-interface-skin="board"] input:checked + :is(.visibility-switch, .network-toggle-track)::after,
+html[data-interface-skin="board"] .image-search-toggle:checked::after { transform: translateX(18px); }
+
+/* Collection cards preserve source image proportions and lazy-loading behavior. */
+html[data-interface-skin="board"] .library-tiles { gap: 20px; }
+html[data-interface-skin="board"] #app[data-view="home"] .library-tiles { --tile-shadow-gutter: 20px; }
+html[data-interface-skin="board"] #app .library-tile {
+  border: 1px solid var(--line);
+  border-radius: var(--board-radius);
+  background: var(--surface);
+  box-shadow: var(--board-shadow);
+}
+html[data-interface-skin="board"] #app .library-tile:hover { border-color: var(--board-border-hover); box-shadow: var(--board-shadow-hover); transform: translateY(-2px); }
+html[data-interface-skin="board"] .library-tile-info { border-color: var(--line); padding: 16px 20px; }
+html[data-interface-skin="board"] #app .library-tile-info strong { font-size: 14px; font-weight: 600; color: var(--ink); }
+html[data-interface-skin="board"] #app .library-tile-info > span { color: var(--muted); }
+html[data-interface-skin="board"] :is(.library-montage, .library-montage > .tile-cover, .cover-wrap, .continue-cover) { background: var(--board-hover); }
+html[data-interface-skin="board"] .book-grid { gap: 28px 20px; }
+html[data-interface-skin="board"] .book-open { border-radius: 12px; }
+html[data-interface-skin="board"] .cover-wrap { border-radius: 12px; box-shadow: var(--board-shadow); }
+html[data-interface-skin="board"] .book-open:hover .cover-wrap { transform: translateY(-3px); box-shadow: var(--board-shadow-hover); }
+html[data-interface-skin="board"] #app .book-title { font-size: 14px; line-height: 20px; font-weight: 500; color: var(--ink); margin-top: 12px; }
+html[data-interface-skin="board"] #app :is(.book-series, .book-date) { color: var(--muted); }
+html[data-interface-skin="board"] .cover-fallback { background: var(--board-hover); color: var(--muted); }
+html[data-interface-skin="board"] .book-pages { border-radius: 6px; background: #14171dc9; color: #fff; }
+html[data-interface-skin="board"] .book-status { border-radius: 6px; background: #20242acc; color: #fff; }
+html[data-interface-skin="board"] .book-status.reading { background: var(--accent); color: #fff; }
+html[data-interface-skin="board"] #app .favorite-button { background: #161a22bd; border-color: #ffffff38; color: #fff; box-shadow: none; }
+html[data-interface-skin="board"] #app .favorite-button:is(:hover, [aria-pressed="true"]) { background: var(--accent); color: #fff; }
+html[data-interface-skin="board"] .continue-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--board-radius);
+  box-shadow: var(--board-shadow);
+  padding: 20px 24px;
+}
+html[data-interface-skin="board"] .continue-card::after { display: none; }
+html[data-interface-skin="board"] .continue-cover { border-radius: 8px; box-shadow: var(--board-shadow); }
+html[data-interface-skin="board"] .continue-info h3 { font-size: 20px; line-height: 26px; font-weight: 600; letter-spacing: -.3px; }
+html[data-interface-skin="board"] .continue-progress-track { height: 4px; background: var(--line); }
+html[data-interface-skin="board"] .continue-progress-track span { background: var(--accent); }
+html[data-interface-skin="board"] .model-card { padding: 16px 12px 10px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--board-radius); box-shadow: var(--board-shadow); }
+html[data-interface-skin="board"] .model-portrait { max-width: 132px; border: 3px solid var(--surface); background: var(--board-hover); box-shadow: 0 0 0 1px var(--line); margin-bottom: 15px; }
+html[data-interface-skin="board"] .model-open:hover .model-portrait { border-color: var(--surface); box-shadow: 0 0 0 2px var(--text-accent); }
+html[data-interface-skin="board"] #app .model-edit { color: var(--muted); border-radius: 8px; }
+html[data-interface-skin="board"] #app .model-edit:hover { color: var(--text-accent); background: var(--accent-soft); text-decoration: none; }
+html[data-interface-skin="board"] .bookmark-card { border-radius: var(--board-radius); border-color: var(--line); background: var(--surface); box-shadow: var(--board-shadow); }
+html[data-interface-skin="board"] .bookmark-open:hover { background: var(--board-hover); }
+html[data-interface-skin="board"] .selection-toolbar { border-radius: 13px; background: var(--surface); box-shadow: var(--board-shadow); }
+html[data-interface-skin="board"] .selection-checkbox { border-radius: 6px; }
+
+/* Settings remains a single column, with clear, individually raised sections. */
+html[data-interface-skin="board"] #settings-page { gap: 20px; }
+html[data-interface-skin="board"] #app .settings-panel {
+  padding: 24px;
+  border: 1px solid var(--line);
+  border-radius: var(--board-radius);
+  background: var(--surface);
+  box-shadow: var(--board-shadow);
+}
+html[data-interface-skin="board"] .settings-panel h2 { font-size: 18px; line-height: 26px; font-weight: 600; letter-spacing: -.2px; margin-bottom: 16px; }
+html[data-interface-skin="board"] #app :is(.setting-row strong, .service-panel dd) { color: var(--ink); }
+html[data-interface-skin="board"] :is(.setting-row, .settings-library, .service-panel dl) { border-color: var(--line); }
+html[data-interface-skin="board"] .settings-panel .setting-row { padding: 16px 0; gap: 24px; }
+html[data-interface-skin="board"] .settings-panel .setting-row:last-child { padding-bottom: 0; }
+html[data-interface-skin="board"] .service-panel dl { grid-template-columns: 152px minmax(0, 1fr); row-gap: 16px; }
+html[data-interface-skin="board"] .service-panel dt { align-self: center; }
+html[data-interface-skin="board"] :is(.service-panel code, .field-hint code, .empty-state code, .sharing-copy-field) { background: var(--board-hover); border-color: var(--line); color: var(--ink); border-radius: 6px; }
+html[data-interface-skin="board"] #app #settings-connection { color: var(--ink); }
+html[data-interface-skin="board"] #app #settings-connection.connection-error { color: var(--text-danger); }
+html[data-interface-skin="board"] .settings-menu { gap: 16px; }
+html[data-interface-skin="board"] #app .settings-menu-item { min-height: 96px; padding: 20px 24px; border-radius: var(--board-radius); border-color: var(--line); background: var(--surface); box-shadow: var(--board-shadow); }
+html[data-interface-skin="board"] #app .settings-menu-item:hover { background: var(--surface); border-color: var(--board-border-hover); box-shadow: var(--board-shadow-hover); }
+html[data-interface-skin="board"] .settings-menu-content strong { font-size: 16px; line-height: 22px; font-weight: 500; }
+html[data-interface-skin="board"] .settings-menu-content small { margin-top: 4px; font-size: 13px; line-height: 18px; }
+html[data-interface-skin="board"] .settings-menu-icon { background: var(--board-hover); border: 1px solid var(--line); color: var(--muted); border-radius: 12px; }
+html[data-interface-skin="board"] .settings-menu-badge { color: var(--text-accent); background: var(--accent-soft); }
+html[data-interface-skin="board"] #optimization-pending {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) 16px;
+  align-items: center;
+  gap: 10px;
+  min-height: 66px;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--text-accent) 18%, var(--line));
+  background: var(--accent-soft);
+  color: var(--text-accent);
+  border-radius: 12px;
+  box-shadow: none;
+  transition: border-color .15s, background-color .15s;
+}
+html[data-interface-skin="board"] #optimization-pending > svg:first-child { width: 20px; height: 20px; }
+html[data-interface-skin="board"] #optimization-pending > svg:last-child { width: 16px; height: 16px; color: var(--text-accent); }
+html[data-interface-skin="board"] #optimization-pending > span { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+html[data-interface-skin="board"] #optimization-pending small { order: 0; margin: 0; font: 500 14px/20px var(--sans); color: var(--ink); }
+html[data-interface-skin="board"] #optimization-pending strong {
+  order: 1;
+  font: 500 13px/18px var(--sans);
+  color: color-mix(in srgb, var(--text-accent) 20%, var(--ink));
+  overflow-wrap: anywhere;
+}
+html[data-interface-skin="board"] #optimization-pending:hover {
+  border-color: var(--text-accent);
+  background: color-mix(in srgb, var(--text-accent) 6%, var(--accent-soft));
+}
+html[data-interface-skin="board"] #optimization-pending:not([hidden]) + .account-area { margin-top: 12px; }
+
+/* Shared dialogs, profile tabs, directory picker and access cards. */
+html[data-interface-skin="board"] :is(.settings-dialog, .sharing-dialog) {
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: var(--board-shadow-dialog);
+  scrollbar-color: var(--line) var(--surface);
+}
+html[data-interface-skin="board"] :is(.settings-dialog, .sharing-dialog)::backdrop { background: #11182766; backdrop-filter: blur(5px); }
+html[data-interface-skin="board"] .dialog-header h2 { font-size: 20px; line-height: 26px; font-weight: 600; letter-spacing: -.3px; }
+html[data-interface-skin="board"] :is(.dialog-header, .dialog-footer, .sharing-header, .sharing-footer, .profile-tabs) { border-color: var(--line); }
+html[data-interface-skin="board"] .dialog-header > .icon-button { border: 1px solid var(--line); margin: 0; width: 40px; height: 40px; }
+html[data-interface-skin="board"] .sharing-close { width: 40px; height: 40px; background: var(--board-raised); border-color: var(--line); border-radius: 10px; }
+html[data-interface-skin="board"] .sharing-footer { background: var(--surface); }
+html[data-interface-skin="board"] .directory-picker { border-color: var(--line); border-radius: 11px; background: var(--board-input); }
+html[data-interface-skin="board"] .directory-item { border-color: var(--line); border-radius: 7px; }
+html[data-interface-skin="board"] .directory-item:hover { background: var(--board-hover); }
+html[data-interface-skin="board"] .model-checkbox { border-color: var(--line); border-radius: 9px; background: var(--board-input); }
+html[data-interface-skin="board"] .model-checkbox:has(input:checked) { border-color: var(--text-accent); color: var(--text-accent); background: var(--accent-soft); }
+html[data-interface-skin="board"] .model-chip { border-color: var(--line); border-radius: 10px; background: var(--board-raised); }
+html[data-interface-skin="board"] .model-chip:hover { background: var(--accent-soft); border-color: var(--text-accent); }
+html[data-interface-skin="board"] :is(.profile-tabs, .search-mode-tabs, .transcode-tabs) { gap: 5px; }
+html[data-interface-skin="board"] :is(.profile-tabs, .search-mode-tabs, .transcode-tabs) button { border-radius: 9px; }
+html[data-interface-skin="board"] :is(#app, .settings-dialog) :is(.profile-tabs, .search-mode-tabs, .transcode-tabs) button {
+  height: var(--board-control-height);
+  min-height: var(--board-control-height);
+  padding: 7px 12px;
+  font: 500 14px/20px var(--sans);
+}
+html[data-interface-skin="board"] :is(.profile-tabs, .transcode-tabs) button[aria-selected="true"] { background: var(--accent-soft); color: var(--text-accent); }
+html[data-interface-skin="board"] .search-mode-tabs { background: var(--surface); border-color: var(--line); border-radius: 12px; padding: 4px; }
+html[data-interface-skin="board"] .search-mode-tabs > button[aria-selected="true"] { background: var(--accent); color: var(--on-accent); box-shadow: 0 1px 2px #00000015; }
+html[data-interface-skin="board"] .library-visibility-card { border-color: var(--line); border-radius: 12px; background: var(--board-input); }
+html[data-interface-skin="board"] .library-visibility-card:has(input:checked) { border-color: var(--text-accent); background: var(--accent-soft); }
+html[data-interface-skin="board"] .library-visibility-card:has(input:checked) .visibility-library-icon { color: var(--text-accent); background: var(--surface); }
+html[data-interface-skin="board"] .visibility-library-icon { background: var(--board-hover); color: var(--muted); }
+html[data-interface-skin="board"] .user-list-row { border-color: var(--line); }
+html[data-interface-skin="board"] .book-detail { background: var(--surface); }
+html[data-interface-skin="board"] .detail-poster { border-radius: 12px; box-shadow: var(--board-shadow-hover); }
+html[data-interface-skin="board"] .detail-close { background: var(--board-raised); border: 1px solid var(--line); box-shadow: var(--board-shadow); }
+html[data-interface-skin="board"] :is(.detail-history, .detail-bookmarks, .detail-bookmark) { border-color: var(--line); }
+
+/* Management pages share the same surface and control vocabulary. */
+html[data-interface-skin="board"] :is(.transcode-stat, .transcode-book, .sharing-card, .image-search-result) { border: 1px solid var(--line); border-radius: var(--board-radius); background: var(--surface); box-shadow: var(--board-shadow); }
+html[data-interface-skin="board"] .transcode-stat { padding: 20px; }
+html[data-interface-skin="board"] .transcode-stat strong { font-weight: 600; letter-spacing: -.5px; }
+html[data-interface-skin="board"] .transcode-book { padding: 20px; }
+html[data-interface-skin="board"] .transcode-book.is-selected { border-color: var(--text-accent); background: color-mix(in srgb, var(--accent-soft) 45%, var(--surface)); }
+html[data-interface-skin="board"] :is(.transcode-status-running, .transcode-status-queued, .sharing-badge[data-status="active"]) { color: var(--text-accent); background: var(--accent-soft); }
+html[data-interface-skin="board"] .transcode-status-failed { color: var(--text-danger); background: color-mix(in srgb, var(--text-danger) 10%, var(--surface)); }
+html[data-interface-skin="board"] .transcode-status { border-radius: 6px; }
+html[data-interface-skin="board"] .transcode-selection-tools { border-color: var(--line); }
+html[data-interface-skin="board"] .transcode-progress { background: var(--line); }
+html[data-interface-skin="board"] :is(.transcode-preview-button, .transcode-rebuild, .service-update-result > a) { color: var(--text-accent); }
+html[data-interface-skin="board"] .transcode-preview-button:hover { background: var(--accent-soft); }
+html[data-interface-skin="board"] .transcode-book-list { gap: 16px; }
+html[data-interface-skin="board"] .transcode-disabled { background: var(--surface); border-color: var(--line); }
+html[data-interface-skin="board"] .transcode-path code { padding: 5px 8px; border-radius: 6px; background: var(--board-input); color: var(--muted); }
+html[data-interface-skin="board"] .image-search-drop { background: var(--surface); border-color: var(--board-border-hover); border-radius: var(--board-radius); }
+html[data-interface-skin="board"] .image-search-drop.is-dragging { background: var(--accent-soft); border-color: var(--text-accent); }
+html[data-interface-skin="board"] .image-search-result:hover { border-color: var(--board-border-hover); box-shadow: var(--board-shadow-hover); }
+html[data-interface-skin="board"] .image-search-result-info > small { color: var(--text-accent); }
+html[data-interface-skin="board"] #app .image-search-index-counts .image-search-failure-toggle {
+  height: auto;
+  min-height: 20px;
+  margin: 0 4px;
+  padding: 0 2px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-accent);
+  box-shadow: none;
+  font: 500 13px/20px var(--sans);
+  vertical-align: baseline;
+}
+html[data-interface-skin="board"] #app .image-search-index-counts .image-search-failure-toggle:hover:not(:disabled) { text-decoration: underline; text-underline-offset: 3px; }
+html[data-interface-skin="board"] #app .image-search-index-counts .image-search-failure-toggle:disabled { color: var(--muted); opacity: 1; }
+html[data-interface-skin="board"] .sharing-management-page .sharing-card { background: var(--surface); }
+html[data-interface-skin="board"] .sharing-duration { gap: 2px; padding: 4px; background: var(--board-input); border-radius: 10px; }
+html[data-interface-skin="board"] :is(#app, .sharing-dialog) .sharing-duration .sharing-duration-option {
+  min-height: var(--board-control-height);
+  height: var(--board-control-height);
+  border: 1px solid transparent;
+  padding: 7px 12px;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  box-shadow: none;
+  font: 500 14px/20px var(--sans);
+}
+html[data-interface-skin="board"] :is(#app, .sharing-dialog) .sharing-duration .sharing-duration-option:not([aria-checked="true"]):hover:not(:disabled) { color: var(--ink); background: var(--board-hover); }
+html[data-interface-skin="board"] :is(#app, .sharing-dialog) .sharing-duration .sharing-duration-option[aria-checked="true"] {
+  background: var(--board-raised);
+  border-color: transparent;
+  color: var(--text-accent);
+  box-shadow: var(--board-shadow-hover);
+}
+html[data-interface-skin="board"] :is(#app, .sharing-dialog) .sharing-duration .sharing-duration-option:disabled {
+  color: var(--board-disabled-ink);
+  border-color: transparent;
+  background: transparent;
+}
+html[data-interface-skin="board"] :is(#app, .sharing-dialog) .sharing-duration .sharing-duration-option[aria-checked="true"]:disabled {
+  border-color: var(--line);
+  background: var(--board-disabled);
+  box-shadow: none;
+}
+html[data-interface-skin="board"] .sharing-password-panel { background: var(--paper); border-radius: 11px; }
+html[data-interface-skin="board"] .sharing-password-controls .sharing-copy-password { background: var(--board-raised); color: var(--ink); }
+html[data-interface-skin="board"] .network-listening[data-state="ready"] { color: var(--text-accent); }
+html[data-interface-skin="board"] .network-recovery { border-radius: 11px; background: var(--paper); }
+html[data-interface-skin="board"] .network-error { color: var(--text-danger); border-color: color-mix(in srgb, var(--text-danger) 35%, var(--line)); background: color-mix(in srgb, var(--text-danger) 5%, var(--surface)); }
+html[data-interface-skin="board"] #app .notice:not(.error) { color: var(--ink); border-color: var(--line); background: var(--surface); border-radius: 11px; }
+html[data-interface-skin="board"] #app :is(.notice.error, .scan-errors) { color: var(--text-warning); border-color: color-mix(in srgb, var(--text-warning) 30%, var(--line)); background: color-mix(in srgb, var(--text-warning) 5%, var(--surface)); border-radius: 11px; }
+html[data-interface-skin="board"] .empty-illustration { background: var(--surface); border-color: var(--line); box-shadow: var(--board-shadow); border-radius: 20px; }
+html[data-interface-skin="board"] .folder-guide { background: var(--surface); border-color: var(--line); border-radius: 11px; }
+html[data-interface-skin="board"] .toast { border: 1px solid var(--line); background: var(--board-raised); color: var(--ink); box-shadow: var(--board-shadow-hover); border-radius: 12px; }
+
+/* Login and reader chrome: source photos and reader backgrounds are untouched. */
+html[data-interface-skin="board"] .login-screen { background: var(--paper); }
+html[data-interface-skin="board"] .login-card { background: var(--surface); border-color: var(--line); border-radius: 20px; box-shadow: var(--board-shadow-hover); }
+html[data-interface-skin="board"] .login-card h1 { font-size: 24px; line-height: 34px; font-weight: 600; letter-spacing: -.4px; }
+html[data-interface-skin="board"] .reader :is(.reader-select-trigger, .reader-select-menu, .reader-menu, .reader-page-float, .reader-help-panel, .page-number input) { border-radius: 10px; }
+html[data-interface-skin="board"] .reader .reader-select-option { border-radius: 7px; }
+html[data-interface-skin="board"] .reader .icon-button { border-radius: 9px; }
+
+@media (min-width: 1600px) {
+  html[data-interface-skin="board"] .main-content { padding-inline: 48px; }
+}
+@media (max-width: 1100px) and (min-width: 761px) {
+  html[data-interface-skin="board"] .app-shell { grid-template-columns: 232px minmax(0, 1fr); }
+  html[data-interface-skin="board"] .main-content { padding-inline: 24px; }
+  html[data-interface-skin="board"] .sidebar { padding-inline: 12px; }
+  html[data-interface-skin="board"] .library-heading { align-items: flex-start; }
+}
+@media (max-height: 700px) {
+  html[data-interface-skin="board"] .sidebar { padding-top: 16px; padding-bottom: 12px; }
+  html[data-interface-skin="board"] .sidebar .brand { margin-bottom: 20px; }
+  html[data-interface-skin="board"] .sidebar-user-area { padding-top: 12px; }
+}
+@media (max-width: 760px) {
+  html[data-interface-skin="board"] { --board-control-height: 40px; }
+  html[data-interface-skin="board"] .app-shell { display: block; }
+  html[data-interface-skin="board"] .sidebar {
+    top: 10px;
+    left: 0;
+    margin: 0 0 0 10px;
+    height: calc(100dvh - 20px);
+    width: min(282px, calc(100vw - 36px));
+    max-width: calc(100vw - 36px);
+    padding: 24px 16px max(16px, env(safe-area-inset-bottom));
+    border-radius: 20px;
+    transform: translateX(calc(-100% - 20px));
+  }
+  html[data-interface-skin="board"] .sidebar.is-open,
+  html[data-interface-skin="board"] body.nav-open .sidebar { transform: translateX(0); }
+  html[data-interface-skin="board"] .main-content { padding: 0 20px 28px; }
+  html[data-interface-skin="board"] .topbar { border-color: var(--line); background: var(--paper); }
+  html[data-interface-skin="board"] #app #nav-toggle { width: 40px; height: 40px; min-height: 40px; display: grid; place-items: center; padding: 0; }
+  html[data-interface-skin="board"] .sidebar-settings { min-width: 40px; min-height: 40px; }
+  html[data-interface-skin="board"] .library-heading { padding: 24px 0; }
+  html[data-interface-skin="board"] .library-heading h1 { font-size: 24px; line-height: 34px; }
+  html[data-interface-skin="board"] .library-actions { margin-top: 16px; gap: 8px; }
+  html[data-interface-skin="board"] .library-actions .button { min-height: 40px; padding: 9px 12px; }
+  html[data-interface-skin="board"] .library-tiles { gap: 16px; }
+  html[data-interface-skin="board"] .library-tile-info { padding: 16px; }
+  html[data-interface-skin="board"] .book-grid { gap: 24px 16px; }
+  html[data-interface-skin="board"] .shelf-tools { gap: 8px; }
+  html[data-interface-skin="board"] #app .shelf-tools > .search-box kbd { display: none; }
+  html[data-interface-skin="board"] #app .shelf-tools > .select-tools { margin-bottom: 0; }
+  html[data-interface-skin="board"] .continue-card { padding: 16px; }
+  html[data-interface-skin="board"] .models-grid { gap: 16px; }
+  html[data-interface-skin="board"] .model-card { padding: 16px 12px 8px; }
+  html[data-interface-skin="board"] .model-portrait { max-width: 116px; }
+  html[data-interface-skin="board"] #app .settings-panel { padding: 20px; }
+  html[data-interface-skin="board"] .settings-panel .setting-row { gap: 16px; }
+  html[data-interface-skin="board"] #app .settings-menu-item { padding: 20px; gap: 16px; min-height: 92px; }
+  html[data-interface-skin="board"] .settings-menu-icon { width: 40px; height: 40px; flex-basis: 40px; }
+  html[data-interface-skin="board"] .settings-menu-content strong { font-size: 15px; }
+  html[data-interface-skin="board"] .service-panel dl { grid-template-columns: 112px minmax(0, 1fr); gap: 16px 12px; }
+  html[data-interface-skin="board"] .service-version-row { gap: 8px; }
+  html[data-interface-skin="board"] .transcode-book { padding: 16px; }
+  html[data-interface-skin="board"] :is(.settings-dialog, .sharing-dialog) { border-radius: 20px; }
+  html[data-interface-skin="board"] .dialog-header h2 { font-size: 20px; }
+  .skin-options { gap: 12px; }
+  .skin-option { padding: 8px; gap: 8px; }
+  .skin-preview { height: 94px; padding: 8px; gap: 8px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  html[data-interface-skin="board"] *,
+  html[data-interface-skin="board"] *::before,
+  html[data-interface-skin="board"] *::after,
+  .skin-option { transition-duration: 0s; }
+}

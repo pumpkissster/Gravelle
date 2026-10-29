@@ -1,9 +1,9 @@
 /* Device preferences and administrator-controlled background task limits. */
 ((root, factory) => {
-  const api = factory();
+  const api = factory(typeof module === 'object' && module.exports ? require('./user-management.js') : root.GravelleUsers);
   if (typeof module === 'object' && module.exports) module.exports = api;
-  else root.SumiPerformance = api;
-})(typeof window === 'undefined' ? globalThis : window, () => {
+  else root.GravellePerformance = api;
+})(typeof window === 'undefined' ? globalThis : window, Users => {
   'use strict';
   const defaults = Object.freeze({ webtoonStep: 3, coverConcurrency: 3, imageCacheLimit: 0, imageCacheMemoryMB: 256, bookPageSize: 0, chapterPageSize: 0 });
   const limits = { webtoonStep: [1, 20], coverConcurrency: [1, 12], imageCacheLimit: [0, 999], imageCacheMemoryMB: [0, 16384], bookPageSize: [0, 999], chapterPageSize: [0, 999] };
@@ -200,24 +200,20 @@
   function update(values) {
     settings = normalize({ ...settings, ...values }); covers.setLimit(settings.coverConcurrency);
     try { if (accountStorageKey) localStorage.setItem(accountStorageKey, JSON.stringify(settings)); } catch (_) { /* Still applies to this visit. */ }
-    if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('sumi-performance-change', { detail: { ...settings } }));
+    if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('gravelle-performance-change', { detail: { ...settings } }));
     return { ...settings };
   }
   function setUser(user) {
     currentUser = user || null; resetServer();
-    accountStorageKey = user?.id !== undefined ? `gravelle-user-${encodeURIComponent(String(user.id))}-sumi-performance` : null;
+    accountStorageKey = user?.id !== undefined ? Users.storageKey('performance', user) : null;
     let saved = null;
     try {
-      if (accountStorageKey) saved = localStorage.getItem(accountStorageKey);
-      if (saved === null && user?.role === 'admin' && Number(user.id) === 1) {
-        saved = localStorage.getItem('sumi-performance');
-        if (saved !== null) localStorage.setItem(accountStorageKey, saved);
-      }
+      if (accountStorageKey) saved = Users.readPreference(localStorage, 'performance', user, 'sumi-performance');
     } catch (_) { /* Keep safe defaults. */ }
     covers.cancel(); coverRecords.forEach((_, image) => observer?.unobserve(image)); coverRecords.clear();
     settings = normalize((() => { try { return JSON.parse(saved || '{}'); } catch (_) { return {}; } })());
     covers.setLimit(settings.coverConcurrency);
-    if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('sumi-performance-change', { detail: { ...settings } }));
+    if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('gravelle-performance-change', { detail: { ...settings } }));
     return { ...settings };
   }
   function render() {

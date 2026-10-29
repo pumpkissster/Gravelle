@@ -91,6 +91,18 @@ button:focus-visible, a:focus-visible { outline-offset: 3px; }
 .mobile-menu { display: none; }
 .nav-backdrop { display: none; }
 .library-heading { padding: 34px 0 29px; gap: 24px; align-items: center; }
+.heading-identity { display: flex; align-items: center; gap: 16px; min-width: 0; }
+.heading-copy { min-width: 0; }
+.heading-copy h1 { overflow-wrap: anywhere; }
+.model-heading-avatar { width: 64px; height: 64px; flex: 0 0 64px; overflow: hidden; border: 1px solid var(--line); border-radius: 50%; background: var(--surface); }
+.model-heading-avatar img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.library-heading.is-model h1 { margin: 0; }
+.model-avatar-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+@media (max-width: 760px) {
+  .heading-identity { gap: 12px; }
+  .model-heading-avatar { width: 48px; height: 48px; flex-basis: 48px; }
+  .library-heading.is-model { gap: 14px; }
+}
 .eyebrow { color: #8a7a81; font-size: 12px; letter-spacing: 1.8px; margin-bottom: 12px; }
 .library-heading h1 { font: 650 clamp(26px, 3vw, 34px)/1.35 var(--sans); letter-spacing: .5px; margin-bottom: 10px; }
 .heading-description { font-size: 12px; color: #898386; line-height: 1.8; }
@@ -946,6 +958,7 @@ html[data-interface-theme="light"] .button-danger { color: #aa304b; }
 .library-dialog .avatar-editor input[type="file"] { background: transparent; border: 0; padding: 0; font-size: 12px; }
 .avatar-editor input::file-selector-button { border: 1px solid var(--line); padding: 10px 12px; margin-right: 9px; border-radius: 5px; color: var(--ink); background: var(--surface); font: inherit; cursor: pointer; }
 .avatar-editor .button { min-height: 34px; font-size: 12px; padding: 8px 11px; margin-top: 10px; }
+.avatar-editor .model-avatar-actions .button { margin-top: 0; }
 .avatar-editor .field-hint { margin-top: 8px; }
 .settings-page { display: flex; flex-direction: column; width: min(100%, 1120px); gap: 18px; }
 .settings-panel { width: 100%; padding: 23px 26px; }
@@ -959,6 +972,7 @@ html[data-interface-theme="light"] .button-danger { color: #aa304b; }
 .service-panel > p:not(.eyebrow) { max-width: none; margin: 0 0 15px; }
 .service-panel dl { grid-template-columns: 170px minmax(0, 1fr); gap: 13px 24px; padding-top: 16px; }
 .service-panel dd { margin: 0; overflow-wrap: anywhere; }
+.service-panel dt { align-self: center; line-height: 1.6; }
 #settings-lan-access { min-width: 0; user-select: text; }
 #settings-lan-url { color: inherit; font: inherit; overflow-wrap: anywhere; user-select: text; }
 #settings-lan-url[href] { text-decoration: underline; text-underline-offset: .2em; }
@@ -1474,7 +1488,14 @@ button, input, select, textarea { line-height: 1.5; }
 }
 
 /* Settings opens focused subpages instead of stacking every form on one screen. */
-#settings-page { width: min(100%, 1280px); padding-bottom: 36px; }
+:root { --settings-content-width: 1280px; }
+:is(#settings-page, #scan-errors) { width: min(100%, var(--settings-content-width)); }
+#settings-page { padding-bottom: 36px; }
+#users-panel :is(#edit-profile, #manage-users, #manage-shares) { width: 140px; max-width: 100%; min-height: var(--board-control-height, 40px); flex-shrink: 0; }
+@media (max-width: 380px) {
+  #users-panel .settings-account { display: grid; grid-template-columns: 38px minmax(0, 1fr); gap: 10px; }
+  #users-panel .settings-account > .button { grid-column: 1 / -1; justify-self: end; }
+}
 .settings-back { align-self: flex-start; margin: -8px 0 3px; min-height: 38px; border-radius: 10px; }
 .settings-menu { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; width: 100%; }
 .settings-menu-item { display: flex; align-items: center; gap: 18px; width: 100%; min-height: 106px; padding: 24px; border: 1px solid var(--line); border-radius: 16px; background: var(--surface, var(--paper)); color: var(--ink); text-align: left; transition: border-color .15s, background .15s; }
@@ -1720,7 +1741,7 @@ html[data-interface-theme="light"] .transcode-status-failed { color: #ac493a; }
 .transcode-detail-path code { flex: 1; min-width: 0; font-size: 12px; word-break: break-all; white-space: normal; padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; color: var(--ink); }
 .transcode-detail-path .button { min-height: 36px; padding: 8px 12px; border-radius: 9px; }
 .transcode-detail-footer { align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; font-size: 13px; }
-.cache-management-page { display: flex; flex-direction: column; gap: 20px; }
+.cache-management-page { display: flex; flex-direction: column; gap: 20px; width: 100%; min-width: 0; }
 .cache-overview, .cache-category { margin: 0; }
 .cache-total { font-size: 25px; font-weight: 600; margin: 18px 0 0; font-variant-numeric: tabular-nums; }
 .cache-categories { display: flex; flex-direction: column; gap: 16px; }
@@ -1729,6 +1750,7 @@ html[data-interface-theme="light"] .transcode-status-failed { color: #ac493a; }
 .cache-actions { display: flex; flex-wrap: wrap; gap: 10px; }
 .cache-actions .button, .cache-settings-form .button { border-radius: 10px; min-height: 40px; }
 .cache-settings-form { display: flex; flex-direction: column; align-items: flex-start; gap: 13px; margin-top: 22px; }
+.cache-settings-form > .settings-description { font-size: 12px; line-height: 1.8; color: var(--muted); }
 .cache-settings-form .settings-field { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; width: 100%; font-size: 14px; }
 .cache-limit-input { display: inline-flex; align-items: center; gap: 10px; color: var(--muted); font-size: 13px; }
 .cache-limit-input input { width: 130px; min-height: 40px; border: 1px solid var(--line); border-radius: 9px; padding: 9px 12px; background: var(--paper); color: var(--ink); }
@@ -1745,7 +1767,7 @@ html[data-interface-theme="light"] .transcode-status-failed { color: #ac493a; }
 }
 /* Use the same rounded surface for selectors and their opened menus. Native
    form controls remain the source of truth, including dynamic options. */
-html body select:not([multiple]):not([size]) {
+html:not([data-interface-skin="board"]) body select:not([multiple]):not([size]) {
   border-radius: 12px !important;
   border: 1px solid var(--line) !important;
   background-color: var(--surface, var(--paper)) !important;
@@ -1755,7 +1777,7 @@ html body select:not([multiple]):not([size]) {
   font-family: var(--sans);
   cursor: pointer;
 }
-html body select:not([multiple]):not([size]):hover:not(:disabled) { border-color: var(--accent) !important; }
+html:not([data-interface-skin="board"]) body select:not([multiple]):not([size]):hover:not(:disabled) { border-color: var(--accent) !important; }
 html body select:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 html body select:disabled { cursor: default; opacity: .5; }
 @supports (appearance: base-select) {
@@ -1774,7 +1796,7 @@ html body select:disabled { cursor: default; opacity: .5; }
     overscroll-behavior: contain;
   }
   html body select:not([multiple]):not([size])::picker-icon { color: var(--muted); margin-inline-start: 12px; }
-  html body select:not([multiple]):not([size]):open { border-color: var(--accent) !important; }
+  html:not([data-interface-skin="board"]) body select:not([multiple]):not([size]):open { border-color: var(--accent) !important; }
   html body select option {
     display: flex; align-items: center; gap: 12px;
     min-height: 40px; padding: 10px 12px; border-radius: 9px;

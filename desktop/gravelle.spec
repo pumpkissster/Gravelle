@@ -20,11 +20,12 @@ analysis = Analysis(
     binaries=pdfium_binaries,
     datas=[
         (str(root / 'static'), 'static'),
+        (str(root / 'models' / 'yunet'), 'models/yunet'),
         (str(resources / 'release.json'), '.'),
         (str(resources / 'desktop' / 'release.json'), 'desktop'),
         (str(root / 'desktop' / 'assets' / 'gravelle-wordmark.png'), 'desktop/assets'),
     ] + pdfium_data,
-    hiddenimports=['server', 'network_settings', 'transcoding', 'image_search', 'image_search_features', 'task_scheduler', 'library_covers', 'cache_manager', 'epub_reader', 'pdf_reader', 'pypdfium2', 'pypdfium2_raw', 'pypdfium2_cfg', 'sharing', 'share_crypto', 'share_passwords', 'cryptography.hazmat.primitives.ciphers.aead', 'desktop.runtime', 'desktop.platforms', 'PIL.Image', 'cv2', 'numpy'],
+    hiddenimports=['server', 'network_settings', 'transcoding', 'image_search', 'image_search_features', 'avatar_face_crop', 'task_scheduler', 'library_covers', 'cache_manager', 'epub_reader', 'pdf_reader', 'pypdfium2', 'pypdfium2_raw', 'pypdfium2_cfg', 'sharing', 'share_crypto', 'share_passwords', 'cryptography.hazmat.primitives.ciphers.aead', 'desktop.runtime', 'desktop.platforms', 'PIL.Image', 'cv2', 'numpy'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

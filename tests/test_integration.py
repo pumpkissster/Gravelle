@@ -267,7 +267,20 @@ class RunningApp:
 
     def close(self):
         self.stop()
-        self.temp.cleanup()
+        # TerminateProcess can signal completion just before Windows releases
+        # the last file handle. Retry only that short-lived sharing violation;
+        # never hide other cleanup errors or a service that is still running.
+        deadline = time.monotonic() + 2
+        while True:
+            try:
+                self.temp.cleanup()
+                return
+            except PermissionError as error:
+                if (os.name != 'nt' or getattr(error, 'winerror', None) != 32
+                        or self.process is None or self.process.poll() is None
+                        or time.monotonic() >= deadline):
+                    raise
+                time.sleep(0.025)
 
     def request(self, path, data=None, headers=None, method=None):
         body = json.dumps(data).encode() if data is not None else None
@@ -362,11 +375,12 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(headers.get_content_type(), 'text/html')
         self.assertIn(b'/batch-selection.js', content)
         self.assertIn(b'/page-router.js', content)
+        self.assertIn(b'/board-skin.css', content)
         for path, mime in [('/app.js', 'text/javascript'), ('/reader-model.js', 'text/javascript'),
                            ('/batch-selection.js', 'text/javascript'),
                            ('/page-router.js', 'text/javascript'),
                            ('/performance-settings.js', 'text/javascript'), ('/reader-end.js', 'text/javascript'),
-                           ('/styles.css', 'text/css'), ('/reader-end.css', 'text/css'), ('/gravelle-logo.png', 'image/png'),
+                           ('/styles.css', 'text/css'), ('/reader-end.css', 'text/css'), ('/board-skin.css', 'text/css'), ('/gravelle-logo.png', 'image/png'),
                            ('/gravelle-wordmark.svg', 'image/svg+xml'), ('/gravelle-icon.png', 'image/png')]:
             status, content, headers = self.app.request(path)
             self.assertEqual(status, 200)
