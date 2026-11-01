@@ -16,10 +16,25 @@
     let code = String(value.security_entry_code || '').trim();
     if (value.security_entry_enabled && !/^[A-Za-z0-9_-]{8,64}$/.test(code)) throw new Error('安全入口码需要 8–64 位英文字母、数字、下划线或短横线。');
     if (!value.security_entry_enabled && !/^[A-Za-z0-9_-]{8,64}$/.test(code)) code = '';
-    return { security_entry_enabled: Boolean(value.security_entry_enabled), security_entry_code: code, share_port_enabled: Boolean(value.share_port_enabled), public_share_url: publicUrl(value.public_share_url) };
+    const data = { security_entry_enabled: Boolean(value.security_entry_enabled), security_entry_code: code, share_port_enabled: Boolean(value.share_port_enabled), public_share_url: publicUrl(value.public_share_url) };
+    if (Object.prototype.hasOwnProperty.call(value, 'connection_mode')) {
+      if (!['http', 'proxy', 'https'].includes(value.connection_mode)) throw new Error('请选择有效的连接方式。');
+      const path = String(value.certificate_path || '').trim();
+      if (path.length > 4096 || /[\x00-\x1f\x7f]/.test(path) || value.connection_mode === 'https' && !/\.(pfx|p12)$/i.test(path)) throw new Error('请选择服务器上的 .pfx 或 .p12 证书文件。');
+      data.connection_mode = value.connection_mode; data.certificate_path = path;
+      if (Object.prototype.hasOwnProperty.call(value, 'certificate_password')) {
+        if (typeof value.certificate_password !== 'string' || value.certificate_password.length > 1024) throw new Error('证书密码格式不正确。');
+        data.certificate_password = value.certificate_password;
+      }
+    }
+    return data;
   }
   function valid(value) {
-    return Boolean(value && typeof value.security_entry_enabled === 'boolean' && typeof value.security_entry_code === 'string' && typeof value.security_entry_path === 'string' && typeof value.share_port_enabled === 'boolean' && Number.isInteger(value.share_port) && value.share_port > 0 && value.share_port <= 65535 && typeof value.share_listening === 'boolean' && typeof value.public_share_url === 'string' && ['docker', 'desktop', 'source'].includes(value.runtime));
+    const base = Boolean(value && typeof value.security_entry_enabled === 'boolean' && typeof value.security_entry_code === 'string' && typeof value.security_entry_path === 'string' && typeof value.share_port_enabled === 'boolean' && Number.isInteger(value.share_port) && value.share_port > 0 && value.share_port <= 65535 && typeof value.share_listening === 'boolean' && typeof value.public_share_url === 'string' && ['docker', 'desktop', 'source'].includes(value.runtime));
+    if (!base || Object.prototype.hasOwnProperty.call(value, 'certificate_password')) return false;
+    const keys = ['connection_mode', 'certificate_path', 'certificate_password_set', 'https_port', 'https_listening', 'https_error', 'share_scheme'];
+    if (keys.every(key => !Object.prototype.hasOwnProperty.call(value, key))) return true;
+    return ['http', 'proxy', 'https'].includes(value.connection_mode) && typeof value.certificate_path === 'string' && typeof value.certificate_password_set === 'boolean' && Number.isInteger(value.https_port) && value.https_port > 0 && value.https_port <= 65535 && typeof value.https_listening === 'boolean' && typeof value.https_error === 'string' && ['http', 'https'].includes(value.share_scheme);
   }
   function entryUrl(code, enabled, base) {
     const url = new URL(base); url.pathname = enabled ? '/' + encodeURIComponent(code) : '/'; url.search = ''; url.hash = ''; return url.href;
@@ -31,16 +46,23 @@
   }
   function create({ host, api, post, isAdmin, toast = () => {}, onSaved = () => {}, window: injectedWindow }) {
     const doc = host.ownerDocument, win = injectedWindow || doc.defaultView || window;
-    let generation = 0, active = false, snapshot = null, loading = null, busy = false, dirty = false, edits = 0;
+    let generation = 0, active = false, snapshot = null, loading = null, busy = false, dirty = false, edits = 0, clearPassword = false;
     const authorized = () => typeof isAdmin === 'function' ? Boolean(isAdmin()) : Boolean(isAdmin);
     const el = (tag, cls, text) => { const node = doc.createElement(tag); if (cls) node.className = cls; if (text !== undefined) node.textContent = text; return node; };
     const button = (text, handler, primary = false) => { const node = el('button', 'button ' + (primary ? 'button-primary' : 'button-secondary'), text); node.type = 'button'; if (handler) node.addEventListener('click', handler); return node; };
     const input = (name, label) => { const node = el('input'); node.name = name; node.id = 'network-' + name; node.setAttribute('aria-label', label); return node; };
-    const toggle = (name, title, hint) => { const row = el('label', 'network-toggle-row'); const text = el('span', 'network-toggle-copy'); text.append(el('strong', '', title), el('small', '', hint)); const control = input(name, title); control.type = 'checkbox'; control.setAttribute('role', 'switch'); const track = el('span', 'network-toggle'); track.append(control, el('span', 'network-toggle-track')); row.append(text, track); return { row, control }; };
+    const toggle = (name, title, hint) => { const row = el('label', 'network-toggle-row'); const text = el('span', 'network-toggle-copy'); const description = el('small', '', hint); text.append(el('strong', '', title), description); const control = input(name, title); control.type = 'checkbox'; control.setAttribute('role', 'switch'); const track = el('span', 'network-toggle'); track.append(control, el('span', 'network-toggle-track')); row.append(text, track); return { row, control, description }; };
     host.classList.add('network-settings-page'); host.hidden = true;
     const form = el('form', 'network-settings-form');
     const error = el('p', 'network-error'); error.setAttribute('role', 'alert'); error.hidden = true;
     const status = el('p', 'network-save-status'); status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
+    const https = el('section', 'settings-panel network-card'); https.append(el('h2', '', 'HTTPS'));
+    const httpsEnabled = toggle('https_enabled', '启用 HTTPS', '关闭时使用 HTTP；外部反向代理提供 HTTPS 时无需开启。');
+    const certificateDetails = el('div', 'network-details network-certificate-details');
+    const pathLabel = el('label', 'network-field'); pathLabel.append(el('span', '', '证书文件路径')); const certificatePath = input('certificate_path', '证书文件路径'); certificatePath.type = 'text'; certificatePath.autocomplete = 'off'; certificatePath.spellcheck = false; certificatePath.maxLength = 4096; certificatePath.placeholder = '服务器上的 .pfx 或 .p12 文件路径'; pathLabel.append(certificatePath, el('small', 'network-hint', '填写运行 Gravelle 的设备可读取的文件路径，支持 .pfx 和 .p12 证书。'));
+    const passwordLabel = el('label', 'network-field'); passwordLabel.append(el('span', '', '证书密码')); const passwordControls = el('div', 'network-input-actions'); const certificatePassword = input('certificate_password', '证书密码'); certificatePassword.type = 'password'; certificatePassword.autocomplete = 'new-password'; certificatePassword.maxLength = 1024; certificatePassword.placeholder = '证书没有密码时留空';
+    const clearStoredPassword = button('清除已保存密码', () => { certificatePassword.value = ''; clearPassword = !clearPassword; changed(); }); passwordControls.append(certificatePassword, clearStoredPassword); const passwordHint = el('small', 'network-hint'); passwordLabel.append(passwordControls, passwordHint);
+    const httpsPortRow = el('div', 'network-port-row'); const httpsPort = el('strong', 'network-port'); const httpsListening = el('span', 'network-listening'); httpsListening.setAttribute('role', 'status'); httpsPortRow.append(httpsPort, httpsListening); const httpsPortHint = el('p', 'network-hint'); certificateDetails.append(pathLabel, passwordLabel, httpsPortRow, httpsPortHint); https.append(httpsEnabled.row, certificateDetails);
     const security = el('section', 'settings-panel network-card'); security.append(el('h2', '', '安全入口'));
     const enabled = toggle('security_entry_enabled', '启用安全入口', '通过专属路径进入阅读器，降低登录入口被随意发现的机会。'); security.append(enabled.row);
     const entry = el('div', 'network-details'); const codeLabel = el('label', 'network-field'); codeLabel.append(el('span', '', '安全入口码')); const codeControls = el('div', 'network-input-actions'); const code = input('security_entry_code', '安全入口码'); code.type = 'text'; code.autocomplete = 'off'; code.spellcheck = false; code.maxLength = 64; code.minLength = 8; code.pattern = '[A-Za-z0-9_-]{8,64}'; code.placeholder = '8–64 位英文字母、数字、_ 或 -';
@@ -48,25 +70,35 @@
     const address = el('output', 'network-entry-url'); address.setAttribute('aria-label', '安全入口完整地址'); const copyEntry = button('复制地址', async () => { try { await win.navigator.clipboard.writeText(address.textContent); toast('安全入口地址已复制'); } catch (_) { toast('请选中安全入口地址后复制'); } }); const addressRow = el('div', 'network-address-row'); addressRow.append(address, copyEntry);
     entry.append(codeLabel, addressRow, el('p', 'network-hint', '保存后请收藏完整地址，并同步告知其他账号。安全入口只增加入口控制，不能代替密码和 HTTPS。'), el('p', 'network-hint network-recovery', '忘记入口时：Windows 或 macOS 请先停止阅读器，再通过启动器关闭安全入口。Docker 请先停止原容器，再按部署说明使用同一数据映射运行一次性恢复容器。恢复只关闭安全入口，不修改账号和写真。')); security.append(entry);
     const sharing = el('section', 'settings-panel network-card'); sharing.append(el('h2', '', '独立分享端口')); const separate = toggle('share_port_enabled', '启用独立分享端口', '公网只转发分享端口，登录与管理继续通过默认端口访问。'); sharing.append(separate.row);
-    const shareDetails = el('div', 'network-details'); const portRow = el('div', 'network-port-row'); const port = el('strong', 'network-port'); const listening = el('span', 'network-listening'); listening.setAttribute('role', 'status'); portRow.append(port, listening); const portHint = el('p', 'network-hint'); shareDetails.append(portRow, portHint, el('p', 'network-hint', '此端口只提供分享页面及其必需资源，根地址、账号登录和管理接口不开放。')); sharing.append(shareDetails);
+    const shareDetails = el('div', 'network-details'); const portRow = el('div', 'network-port-row'); const port = el('strong', 'network-port'); const listening = el('span', 'network-listening'); listening.setAttribute('role', 'status'); portRow.append(port, listening); const portHint = el('p', 'network-hint'); const shareProtocolHint = el('p', 'network-hint'); shareDetails.append(portRow, portHint, shareProtocolHint, el('p', 'network-hint', '此端口只提供分享页面及其必需资源，根地址、账号登录和管理接口不开放。')); sharing.append(shareDetails);
     const publicPanel = el('section', 'settings-panel network-card'); publicPanel.append(el('h2', '', '公网分享地址')); const publicLabel = el('label', 'network-field'); publicLabel.append(el('span', '', '分享链接前缀')); const publicInput = input('public_share_url', '公网分享地址'); publicInput.type = 'url'; publicInput.autocomplete = 'off'; publicInput.spellcheck = false; publicInput.placeholder = 'https://photos.example.com'; publicInput.maxLength = 2048; publicLabel.append(publicInput); const publicHint = el('p', 'network-hint'); publicPanel.append(publicLabel, publicHint);
-    const actions = el('div', 'network-actions'); const refresh = button('刷新状态', () => load(true).catch(() => {})); const discard = button('放弃修改', () => { if (snapshot) { dirty = false; fill(snapshot); showError(''); update(); } }); const save = el('button', 'button button-primary', '保存网络设置'); save.type = 'submit'; actions.append(refresh, discard, save); form.append(security, sharing, publicPanel, actions, status); host.append(error, form);
-    function showError(message, reveal = false) { error.textContent = message || ''; error.hidden = !message; if (message && reveal && active) error.scrollIntoView?.({ block: 'nearest' }); }
-    function fill(value) { enabled.control.checked = value.security_entry_enabled; code.value = value.security_entry_code; separate.control.checked = value.share_port_enabled; publicInput.value = value.public_share_url; }
+    const actions = el('div', 'network-actions'); const refresh = button('刷新状态', () => load(true).catch(() => {})); const discard = button('放弃修改', () => { if (snapshot) { dirty = false; fill(snapshot); showError(''); update(); } }); const save = el('button', 'button button-primary', '保存网络设置'); save.type = 'submit'; actions.append(refresh, discard, save); form.append(https, security, sharing, publicPanel, actions, status); host.append(error, form);
+    function showError(message, reveal = false) { let text = String(message || ''); if (certificatePassword.value) text = text.split(certificatePassword.value).join('［已隐藏］'); error.textContent = text; error.hidden = !text; if (text && reveal && active) error.scrollIntoView?.({ block: 'nearest' }); }
+    function fill(value) { enabled.control.checked = value.security_entry_enabled; code.value = value.security_entry_code; separate.control.checked = value.share_port_enabled; publicInput.value = value.public_share_url; httpsEnabled.control.checked = value.connection_mode === 'https'; certificatePath.value = value.certificate_path || ''; certificatePassword.value = ''; clearPassword = false; }
     function update() {
-      const unavailable = busy || !snapshot; for (const control of [enabled.control, separate.control, code, generate, publicInput]) control.disabled = unavailable;
+      const unavailable = busy || !snapshot, tlsSupported = Boolean(snapshot && Object.prototype.hasOwnProperty.call(snapshot, 'connection_mode')), ownCertificate = httpsEnabled.control.checked; for (const control of [enabled.control, separate.control, code, generate, publicInput]) control.disabled = unavailable;
+      httpsEnabled.control.disabled = unavailable || !tlsSupported; certificatePath.disabled = certificatePassword.disabled = unavailable || !ownCertificate || !tlsSupported; certificatePath.required = ownCertificate; certificateDetails.hidden = !ownCertificate;
+      clearStoredPassword.hidden = !snapshot?.certificate_password_set; clearStoredPassword.disabled = unavailable || !ownCertificate; clearStoredPassword.textContent = clearPassword ? '取消清除密码' : '清除已保存密码';
+      certificatePassword.placeholder = snapshot?.certificate_password_set && !clearPassword ? '已设置，留空继续使用' : '证书没有密码时留空'; passwordHint.textContent = clearPassword ? '保存后将清除已保存的证书密码。' : snapshot?.certificate_password_set ? '已有密码不会在网页显示。留空保留，填写新密码后保存即可替换。' : '证书有密码时填写，密码仅保存在服务端。';
+      httpsEnabled.description.textContent = !tlsSupported && snapshot ? '当前服务尚不支持 HTTPS 配置。' : ownCertificate ? '使用已有证书提供 HTTPS，原 HTTP 端口继续可用。' : '关闭时使用 HTTP；外部反向代理提供 HTTPS 时无需开启。';
+      httpsPort.textContent = snapshot ? 'HTTPS 端口 ' + (snapshot.https_port || 8443) : 'HTTPS 端口 —'; const pendingHttps = snapshot?.connection_mode !== 'https' && ownCertificate;
+      httpsListening.textContent = pendingHttps ? '保存后启用' : snapshot?.https_listening ? '正在监听' : snapshot?.https_error || '尚未开始监听'; httpsListening.dataset.state = !pendingHttps && snapshot?.https_listening ? 'ready' : 'idle';
+      httpsPortHint.textContent = snapshot?.runtime === 'docker' ? 'Docker 容器内 HTTPS 端口固定为 8443，请在部署时映射 8443。' : snapshot?.runtime === 'desktop' ? '如需修改 HTTPS 端口，请在 Windows 或 macOS 启动器中设置。' : 'HTTPS 端口由服务启动参数配置，设置页面仅显示实际端口。';
       code.disabled = generate.disabled = unavailable || !enabled.control.checked;
       code.required = enabled.control.checked; entry.hidden = !enabled.control.checked; shareDetails.hidden = !separate.control.checked; save.disabled = unavailable || Boolean(loading) || !dirty; discard.disabled = unavailable || !dirty; refresh.disabled = busy || Boolean(loading); form.setAttribute('aria-busy', String(busy || Boolean(loading)));
       status.textContent = busy ? '正在保存…' : dirty ? '有尚未保存的修改' : snapshot ? '设置已保存' : '正在读取网络设置…';
       try { address.textContent = entryUrl(code.value, true, win.location.href); } catch (_) { address.textContent = ''; } copyEntry.disabled = unavailable || !/^[A-Za-z0-9_-]{8,64}$/.test(code.value);
-      port.textContent = snapshot ? '端口 ' + snapshot.share_port : '端口 —';
+      port.textContent = snapshot ? (snapshot.share_scheme === 'https' ? 'HTTPS' : 'HTTP') + ' · 端口 ' + snapshot.share_port : '端口 —';
       listening.textContent = !snapshot?.share_port_enabled ? '未启用' : snapshot.share_listening ? '正在监听' : snapshot.share_error || '尚未开始监听'; listening.dataset.state = snapshot?.share_port_enabled && snapshot.share_listening ? 'ready' : 'idle';
       portHint.textContent = snapshot?.runtime === 'docker' ? 'Docker 容器内分享端口固定为 8081，请在部署时映射 8081。设置页面不修改容器端口；宿主机端口由部署映射决定。' : snapshot?.runtime === 'desktop' ? '如需修改分享端口，请在 Windows 或 macOS 启动器中设置。' : '分享端口由服务启动参数配置，设置页面仅负责启用或关闭。';
+      shareProtocolHint.hidden = !ownCertificate; shareProtocolHint.textContent = pendingHttps ? '保存后，独立分享端口改用 HTTPS，与主服务共用同一份证书。' : '独立分享端口使用 HTTPS，与主服务共用同一份证书。';
       publicHint.textContent = '仅填写 http / https 的域名和端口，不带 /share 等路径。留空将使用当前主机地址与端口，可能无法从外网访问。';
     }
     function changed() { dirty = true; edits++; showError(''); update(); }
     for (const control of [enabled.control, separate.control]) control.addEventListener('change', changed);
     for (const control of [code, publicInput]) control.addEventListener('input', changed);
+    httpsEnabled.control.addEventListener('change', () => { if (!httpsEnabled.control.checked) { certificatePassword.value = ''; clearPassword = false; } changed(); });
+    certificatePath.addEventListener('input', changed); certificatePassword.addEventListener('input', () => { if (certificatePassword.value) clearPassword = false; changed(); });
     async function load(force = false) {
       if (!authorized()) throw new Error('仅管理员可管理网络设置。');
       if (busy) throw new Error('正在保存网络设置，请稍后重试。');
@@ -76,13 +108,15 @@
     }
     form.addEventListener('submit', async event => {
       event.preventDefault(); if (busy || loading || !snapshot || !authorized() || !form.reportValidity()) return;
-      let data; try { data = payload({ security_entry_enabled: enabled.control.checked, security_entry_code: code.value, share_port_enabled: separate.control.checked, public_share_url: publicInput.value }); } catch (problem) { showError(problem.message, true); return; }
+      let data; try { data = payload({ security_entry_enabled: enabled.control.checked, security_entry_code: code.value, share_port_enabled: separate.control.checked, public_share_url: publicInput.value,
+        ...(Object.prototype.hasOwnProperty.call(snapshot, 'connection_mode') ? { connection_mode: httpsEnabled.control.checked ? 'https' : 'http', certificate_path: certificatePath.value,
+          ...(httpsEnabled.control.checked && (certificatePassword.value || clearPassword) ? { certificate_password: clearPassword ? '' : certificatePassword.value } : {}) } : {}) }); } catch (problem) { showError(problem.message, true); return; }
       const token = generation; busy = true; showError(''); update();
       try { const value = await post('/api/network-settings', data); if (token !== generation || !authorized()) return; if (!valid(value)) throw new Error('服务端未返回完整网络设置，请刷新状态核对。'); replaceEntry(value, win); snapshot = value; dirty = false; fill(value); onSaved(value); toast('网络设置已保存'); }
       catch (problem) { if (token === generation && authorized()) showError(problem.message || '保存失败，请重试。', true); }
       finally { if (token === generation) { busy = false; update(); } }
     });
-    return { getSettings: load, show() { if (!authorized()) return; host.hidden = false; if (!active) { active = true; load(true).catch(() => {}); } }, hide() { active = false; host.hidden = true; }, reset() { generation++; active = false; snapshot = null; loading = null; busy = dirty = false; edits++; code.value = publicInput.value = ''; enabled.control.checked = separate.control.checked = false; host.hidden = true; showError(''); update(); } };
+    return { getSettings: load, show() { if (!authorized()) return; host.hidden = false; if (!active) { active = true; load(true).catch(() => {}); } }, hide() { active = false; host.hidden = true; }, reset() { generation++; active = false; snapshot = null; loading = null; busy = dirty = false; clearPassword = false; edits++; code.value = publicInput.value = certificatePath.value = certificatePassword.value = ''; httpsEnabled.control.checked = enabled.control.checked = separate.control.checked = false; host.hidden = true; showError(''); update(); } };
   }
   return { publicUrl, payload, valid, entryUrl, replaceEntry, create };
 });

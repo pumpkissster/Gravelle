@@ -15,8 +15,12 @@
 .network-toggle input:disabled + .network-toggle-track { opacity: .45; }
 .network-details { margin-top: 22px; padding-top: 22px; border-top: 1px solid var(--line); }
 .network-field { display: flex; flex-direction: column; gap: 10px; font-size: 13px; }
-.network-field input { box-sizing: border-box; width: 100%; min-height: 44px; padding: 11px 14px; border-radius: 11px; background: var(--paper); border: 1px solid var(--line); color: var(--ink); font: inherit; }
-.network-field input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.network-field :is(input, select) { box-sizing: border-box; width: 100%; min-height: 44px; padding: 11px 14px; border-radius: 11px; background: var(--paper); border: 1px solid var(--line); color: var(--ink); font: inherit; }
+.network-field :is(input, select):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.network-certificate-details { display: flex; flex-direction: column; gap: 20px; }
+.network-certificate-details .network-port-row { margin-bottom: 0; }
+.network-certificate-details > .network-hint { margin: -10px 0 0; }
+.network-field > .network-hint { margin: 0; }
 .network-input-actions, .network-address-row { display: flex; align-items: center; gap: 10px; }
 .network-input-actions input { flex: 1; min-width: 0; }
 .network-settings-page .button { border-radius: 11px; min-height: 42px; white-space: nowrap; }

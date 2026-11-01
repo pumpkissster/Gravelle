@@ -45,7 +45,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         os.chdir(self.root)
         self.env = {
             'REQUESTED_VERSION': '', 'PUBLISH': 'false', 'EVENT_NAME': 'push',
-            'GITHUB_REF': 'refs/heads/dev/release-0.9.2', 'DEFAULT_BRANCH': 'main',
+            'GITHUB_REF': 'refs/heads/dev/release-0.9.3', 'DEFAULT_BRANCH': 'main',
             'SOURCE_TAG': '', 'GITHUB_OUTPUT': str(self.root / 'github-output'),
             'RELEASE_VERSION': '0.9.1', 'MACOS_REQUIRED': 'true',
             'RUNNER_TEMP': str(self.root / 'runner'),

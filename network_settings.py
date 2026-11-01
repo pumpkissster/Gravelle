@@ -24,6 +24,7 @@ import time
 from urllib.parse import urlsplit
 
 from password_reset import DataDirectoryLock, PasswordResetError
+from https_settings import CertificatePasswordVault, validate_certificate_path
 
 ENTRY_COOKIE = "gravelle_entry"
 ENTRY_SECONDS = 30 * 24 * 60 * 60
@@ -83,6 +84,7 @@ def validate_public_share_url(value):
 def _defaults():
     return {"security_entry_enabled": False, "security_entry_code": "",
             "share_port_enabled": False, "public_share_url": "",
+            "connection_mode": "http", "certificate_path": "", "certificate_password_ciphertext": "",
             "entry_epoch": secrets.token_hex(32)}
 
 
@@ -91,8 +93,11 @@ def _decode(raw):
         value = json.loads(raw)
         expected = {"security_entry_enabled", "security_entry_code", "share_port_enabled",
                     "public_share_url", "entry_epoch"}
-        if not isinstance(value, dict) or set(value) != expected:
+        tls = {"connection_mode", "certificate_path", "certificate_password_ciphertext"}
+        if not isinstance(value, dict) or set(value) not in (expected, expected | tls):
             raise ValueError
+        if set(value) == expected:
+            value.update(connection_mode="http", certificate_path="", certificate_password_ciphertext="")
         for key in ("security_entry_enabled", "share_port_enabled"):
             if type(value[key]) is not bool:
                 raise ValueError
@@ -102,6 +107,12 @@ def _decode(raw):
         elif not isinstance(code, str):
             raise ValueError
         validate_public_share_url(value["public_share_url"])
+        if value["connection_mode"] not in {"http", "proxy", "https"}:
+            raise ValueError
+        if (not isinstance(value["certificate_path"], str) or len(value["certificate_path"]) > 4096
+                or not isinstance(value["certificate_password_ciphertext"], str)
+                or len(value["certificate_password_ciphertext"]) > 5600):
+            raise ValueError
         if not isinstance(value["entry_epoch"], str) or not re.fullmatch(r"[a-f0-9]{64}", value["entry_epoch"]):
             raise ValueError
         return value
@@ -170,6 +181,14 @@ def _recovery_settings(raw):
     except ValueError:
         value["public_share_url"] = ""
         warnings.append("public_share_url_cleared")
+    # Entry recovery must never turn a TLS sharing listener into plaintext.
+    # Preserve well-formed TLS fields even when the unrelated entry is corrupt.
+    if any(key in document for key in ("connection_mode", "certificate_path", "certificate_password_ciphertext")):
+        mode = document.get("connection_mode")
+        value["connection_mode"] = mode if isinstance(mode, str) and mode in {"http", "proxy", "https"} else "https"
+        for key, maximum in (("certificate_path", 4096), ("certificate_password_ciphertext", 5600)):
+            field = document.get(key)
+            value[key] = field if isinstance(field, str) and len(field) <= maximum else ""
     return value, warnings
 
 
@@ -223,6 +242,7 @@ class NetworkSettings:
     def __init__(self, library):
         self.library = library
         self.lock = threading.RLock()
+        self.passwords = CertificatePasswordVault(library.data)
         with closing(library.connect()) as connection, connection:
             existed = connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='network_settings'").fetchone()
             connection.execute("CREATE TABLE IF NOT EXISTS network_settings(id INTEGER PRIMARY KEY CHECK(id=1),settings TEXT NOT NULL)")
@@ -232,6 +252,8 @@ class NetworkSettings:
             self.value = _decode(row[0]) if row is not None else _defaults()
             if row is None:
                 connection.execute("INSERT INTO network_settings(id,settings) VALUES(1,?)", (json.dumps(self.value),))
+            elif json.loads(row[0]) != self.value:
+                connection.execute("UPDATE network_settings SET settings=? WHERE id=1", (json.dumps(self.value),))
 
     def current(self):
         with self.lock:
@@ -239,7 +261,8 @@ class NetworkSettings:
 
     def prepare(self, body):
         if not isinstance(body, dict) or not body or set(body) - {
-                "security_entry_enabled", "security_entry_code", "share_port_enabled", "public_share_url"}:
+                "security_entry_enabled", "security_entry_code", "share_port_enabled", "public_share_url",
+                "connection_mode", "certificate_path", "certificate_password"}:
             raise ValueError("网络设置包含不支持的字段，端口只能在启动器或部署配置中设置。")
         value = self.current()
         for key in ("security_entry_enabled", "share_port_enabled"):
@@ -258,10 +281,22 @@ class NetworkSettings:
             validate_entry_code(value["security_entry_code"])
         if "public_share_url" in body:
             value["public_share_url"] = validate_public_share_url(body["public_share_url"])
+        if "connection_mode" in body:
+            if not isinstance(body["connection_mode"], str) or body["connection_mode"] not in {"http", "proxy", "https"}:
+                raise ValueError("连接方式无效。")
+            value["connection_mode"] = body["connection_mode"]
+        if "certificate_path" in body:
+            value["certificate_path"] = validate_certificate_path(body["certificate_path"])
+        if "certificate_password" in body:
+            value["certificate_password_ciphertext"] = self.passwords.seal(body["certificate_password"])
         old = self.current()
         if any(old[key] != value[key] for key in ("security_entry_enabled", "security_entry_code")):
             value["entry_epoch"] = secrets.token_hex(32)
         return value
+
+    def certificate_password(self, value=None):
+        value = self.current() if value is None else value
+        return self.passwords.reveal(value["certificate_password_ciphertext"])
 
     def persist(self, value):
         with self.lock, closing(self.library.connect()) as connection, connection:

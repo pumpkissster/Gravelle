@@ -52,7 +52,8 @@ def serve_private(options) -> int:
         from desktop.runtime import serve
         startup_trace("entry.import_runtime.end")
         startup_trace("entry.serve.begin")
-        return serve(LauncherConfig(port=options.port, share_port=getattr(options, "share_port", None), lan_enabled=options.host == "0.0.0.0",
+        return serve(LauncherConfig(port=options.port, share_port=getattr(options, "share_port", None),
+                                    https_port=getattr(options, "https_port", None), lan_enabled=options.host == "0.0.0.0",
                                     library_paths=options.library), options.data, options.instance)
     finally:
         if timer is not None:
@@ -111,6 +112,7 @@ def main(argv=None) -> int:
     parser.add_argument("--host", choices=("127.0.0.1", "0.0.0.0"), default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--share-port", type=int)
+    parser.add_argument("--https-port", type=int)
     parser.add_argument("--instance", default="")
     parser.add_argument("--report", type=Path)
     parser.add_argument("--smoke-scenario", choices=("idle", "running", "hidden"))
@@ -139,7 +141,7 @@ def main(argv=None) -> int:
     if options.smoke_launcher:
         if not options.data or not options.config or not options.report:
             parser.error("--smoke-launcher requires explicit --data, --config and --report")
-        if options.library or options.host != "127.0.0.1" or options.port != 8080 or options.share_port is not None or options.instance:
+        if options.library or options.host != "127.0.0.1" or options.port != 8080 or options.share_port is not None or options.https_port is not None or options.instance:
             parser.error("GUI smoke does not accept service arguments")
         try:
             storage, config_path, report_path = validate_smoke_paths(options.data, options.config, options.report)
@@ -167,7 +169,7 @@ def main(argv=None) -> int:
     if options.diagnose:
         restore_private_stdio()
         try:
-            config = (LauncherConfig(port=options.port, share_port=options.share_port, lan_enabled=options.host == "0.0.0.0",
+            config = (LauncherConfig(port=options.port, share_port=options.share_port, https_port=options.https_port, lan_enabled=options.host == "0.0.0.0",
                                      library_paths=options.library) if options.library else load_config(config_path))
             result = {"version": VERSION, "data_directory": str(options.data or storage / "data"),
                       "configuration": str(config_path), **network_diagnostics(config),
@@ -177,7 +179,7 @@ def main(argv=None) -> int:
         except (LauncherError, OSError) as error:
             print(json.dumps({"error": str(error)}, ensure_ascii=False))
             return 1
-    if options.library or options.data or options.host != "127.0.0.1" or options.port != 8080 or options.share_port is not None or options.instance:
+    if options.library or options.data or options.host != "127.0.0.1" or options.port != 8080 or options.share_port is not None or options.https_port is not None or options.instance:
         parser.error("Service arguments require --serve or --diagnose")
     if sys.platform != "darwin":
         parser.error("The native macOS launcher requires macOS")

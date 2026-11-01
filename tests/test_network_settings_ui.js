@@ -7,6 +7,7 @@ const Sharing = require('../static/sharing-ui.js');
 const Routes = require('../static/page-router.js');
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const state = { security_entry_enabled: false, security_entry_code: '', security_entry_path: '/', share_port_enabled: false, share_port: 8081, share_listening: false, share_error: '', public_share_url: '', runtime: 'docker' };
+const tlsState = { ...state, connection_mode: 'http', certificate_path: '', certificate_password_set: false, https_port: 8443, https_listening: false, https_error: '', share_scheme: 'http' };
 const share = { token: 'x'.repeat(43) };
 class Element {
   constructor(tag, ownerDocument) { this.tagName = tag; this.ownerDocument = ownerDocument; this.children = []; this.handlers = {}; this.attributes = {}; this.dataset = {}; this.value = ''; this.textContent = ''; this.checked = false; this.hidden = false; this.className = ''; this.classList = { add: name => { this.className += ' ' + name; } }; }
@@ -18,11 +19,12 @@ class Element {
 }
 function fixture(options = {}) {
   const calls = [], posts = [], history = [], copied = [], messages = [];
+  const initial = options.state || state;
   const win = { location: { href: 'http://192.0.2.10:7878/#/settings/network' }, history: { state: { marker: true }, replaceState(...args) { history.push(args); } }, navigator: { clipboard: { async writeText(value) { copied.push(value); } } }, crypto: { getRandomValues(bytes) { bytes.fill(25); return bytes; } } };
   const doc = { defaultView: win, createElement(tag) { return new Element(tag, doc); } }; const host = new Element('section', doc);
   const walk = node => [node, ...node.children.flatMap(walk)]; const get = name => walk(host).find(node => node.name === name || node.textContent === name);
   let admin = true;
-  const ui = Network.create({ host, isAdmin: () => admin, api: async path => { calls.push(path); return options.api ? options.api(path) : { ...state }; }, post: async (path, data) => { posts.push({ path, data }); return options.post ? options.post(path, data) : { ...state, ...data, security_entry_path: data.security_entry_enabled ? '/' + data.security_entry_code : '/' }; }, toast: value => messages.push(value) });
+  const ui = Network.create({ host, isAdmin: () => admin, api: async path => { calls.push(path); return options.api ? options.api(path) : { ...initial }; }, post: async (path, data) => { posts.push({ path, data }); if (options.post) return options.post(path, data); const response = { ...initial, ...data, security_entry_path: data.security_entry_enabled ? '/' + data.security_entry_code : '/' }; if ('connection_mode' in response) { response.certificate_password_set = Object.prototype.hasOwnProperty.call(data, 'certificate_password') ? Boolean(data.certificate_password) : initial.certificate_password_set; response.https_listening = data.connection_mode === 'https'; response.share_scheme = data.connection_mode === 'https' ? 'https' : 'http'; } delete response.certificate_password; return response; }, toast: value => messages.push(value) });
   return { ui, host, win, get, walk, calls, posts, history, copied, messages, setAdmin(value) { admin = value; }, form: () => walk(host).find(node => node.tagName === 'form') };
 }
 
@@ -48,6 +50,104 @@ test('share URLs prioritize configured public origin, then independent port, the
   for (const url of ['javascript:alert(1)', 'https://u:p@evil.example', 'https://evil.example/path', 'https://evil.example/?x=1', '//evil.example']) assert.throws(() => Sharing.shareUrl(share, base, { public_share_url: url }));
   assert.throws(() => Sharing.shareUrl(share, 'javascript:alert(1)'));
   assert.throws(() => Sharing.shareUrl(share, base, { share_port_enabled: true, share_port: '8081' }));
+  assert.equal(Sharing.shareUrl(share, base, { share_port_enabled: true, share_port: 8081, share_scheme: 'https' }), 'https://192.0.2.10:8081/share/' + share.token);
+  assert.equal(Sharing.shareUrl(share, 'https://photos.example:443/#/home', { share_port_enabled: true, share_port: 8081, share_scheme: 'http' }), 'http://photos.example:8081/share/' + share.token);
+  assert.equal(Sharing.shareUrl(share, base, { connection_mode: 'https', https_port: 8443 }), 'https://192.0.2.10:8443/share/' + share.token);
+  assert.equal(Sharing.shareUrl(share, 'https://photos.example:9443/#/home', { connection_mode: 'https', https_port: 8443 }), 'https://photos.example:9443/share/' + share.token);
+  assert.equal(Sharing.shareUrl(share, base, { public_share_url: 'http://explicit.example:9876', share_port_enabled: true, share_port: 8081, share_scheme: 'https' }), 'http://explicit.example:9876/share/' + share.token);
+  assert.throws(() => Sharing.shareUrl(share, base, { share_port_enabled: true, share_port: 8081, share_scheme: 'ftp' }));
+  assert.throws(() => Sharing.shareUrl(share, base, { connection_mode: 'https', https_port: 0 }));
+});
+
+test('HTTPS payload preserves optional passwords and rejects invalid modes or certificate paths', () => {
+  const value = { ...tlsState, connection_mode: 'https', certificate_path: ' /certificates/写真.PFX ' };
+  const keep = Network.payload(value); assert.equal(keep.connection_mode, 'https'); assert.equal(keep.certificate_path, '/certificates/写真.PFX'); assert.ok(!('certificate_password' in keep)); assert.ok(!('https_port' in keep));
+  assert.equal(Network.payload({ ...value, certificate_password: '' }).certificate_password, '');
+  assert.equal(Network.payload({ ...value, certificate_password: '  exact password  ' }).certificate_password, '  exact password  ');
+  for (const connection_mode of ['', 'tls', 'HTTPS', null]) assert.throws(() => Network.payload({ ...value, connection_mode }));
+  for (const certificate_path of ['', '/cert/a.pem', '/cert/a.pfx\nother.pfx', '/cert/a.p12\0']) assert.throws(() => Network.payload({ ...value, certificate_path }));
+  assert.throws(() => Network.payload({ ...value, certificate_password: 42 }));
+  assert.throws(() => Network.payload({ ...value, certificate_password: 'x'.repeat(1025) }));
+});
+
+test('network snapshots accept legacy servers but never accept a returned certificate password', () => {
+  assert.equal(Network.valid(state), true); assert.equal(Network.valid(tlsState), true);
+  assert.equal(Network.valid({ ...tlsState, certificate_password: 'must-not-return' }), false);
+  assert.equal(Network.valid({ ...state, connection_mode: 'https' }), false);
+  assert.equal(Network.valid({ ...tlsState, https_port: '8443' }), false);
+  assert.equal(Network.valid({ ...tlsState, share_scheme: 'ftp' }), false);
+});
+
+test('HTTPS switch reveals certificate controls and web settings cannot edit ports', async () => {
+  const f = fixture({ state: tlsState }); f.ui.show(); await tick(); const details = f.walk(f.host).find(node => node.className.includes('network-certificate-details'));
+  assert.equal(f.get('https_enabled').disabled, false); assert.equal(f.get('https_enabled').checked, false); assert.equal(details.hidden, true);
+  assert.equal(f.get('https_enabled').attributes.role, 'switch'); assert.equal(f.walk(f.host).filter(node => node.tagName === 'select').length, 0);
+  assert.ok(f.walk(f.host).some(node => node.textContent.includes('反向代理提供 HTTPS 时无需开启')));
+  f.get('https_enabled').checked = true; f.get('https_enabled').emit('change'); assert.equal(details.hidden, false); assert.equal(f.get('certificate_path').required, true);
+  assert.ok(f.walk(f.host).some(node => node.textContent.includes('固定为 8443')));
+  assert.equal(f.walk(f.host).filter(node => node.tagName === 'input' && /port/.test(node.name || '')).length, 1); // Existing independent-share switch, never a numeric port input.
+  assert.equal(f.walk(f.host).filter(node => node.tagName === 'input' && node.type === 'number').length, 0);
+});
+
+test('saving a new certificate replaces its password but clears the secret field after success', async () => {
+  const f = fixture({ state: tlsState }); f.ui.show(); await tick();
+  f.get('https_enabled').checked = true; f.get('https_enabled').emit('change');
+  f.get('certificate_path').value = '/certs/reader.p12'; f.get('certificate_path').emit('input');
+  f.get('certificate_password').value = 'private-password'; f.get('certificate_password').emit('input'); await f.form().emit('submit');
+  assert.equal(f.posts[0].data.certificate_password, 'private-password'); assert.equal(f.get('certificate_password').value, '');
+  assert.equal(f.posts[0].data.connection_mode, 'https'); assert.equal(f.get('https_enabled').checked, true);
+  assert.match(f.get('certificate_password').placeholder, /已设置/); assert.equal(f.get('清除已保存密码').hidden, false);
+  assert.ok(!f.walk(f.host).some(node => node.textContent.includes('private-password'))); assert.ok(!JSON.stringify(f.history).includes('private-password'));
+});
+
+test('an existing certificate password is retained on blank save and explicitly clearable', async () => {
+  const configured = { ...tlsState, connection_mode: 'https', certificate_path: '/certs/reader.pfx', certificate_password_set: true, https_listening: true, share_scheme: 'https' };
+  const f = fixture({ state: configured }); f.ui.show(); await tick(); assert.equal(f.get('certificate_password').value, '');
+  f.get('public_share_url').value = 'https://photos.example.com'; f.get('public_share_url').emit('input'); await f.form().emit('submit');
+  assert.ok(!('certificate_password' in f.posts[0].data));
+  f.get('清除已保存密码').emit('click'); assert.equal(f.get('取消清除密码').textContent, '取消清除密码'); await f.form().emit('submit');
+  assert.equal(f.posts[1].data.certificate_password, ''); assert.equal(f.get('清除已保存密码').hidden, true);
+});
+
+test('password drafts survive stale refresh but are cleared by disabling HTTPS, discard and account reset', async () => {
+  let finish, calls = 0; const configured = { ...tlsState, connection_mode: 'https', certificate_path: '/certs/reader.pfx', certificate_password_set: true };
+  const f = fixture({ api() { return ++calls === 1 ? { ...configured } : new Promise(resolve => { finish = resolve; }); } });
+  f.ui.show(); await tick(); const refresh = f.get('刷新状态').emit('click'); f.get('certificate_password').value = 'draft-secret'; f.get('certificate_password').emit('input'); finish({ ...configured, certificate_password_set: false }); await refresh;
+  assert.equal(f.get('certificate_password').value, 'draft-secret');
+  f.get('https_enabled').checked = false; f.get('https_enabled').emit('change'); assert.equal(f.get('certificate_password').value, '');
+  f.get('https_enabled').checked = true; f.get('https_enabled').emit('change'); f.get('certificate_password').value = 'another-secret'; f.get('certificate_password').emit('input'); f.get('放弃修改').emit('click'); assert.equal(f.get('certificate_password').value, '');
+  f.get('certificate_password').value = 'reset-secret'; f.get('certificate_password').emit('input'); f.setAdmin(false); f.ui.reset();
+  assert.equal(f.get('certificate_password').value, ''); assert.equal(f.get('certificate_path').value, ''); assert.equal(f.get('https_enabled').checked, false); assert.equal(f.host.hidden, true);
+});
+
+test('legacy HTTP and proxy settings load with HTTPS off and keep certificate secrets when saved', async () => {
+  for (const connection_mode of ['http', 'proxy']) {
+    const f = fixture({ state: { ...tlsState, connection_mode, certificate_path: '/certs/retained.pfx', certificate_password_set: true } });
+    f.ui.show(); await tick(); assert.equal(f.get('https_enabled').checked, false);
+    f.get('public_share_url').value = 'https://photos.example.com'; f.get('public_share_url').emit('input'); await f.form().emit('submit');
+    assert.equal(f.posts[0].data.connection_mode, 'http'); assert.equal(f.posts[0].data.certificate_path, '/certs/retained.pfx');
+    assert.ok(!('certificate_password' in f.posts[0].data)); assert.ok(!('https_enabled' in f.posts[0].data));
+    assert.equal(f.get('https_enabled').checked, false);
+  }
+  const legacy = fixture(); legacy.ui.show(); await tick(); assert.equal(legacy.get('https_enabled').disabled, true);
+});
+
+test('turning HTTPS off sends HTTP without clearing the saved certificate password', async () => {
+  const f = fixture({ state: { ...tlsState, connection_mode: 'https', certificate_path: '/certs/retained.pfx', certificate_password_set: true } });
+  f.ui.show(); await tick(); f.get('certificate_password').value = 'discard-this-draft'; f.get('certificate_password').emit('input');
+  f.get('https_enabled').checked = false; f.get('https_enabled').emit('change'); await f.form().emit('submit');
+  assert.equal(f.posts[0].data.connection_mode, 'http'); assert.ok(!('certificate_password' in f.posts[0].data));
+  assert.equal(f.get('certificate_password').value, ''); assert.equal(f.get('certificate_password').disabled, true);
+  assert.equal(f.get('certificate_path').required, false);
+});
+
+test('certificate errors never echo the supplied secret and no late save repopulates a reset account', async () => {
+  let finish; const f = fixture({ state: { ...tlsState, connection_mode: 'https', certificate_path: '/certs/reader.pfx' }, post() { return new Promise(resolve => { finish = resolve; }); } });
+  f.ui.show(); await tick(); f.get('certificate_password').value = 'late-secret'; f.get('certificate_password').emit('input'); const saving = f.form().emit('submit');
+  f.setAdmin(false); f.ui.reset(); finish({ ...tlsState, connection_mode: 'https', certificate_path: '/certs/reader.pfx', certificate_password_set: true }); await saving;
+  assert.equal(f.get('certificate_password').value, ''); assert.equal(f.get('certificate_path').value, ''); assert.equal(f.host.hidden, true);
+  const fail = fixture({ state: { ...tlsState, connection_mode: 'https', certificate_path: '/certs/reader.pfx' }, post() { throw new Error('密码不正确: private-secret'); } }); fail.ui.show(); await tick();
+  fail.get('certificate_password').value = 'private-secret'; fail.get('certificate_password').emit('input'); await fail.form().emit('submit'); assert.ok(!fail.walk(fail.host).some(node => node.textContent.includes('private-secret'))); assert.ok(fail.walk(fail.host).some(node => node.textContent.includes('已隐藏')));
 });
 
 test('saving rewrites entry pathname while preserving hash and history state', () => {

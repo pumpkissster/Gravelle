@@ -14,6 +14,9 @@ services:
       # 可选：取消注释并重新创建容器，再在网页开启独立分享端口。
       # 左侧宿主机端口可改；右侧容器端口固定为 8081。
       # - "${SHARE_WEB_PORT:-8081}:8081"
+      # 可选：网页选择使用自己的证书后，主 HTTPS 使用容器内固定 8443。
+      # 独立分享仍使用 8081，并在证书模式下改用 HTTPS。
+      # - "${HTTPS_WEB_PORT:-8443}:8443"
     environment:
       LIBRARY_PATH: /library
       DATA_PATH: /data
@@ -29,6 +32,11 @@ services:
       - type: bind
         source: "${DATA_PATH:-./data}"
         target: /data
+      # 可选：网页中的证书路径填写只读映射后的 /certificates/文件名.pfx。
+      # - type: bind
+      #   source: "${HTTPS_CERTIFICATES_PATH:-./certificates}"
+      #   target: /certificates
+      #   read_only: true
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m,mode=1777

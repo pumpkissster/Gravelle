@@ -1783,6 +1783,9 @@ html body select:disabled { cursor: default; opacity: .5; }
 @supports (appearance: base-select) {
   html body select:not([multiple]):not([size]),
   html body select:not([multiple]):not([size])::picker(select) { appearance: base-select; }
+  /* Center text and arrows in taller controls without changing option rows
+     or browsers that retain the native select appearance. */
+  html body select:not([multiple]):not([size]) { display: inline-flex; align-items: center; }
   html body select:not([multiple]):not([size])::picker(select) {
     border: 1px solid var(--line);
     border-radius: 15px;
@@ -1795,7 +1798,7 @@ html body select:disabled { cursor: default; opacity: .5; }
     overflow-y: auto;
     overscroll-behavior: contain;
   }
-  html body select:not([multiple]):not([size])::picker-icon { color: var(--muted); margin-inline-start: 12px; }
+  html body select:not([multiple]):not([size])::picker-icon { color: var(--muted); align-self: center; margin-inline-start: auto; padding-inline-start: 12px; }
   html:not([data-interface-skin="board"]) body select:not([multiple]):not([size]):open { border-color: var(--accent) !important; }
   html body select option {
     display: flex; align-items: center; gap: 12px;

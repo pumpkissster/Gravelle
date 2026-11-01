@@ -13,7 +13,7 @@ import sys
 import tempfile
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener, urlopen
 
 
 class LauncherError(Exception):
@@ -32,12 +32,20 @@ class LauncherConfig:
     lan_enabled: bool = False
     library_paths: tuple[str, ...] | None = None
     share_port: int | None = None
+    https_port: int | None = None
 
     def __post_init__(self):
         # Older configurations could already use 8081 for the main service.
         # Resolve only an omitted share port; an explicit collision still fails.
         if self.share_port is None:
             object.__setattr__(self, "share_port", 8082 if self.port == 8081 else 8081)
+        if self.https_port is None:
+            # Existing configurations may already use 8443 for HTTP or shares.
+            # Only omitted values migrate; explicit collisions remain errors.
+            candidate = 8443
+            while candidate in (self.port, self.share_port):
+                candidate += 1
+            object.__setattr__(self, "https_port", candidate)
         # Keep the original positional argument and JSON key for older
         # launchers, while the ordered array is authoritative for new ones.
         values = (self.library_path,) if self.library_paths is None else self.library_paths
@@ -78,6 +86,10 @@ class LauncherConfig:
             raise LauncherError("分享端口需要是 1 至 65535 之间的整数。")
         if self.share_port == self.port:
             raise LauncherError("分享端口不能与服务端口相同。")
+        if not isinstance(self.https_port, int) or isinstance(self.https_port, bool) or not 1 <= self.https_port <= 65535:
+            raise LauncherError("HTTPS 端口需要是 1 至 65535 之间的整数。")
+        if self.https_port in (self.port, self.share_port):
+            raise LauncherError("HTTPS 端口不能与服务端口或分享端口相同。")
         if not isinstance(self.lan_enabled, bool):
             raise LauncherError("局域网访问设置无效。")
         if require_directory:
@@ -158,13 +170,45 @@ def lan_addresses() -> list[str]:
     return result
 
 
-def reader_url(config: LauncherConfig, data_path: Path | None = None, address="127.0.0.1") -> str:
+def reader_url(config: LauncherConfig, data_path: Path | None = None, address="127.0.0.1", *, https_ready=False) -> str:
     """Read the current entry on demand, so changing it in the web UI is reflected."""
     path = "/"
     if data_path is not None:
         from network_settings import read_security_entry_path
         path = read_security_entry_path(data_path)
-    return f"http://{address}:{config.port}{path}"
+    scheme, port = ("https", config.https_port) if https_ready else ("http", config.port)
+    return f"{scheme}://{address}:{port}{path}"
+
+
+class _LocalHealthRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def local_connection_status(config: LauncherConfig) -> dict:
+    """Read non-secret local status, never a TLS probe or ownership handshake.
+
+    Browsers remain on local HTTP because a public-domain certificate need not
+    include a loopback IP address. This status only explains the HTTPS listener.
+    """
+    fallback = {"connection_mode": "http", "https_port": config.https_port, "https_listening": False}
+    try:
+        client = build_opener(ProxyHandler({}), _LocalHealthRedirect())
+        with client.open(config.local_url + "api/health", timeout=.5) as response:
+            raw = response.read(16385)
+            if response.status != 200 or len(raw) > 16384:
+                return fallback
+            health = json.loads(raw)
+        if not isinstance(health, dict) or health.get("status") != "ok":
+            return fallback
+        mode = health.get("connection_mode")
+        port = health.get("https_port")
+        if mode not in {"http", "proxy", "https"} or type(port) is not int or port != config.https_port:
+            return fallback
+        return {"connection_mode": mode, "https_port": port,
+                "https_listening": mode == "https" and health.get("https_listening") is True}
+    except (OSError, ValueError, TypeError, URLError):
+        return fallback
 
 
 def security_entry_recovery_warnings(result: dict, language="zh") -> list[str]:
@@ -189,10 +233,15 @@ def security_entry_recovery_warnings(result: dict, language="zh") -> list[str]:
 def network_diagnostics(config: LauncherConfig, running: bool = False, data_path: Path | None = None) -> dict:
     config.validate()
     addresses = lan_addresses() if config.lan_enabled else []
+    connection = local_connection_status(config) if running else {
+        "connection_mode": "http", "https_port": config.https_port, "https_listening": False}
+    tls_ready = connection["https_listening"]
     urls = [reader_url(config, data_path, address) for address in addresses]
     result = {"local_url": reader_url(config, data_path), "lan_enabled": config.lan_enabled,
               "lan_urls": urls, "port": config.port, "firewall_verified": False,
               "share_port": config.share_port,
+              **connection,
+              "https_url": reader_url(config, data_path, https_ready=True) if tls_ready else "",
               "library_paths": list(config.library_paths),
               "directories": [{"path": path, "readable": True} for path in config.library_paths]}
     if running:
@@ -209,6 +258,10 @@ def network_diagnostics(config: LauncherConfig, running: bool = False, data_path
                              else "本机服务端口暂时无法连接。")
         if config.lan_enabled:
             result["message"] += " 请在其他设备打开局域网地址验证访问；此检查无法确认入站防火墙规则。"
+        if connection["connection_mode"] == "https" and not tls_ready:
+            result["message"] += " HTTPS 暂未成功监听，已显示 HTTP 恢复地址；请在网页网络设置中检查证书。"
+        elif tls_ready:
+            result["message"] += f" HTTPS 端口 {config.https_port} 正在监听；本机管理仍使用 HTTP 地址。"
     else:
         result.update(check_port(config))
     result["message"] = f"{len(config.library_paths)} 个写真根文件夹可读取。" + result["message"]

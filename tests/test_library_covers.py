@@ -90,6 +90,41 @@ class LibraryCoverTests(unittest.TestCase):
         self.assertEqual(self.record()["selection"], original["selection"])
         self.assertEqual(self.record()["generation"], original["generation"])
 
+    def test_idle_background_maintenance_does_not_wake_itself(self):
+        self.ready()
+        self.manager.wake.clear()
+        signalled_waits = []
+
+        def maintenance_timeout(timeout):
+            self.assertEqual(timeout, 30)
+            signalled = self.manager.wake.is_set()
+            signalled_waits.append(signalled)
+            if len(signalled_waits) == 3:
+                self.manager.stop_event.set()
+            # Simulate periodic timeouts without waiting thirty seconds.
+            return signalled
+
+        with patch.object(self.manager.wake, "wait", side_effect=maintenance_timeout):
+            self.manager._loop()
+
+        self.assertEqual(signalled_waits, [False, False, False],
+                         "An idle cover check must not bypass the next wait")
+
+    def test_reconcile_wakes_worker_for_changed_cover_but_not_ready_cover(self):
+        self.ready()
+        self.manager.wake.clear()
+        self.manager.reconcile()
+        self.assertFalse(self.manager.wake.is_set())
+        self.assertFalse(self.manager.pending)
+
+        selected = json.loads(self.record()["selection"])[0]
+        with closing(self.app.connect()) as connection, connection:
+            connection.execute("UPDATE books SET signature=? WHERE id=?", ("changed-source", selected))
+
+        self.manager.reconcile()
+        self.assertTrue(self.manager.wake.is_set())
+        self.assertIn(self.library_id, self.manager.pending)
+
     def test_shuffle_with_eight_books_replaces_the_entire_group(self):
         self.ready()
         for _ in range(10):

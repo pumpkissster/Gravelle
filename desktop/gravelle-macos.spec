@@ -29,10 +29,11 @@ analysis = Analysis(
         (str(resources / 'licenses'), 'licenses'),
     ] + pdfium_data,
     hiddenimports=[
-        'server', 'accounts', 'password_reset', 'network_settings', 'transcoding', 'image_search',
+        'server', 'accounts', 'password_reset', 'network_settings', 'https_settings', 'ssl', 'transcoding', 'image_search',
         'image_search_features', 'avatar_face_crop', 'task_scheduler', 'library_covers', 'cache_manager',
         'epub_reader', 'pdf_reader', 'pypdfium2', 'pypdfium2_raw', 'pypdfium2_cfg',
         'sharing', 'share_crypto', 'share_passwords', 'cryptography.hazmat.primitives.ciphers.aead',
+        'cryptography.hazmat.primitives.serialization.pkcs12',
         'desktop.core', 'desktop.platforms', 'desktop.runtime', 'desktop.macos_launcher',
         'PIL.Image', 'cv2', 'numpy', 'objc', 'AppKit', 'Foundation', 'Quartz', 'PyObjCTools.AppHelper',
     ],

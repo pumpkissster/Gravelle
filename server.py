@@ -30,6 +30,7 @@ import re
 import secrets
 import signal
 import socket
+import ssl
 from socketserver import TCPServer
 import sqlite3
 import stat
@@ -56,8 +57,9 @@ from epub_reader import EpubManager, METADATA_VERSION as EPUB_METADATA_VERSION, 
 from sharing import SharingManager
 from network_settings import (NetworkSettings, ENTRY_COOKIE, ENTRY_SECONDS,
                               SHARE_STATIC, SHARE_PAGE, SHARE_GET, SHARE_POST)
+from https_settings import HTTPSSettingsError, load_context
 
-VERSION = "0.9.2"
+VERSION = "0.9.3"
 MEDIA_TYPES = {"manga_jp", "manga_kr", "comic_us", "photo"}
 IMAGE_TYPES = {
     ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
@@ -2897,7 +2899,7 @@ class ReaderServer(ThreadingHTTPServer):
         TCPServer.server_bind(self)
         self.server_name, self.server_port = self.server_address[:2]
 
-    def __init__(self, address, library, *, share_port=8081, runtime=None):
+    def __init__(self, address, library, *, share_port=8081, https_port=8443, runtime=None):
         self.library = library
         self.network_owner = self
         self.share_only = False
@@ -2907,6 +2909,13 @@ class ReaderServer(ThreadingHTTPServer):
         self.share_port = 8081 if self.runtime == "docker" else share_port
         if type(self.share_port) is not int or not 1 <= self.share_port <= 65535:
             raise ValueError("分享端口需要在 1～65535 之间。")
+        self.https_port = 8443 if self.runtime == "docker" else https_port
+        if type(self.https_port) is not int or not 1 <= self.https_port <= 65535:
+            raise ValueError("HTTPS 端口需要在 1～65535 之间。")
+        self.ssl_context = None
+        self.https_server = None
+        self.https_thread = None
+        self.https_error = ""
         self.share_server = None
         self.share_thread = None
         self.share_error = ""
@@ -2918,31 +2927,74 @@ class ReaderServer(ThreadingHTTPServer):
         repository, configuration_error = release_configuration()
         self.updates = UpdateChecker(VERSION, repository, configuration_error)
         super().__init__(address, ReaderHandler)
-        if self.library is not None and self.library.network.current()["share_port_enabled"]:
+        if self.library is not None:
+            value = self.library.network.current()
+            context = None
             try:
-                self._start_share_listener()
-            except OSError:
-                # Never fall back to publishing shares on the management port.
-                self.share_error = "独立分享端口不可用，请检查端口占用和启动配置。"
+                if value["connection_mode"] == "https":
+                    context = self._certificate_context(value)
+                    self.https_server, self.https_thread = self._new_listener(self.https_port, context=context)
+            except (ValueError, OSError) as error:
+                self.https_error = (str(error) if isinstance(error, HTTPSSettingsError)
+                                    else "HTTPS 端口不可用，请检查端口占用和启动配置。")
+            if value["share_port_enabled"]:
+                if value["connection_mode"] == "https" and (context is None or self.https_error):
+                    self.share_error = "HTTPS 配置不可用，独立分享未启动；请通过 HTTP 管理入口修正设置。"
+                else:
+                    try:
+                        self._start_share_listener(context)
+                    except OSError:
+                        self.share_error = "独立分享端口不可用，请检查端口占用和启动配置。"
+            if self.https_error:
+                LOG.error(self.https_error)
+            if self.share_error:
                 LOG.error(self.share_error)
 
-    def _start_share_listener(self):
-        if self.share_port == self.server_address[1]:
-            raise OSError("独立分享端口不能与阅读器端口相同。")
+    def get_request(self):
+        connection, address = TCPServer.get_request(self)
+        context = self.ssl_context
+        if context is not None:
+            try:
+                connection.settimeout(20)
+                # Handshake in the bounded request thread, not the accept loop.
+                connection = context.wrap_socket(connection, server_side=True, do_handshake_on_connect=False)
+            except BaseException:
+                connection.close()
+                raise
+        return connection, address
+
+    def _certificate_context(self, value):
+        if self.https_port == self.server_port or (value["share_port_enabled"] and self.https_port == self.share_port):
+            raise HTTPSSettingsError("HTTPS 端口不能与 HTTP 或独立分享端口相同。")
+        return load_context(value["certificate_path"], self.library.network.certificate_password(value))
+
+    def _new_listener(self, port, *, context=None, share_only=False):
+        if port == self.server_port:
+            raise OSError("listener ports overlap")
         listener = ThreadingHTTPServer.__new__(ReaderServer)
         listener.library = self.library
         listener.network_owner = self
-        listener.share_only = True
+        listener.share_only = share_only
+        listener.ssl_context = context
         listener.static = self.static
-        ThreadingHTTPServer.__init__(listener, (self.server_address[0], self.share_port), ReaderHandler)
+        listener.updates = self.updates
+        listener.image_search_slots = self.image_search_slots
+        listener.image_search_rate_lock = self.image_search_rate_lock
+        listener.image_search_attempts = self.image_search_attempts
+        ThreadingHTTPServer.__init__(listener, (self.server_address[0], port), ReaderHandler)
         thread = threading.Thread(target=listener.serve_forever, kwargs={"poll_interval": .1},
-                                  name="share-http", daemon=True)
+                                  name="share-https" if share_only and context else "share-http" if share_only else "reader-https", daemon=True)
         try:
             thread.start()
         except BaseException:
             ThreadingHTTPServer.server_close(listener)
             raise
-        self.share_server, self.share_thread = listener, thread
+        return listener, thread
+
+    def _start_share_listener(self, context=None):
+        if self.share_port == self.server_address[1]:
+            raise OSError("独立分享端口不能与阅读器端口相同。")
+        self.share_server, self.share_thread = self._new_listener(self.share_port, context=context, share_only=True)
         self.share_error = ""
 
     def _stop_share_listener(self):
@@ -2954,15 +3006,31 @@ class ReaderServer(ThreadingHTTPServer):
         if thread is not None:
             thread.join(timeout=5)
 
+    def _stop_https_listener(self):
+        listener, thread = self.https_server, self.https_thread
+        self.https_server = self.https_thread = None
+        if listener is not None:
+            ThreadingHTTPServer.shutdown(listener)
+            ThreadingHTTPServer.server_close(listener)
+        if thread is not None:
+            thread.join(timeout=5)
+
     def network_snapshot(self):
+        if self.network_owner is not self:
+            return self.network_owner.network_snapshot()
         with self.library.network.lock:
             value = self.library.network.current()
-            return {key: item for key, item in value.items() if key != "entry_epoch"} | {
+            return {key: item for key, item in value.items() if key not in {"entry_epoch", "certificate_password_ciphertext"}} | {
                 "security_entry_path": "/" + value["security_entry_code"] if value["security_entry_enabled"] else "/",
                 "share_port": self.share_port, "share_listening": bool(self.share_server and self.share_thread and self.share_thread.is_alive()),
-                "share_error": self.share_error, "runtime": self.runtime}
+                "share_error": self.share_error, "runtime": self.runtime,
+                "certificate_password_set": bool(value["certificate_password_ciphertext"]),
+                "https_port": self.https_port, "https_listening": bool(self.https_server and self.https_thread and self.https_thread.is_alive()),
+                "https_error": self.https_error, "share_scheme": "https" if value["connection_mode"] == "https" else "http"}
 
     def configure_network(self, body):
+        if self.network_owner is not self:
+            return self.network_owner.configure_network(body)
         with self.library.network.lock:
             if self.network_closing:
                 raise ReaderError("阅读器正在停止。", 503)
@@ -2970,36 +3038,61 @@ class ReaderServer(ThreadingHTTPServer):
                 value = self.library.network.prepare(body)
             except ValueError as error:
                 raise ReaderError(str(error)) from error
-            started = False
-            if value["share_port_enabled"] and self.share_server is None:
-                try:
-                    self._start_share_listener()
-                    started = True
-                except OSError as error:
-                    raise ReaderError("独立分享端口不可用，设置未保存。请检查端口占用和启动配置。", 409) from error
+            context = None
+            started_share = started_https = False
             try:
+                if value["connection_mode"] == "https":
+                    context = self._certificate_context(value)
+                    if self.https_server is None:
+                        self.https_server, self.https_thread = self._new_listener(self.https_port, context=context)
+                        started_https = True
+                if value["share_port_enabled"] and self.share_server is None:
+                    self._start_share_listener(context)
+                    started_share = True
                 self.library.network.persist(value)
-            except BaseException:
-                if started:
+            except (ValueError, OSError) as error:
+                if started_share:
                     self._stop_share_listener()
+                if started_https:
+                    self._stop_https_listener()
+                message = str(error) if isinstance(error, HTTPSSettingsError) else "网络端口不可用，设置未保存。请检查端口占用和启动配置。"
+                raise ReaderError(message, 400 if isinstance(error, HTTPSSettingsError) else 409) from error
+            except BaseException:
+                if started_share:
+                    self._stop_share_listener()
+                if started_https:
+                    self._stop_https_listener()
                 raise
+            # Accepted connections still run the current gate. TLS mode refuses
+            # any plaintext sharing request accepted immediately before this swap.
+            if self.https_server is not None and context is not None:
+                self.https_server.ssl_context = context
+            if self.share_server is not None:
+                self.share_server.ssl_context = context
+            self.https_error = ""
             if not value["share_port_enabled"]:
                 self._stop_share_listener()
                 self.share_error = ""
+            else:
+                self.share_error = ""
+            if value["connection_mode"] != "https":
+                self._stop_https_listener()
             return self.network_snapshot()
 
     def shutdown(self):
-        if not self.share_only and self.library is not None:
+        if self.network_owner is self and self.library is not None:
             with self.library.network.lock:
                 self.network_closing = True
                 self._stop_share_listener()
+                self._stop_https_listener()
         return ThreadingHTTPServer.shutdown(self)
 
     def server_close(self):
-        if not self.share_only and self.library is not None:
+        if self.network_owner is self and self.library is not None:
             with self.library.network.lock:
                 self.network_closing = True
                 self._stop_share_listener()
+                self._stop_https_listener()
         return ThreadingHTTPServer.server_close(self)
 
 
@@ -3055,6 +3148,11 @@ class ReaderHandler(BaseHTTPRequestHandler):
         except Exception:
             return None
 
+    def secure_connection(self):
+        # Direct TLS needs no proxy header. Preserve the existing proxy mode.
+        return (isinstance(self.connection, ssl.SSLSocket)
+                or self.headers.get("X-Forwarded-Proto", "").lower() == "https")
+
     def share_session_token(self):
         try:
             cookies = SimpleCookie()
@@ -3073,7 +3171,7 @@ class ReaderHandler(BaseHTTPRequestHandler):
         cookie["gravelle_share"]["max-age"] = max(0, int(expires_at - time.time()))
         if not session:
             cookie["gravelle_share"]["expires"] = "Thu, 01 Jan 1970 00:00:00 GMT"
-        if self.headers.get("X-Forwarded-Proto", "").lower() == "https":
+        if self.secure_connection():
             cookie["gravelle_share"]["secure"] = True
         return cookie.output(header="").strip()
 
@@ -3207,7 +3305,7 @@ class ReaderHandler(BaseHTTPRequestHandler):
         cookie[COOKIE_NAME]["httponly"] = True
         cookie[COOKIE_NAME]["samesite"] = "Strict"
         cookie[COOKIE_NAME]["max-age"] = 0 if clear else SESSION_SECONDS
-        if self.headers.get("X-Forwarded-Proto", "").lower() == "https":
+        if self.secure_connection():
             cookie[COOKIE_NAME]["secure"] = True
         return cookie.output(header="").strip()
 
@@ -3237,7 +3335,7 @@ class ReaderHandler(BaseHTTPRequestHandler):
         cookie[ENTRY_COOKIE]["httponly"] = True
         cookie[ENTRY_COOKIE]["samesite"] = "Strict"
         cookie[ENTRY_COOKIE]["max-age"] = 0 if clear else ENTRY_SECONDS
-        if self.headers.get("X-Forwarded-Proto", "").lower() == "https":
+        if self.secure_connection():
             cookie[ENTRY_COOKIE]["secure"] = True
         return cookie.output(header="").strip()
 
@@ -3262,11 +3360,15 @@ class ReaderHandler(BaseHTTPRequestHandler):
             if self.server.share_only:
                 if not canonical or not value["share_port_enabled"] or not (share_route or resource):
                     raise ReaderError("页面不存在。", 404)
+                if value["connection_mode"] == "https" and not isinstance(self.connection, ssl.SSLSocket):
+                    raise ReaderError("页面不存在。", 404)
                 return
             if value["share_port_enabled"] and path.startswith(("/share/", "/api/share/")):
                 raise ReaderError("页面不存在。", 404)
             if share_route:
                 if not canonical or value["share_port_enabled"]:
+                    raise ReaderError("页面不存在。", 404)
+                if value["connection_mode"] == "https" and not isinstance(self.connection, ssl.SSLSocket):
                     raise ReaderError("页面不存在。", 404)
                 return
             if resource:
@@ -3338,7 +3440,9 @@ class ReaderHandler(BaseHTTPRequestHandler):
             path = "/"
         query = parse_qs(request.query, keep_blank_values=True)
         if path == "/api/health":
-            self.respond({"status": "ok", "version": VERSION})
+            network = self.server.network_owner.network_snapshot()
+            self.respond({"status": "ok", "version": VERSION,
+                          **{key: network[key] for key in ("connection_mode", "https_port", "https_listening")}})
             return
         if path == "/api/session":
             self.respond(self.library.session(self.session_token()))
@@ -3451,7 +3555,7 @@ class ReaderHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/access":
                 self.library.require_admin()
-                secure = self.headers.get("X-Forwarded-Proto", "").lower() == "https"
+                secure = self.secure_connection()
                 result = access_urls(self.headers.get("Host", ""), secure, self.server.server_address)
                 value = self.library.network.current()
                 if value["security_entry_enabled"]:
@@ -3833,13 +3937,14 @@ def main():
     library = None
     try:
         port = int(os.environ.get("PORT", "8080"))
+        https_port = int(os.environ.get("HTTPS_PORT", "8443"))
         interval = float(os.environ.get("SCAN_INTERVAL", "300"))
         if not 0 <= port <= 65535 or not 0 <= interval <= 31 * 24 * 60 * 60:
             raise ValueError("PORT 或 SCAN_INTERVAL 超出有效范围。")
         library = Library(Path(os.environ.get("LIBRARY_PATH", "./library")),
                           Path(os.environ.get("DATA_PATH", "./data")),
                           os.environ.get("READER_PASSWORD", ""), interval)
-        server = ReaderServer((os.environ.get("HOST", "0.0.0.0"), port), library)
+        server = ReaderServer((os.environ.get("HOST", "0.0.0.0"), port), library, https_port=https_port)
     except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
         if library is not None:
             library.close()

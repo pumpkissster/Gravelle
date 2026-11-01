@@ -29,6 +29,8 @@ def main():
         version("opencv-python-headless")
         import pypdfium2  # noqa: F401
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM  # noqa: F401
+        from cryptography.hazmat.primitives.serialization import pkcs12  # noqa: F401
+        import ssl  # noqa: F401
     except (ImportError, ModuleNotFoundError):
         print("Install the image processing dependencies, then run this file again:")
         print('"' + sys.executable + '" -m pip install -r "' + str(project / "requirements.txt") + '"')

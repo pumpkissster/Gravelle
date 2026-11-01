@@ -61,7 +61,8 @@ def serve(config: LauncherConfig, data_path: Path, instance: str = "") -> int:
         library = Library(roots[0], data_path, "", 300, roots=roots)
         _startup_trace("service.library_init.end")
         _startup_trace("service.bind.begin")
-        server = ReaderServer((config.host, config.port), library, share_port=config.share_port, runtime="desktop")
+        server = ReaderServer((config.host, config.port), library, share_port=config.share_port,
+                              https_port=config.https_port, runtime="desktop")
         _startup_trace("service.bind.end")
         # With PyInstaller --onedir the static directory is in _internal.
         server.static = resource_root() / "static"
@@ -109,6 +110,8 @@ class ServerController:
     def reader_url(self) -> str:
         if self.config is None:
             raise LauncherError("阅读器尚未启动。")
+        # The certificate may cover only a public DNS name, not 127.0.0.1.
+        # Keep local administration and recovery on the owned HTTP listener.
         return reader_url(self.config, self.data_path)
 
     def command(self, config: LauncherConfig, instance: str) -> list[str]:
@@ -130,7 +133,7 @@ class ServerController:
         libraries = [argument for path in config.library_paths for argument in ("--library", path)]
         return [*prefix, "--serve", *libraries, "--data", str(self.data_path),
                 "--host", config.host, "--port", str(config.port),
-                "--share-port", str(config.share_port), "--instance", instance]
+                "--share-port", str(config.share_port), "--https-port", str(config.https_port), "--instance", instance]
 
     def start(self, config: LauncherConfig, timeout: float = 20) -> str:
         with self.lock:

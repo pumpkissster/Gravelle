@@ -1,15 +1,15 @@
 # macOS 版
 
-Gravelle 0.9.2 提供 Apple 芯片与 Intel 两种 Mac 安装包，支持 macOS 15 及以上。更新内容见 [0.9.2 更新说明](releases/0.9.2.md)。
+Gravelle 0.9.3 提供 Apple 芯片与 Intel 两种 Mac 安装包，支持 macOS 15 及以上。更新内容见 [0.9.3 更新说明](releases/0.9.3.md)。
 
-启动器可配置独立分享端口，并提供忘记安全入口时的本机关闭操作；网页开关、公网分享地址与恢复范围见[网络设置](network.md)。
+启动器可配置独立分享端口与 HTTPS 端口，并提供忘记安全入口时的本机关闭操作；网页开关、已有证书、公网分享地址与恢复范围见[网络设置](network.md)。端口修改前先停止阅读器；使用自己的证书时，HTTPS 默认端口为 `8443`，启动器仍从本机 HTTP 打开管理页面。
 
 ## 下载正式版
 
 从 [GitHub Releases](https://github.com/pumpkissster/Gravelle/releases/latest) 下载对应芯片的文件：
 
-- Apple 芯片（M 系列）：`Gravelle-macOS-0.9.2-arm64.dmg`
-- Intel：`Gravelle-macOS-0.9.2-x64.dmg`
+- Apple 芯片（M 系列）：`Gravelle-macOS-0.9.3-arm64.dmg`
+- Intel：`Gravelle-macOS-0.9.3-x64.dmg`
 
 另附同名 ZIP 备用包；文件校验值见发行页的 `SHA256SUMS.txt`。当前安装包使用 ad-hoc 签名，未完成 Apple 公证，系统可能显示安全提示。
 

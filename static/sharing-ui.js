@@ -37,7 +37,11 @@
       origin = configured.origin;
     } else if (network.share_port_enabled) {
       if (!Number.isInteger(network.share_port) || network.share_port < 1 || network.share_port > 65535) throw new Error('独立分享端口配置不正确，请检查网络设置。');
+      if (network.share_scheme !== undefined) { if (!['http', 'https'].includes(network.share_scheme)) throw new Error('独立分享协议配置不正确，请检查网络设置。'); base.protocol = network.share_scheme + ':'; }
       base.port = String(network.share_port); origin = base.origin;
+    } else if (network.connection_mode === 'https' && base.protocol !== 'https:') {
+      if (!Number.isInteger(network.https_port) || network.https_port < 1 || network.https_port > 65535) throw new Error('HTTPS 端口配置不正确，请检查网络设置。');
+      base.protocol = 'https:'; base.port = String(network.https_port); origin = base.origin;
     }
     return new URL(path, origin).href;
   }

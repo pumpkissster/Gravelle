@@ -3,11 +3,11 @@ name: Build and release Gravelle
 on:
   push:
     branches:
-      - dev/release-0.9.2
+      - dev/release-0.9.3
   workflow_dispatch:
     inputs:
       release_version:
-        description: "版本号，必须与 server.py 的 VERSION 一致，例如 0.9.2"
+        description: "版本号，必须与 server.py 的 VERSION 一致，例如 0.9.3"
         required: true
         type: string
       publish:
@@ -73,7 +73,7 @@ jobs:
           if os.environ['EVENT_NAME'] == 'workflow_dispatch':
               assert os.environ['REQUESTED_VERSION'] == version, 'Requested version must match server.VERSION'
           else:
-              assert os.environ['EVENT_NAME'] == 'push' and os.environ['GITHUB_REF'] == 'refs/heads/dev/release-0.9.2', 'Automatic builds are restricted to the release candidate branch'
+              assert os.environ['EVENT_NAME'] == 'push' and os.environ['GITHUB_REF'] == 'refs/heads/dev/release-0.9.3', 'Automatic builds are restricted to the release candidate branch'
           source_tag = os.environ['SOURCE_TAG']
           assert not source_tag or source_tag == 'v' + version, 'source_tag must be the exact existing stable version tag'
           source_sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
@@ -126,12 +126,23 @@ jobs:
       - name: Smoke test the frozen Windows server
         shell: pwsh
         run: ./work/windows-build/venv/Scripts/python.exe desktop/smoke_windows.py --executable dist/windows/portable/Gravelle/GravelleServer.exe --work-root work/windows-smoke --report work/windows-smoke/report.json
+      - name: Verify HTTPS in the frozen Windows package
+        shell: pwsh
+        run: ./work/windows-build/venv/Scripts/python.exe packaging/smoke_https.py --executable dist/windows/portable/Gravelle/GravelleServer.exe --work-root work/windows-https-smoke --report work/windows-https-smoke/report.json
       - name: Preserve the Windows smoke report
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: windows-smoke-report
           path: work/windows-smoke/report.json
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Preserve the Windows HTTPS report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-https-smoke-report
+          path: work/windows-https-smoke/report.json
           if-no-files-found: warn
           retention-days: 14
       - name: Verify required Windows assets
@@ -204,13 +215,14 @@ jobs:
           docker compose -f compose.build.yaml config --quiet
           docker image inspect "$TEST_IMAGE" --format '{{json .Config.User}}' | grep -Fx '"1000:1000"'
           mkdir -p "$RUNNER_TEMP/gravelle-library" "$RUNNER_TEMP/gravelle-data"
+          python packaging/smoke_https.py --prepare-library "$RUNNER_TEMP/gravelle-library"
           sudo chown 1000:1000 "$RUNNER_TEMP/gravelle-data"
           container=$(docker run -d --read-only --cap-drop ALL --security-opt no-new-privileges \
             --tmpfs /tmp:rw,noexec,nosuid,size=64m,mode=1777 \
             --mount "type=bind,src=$RUNNER_TEMP/gravelle-library,dst=/library,readonly" \
             --mount "type=bind,src=$RUNNER_TEMP/gravelle-data,dst=/data" \
             -p 127.0.0.1::8080 "$TEST_IMAGE")
-          trap 'docker logs "$container"; docker rm -f "$container"' EXIT
+          trap 'docker cp "$container":/tmp/https-smoke-report.json "$RUNNER_TEMP/https-smoke-${{ matrix.arch }}.json" 2>/dev/null || true; docker logs "$container"; docker rm -f "$container"' EXIT
           port=$(docker port "$container" 8080/tcp | sed 's/.*://')
           ready=false
           for attempt in $(seq 1 60); do
@@ -224,10 +236,20 @@ jobs:
           python - <<'PY'
           import json, os, pathlib
           health = json.loads((pathlib.Path(os.environ['RUNNER_TEMP']) / 'health.json').read_text())
-          assert health == {'status': 'ok', 'version': os.environ['RELEASE_VERSION']}, health
+          assert health == {'status': 'ok', 'version': os.environ['RELEASE_VERSION'],
+                            'connection_mode': 'http', 'https_port': 8443, 'https_listening': False}, health
           PY
           docker exec "$container" python -c "from pathlib import Path; p=Path('/data/ci-check'); p.write_text('ok'); p.unlink(); assert Path('/library').is_dir()"
           docker exec -i "$container" python - < packaging/smoke_image_workers.py
+          docker exec -i "$container" python - --disposable-url http://127.0.0.1:8080 --confirm-disposable --data /data --library /library --work-root /tmp/gravelle-https-smoke --report /tmp/https-smoke-report.json < packaging/smoke_https.py
+      - name: Preserve the Docker HTTPS report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: docker-${{ matrix.arch }}-https-smoke-report
+          path: ${{ runner.temp }}/https-smoke-${{ matrix.arch }}.json
+          if-no-files-found: warn
+          retention-days: 14
       - name: Export validation image for testing without Docker Hub
         uses: docker/build-push-action@v7
         with:

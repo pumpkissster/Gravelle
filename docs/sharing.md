@@ -32,4 +32,4 @@
 
 ## 依赖
 
-服务端使用 [pyca/cryptography](https://cryptography.io/en/latest/hazmat/primitives/aead/) 的 AESGCM；浏览器兼容组件来自 [noble-ciphers 官方项目](https://github.com/paulmillr/noble-ciphers)。源码、固定版本、完整许可证和可重现构建信息随源码分发。Intel macOS 使用最后支持该架构的官方 cryptography universal2 wheel；该组件仅使用 AES-GCM，不处理证书或 PKCS#7 数据。
+服务端使用 [pyca/cryptography](https://cryptography.io/en/latest/hazmat/primitives/aead/) 的 AESGCM；浏览器兼容组件来自 [noble-ciphers 官方项目](https://github.com/paulmillr/noble-ciphers)。源码、固定版本、完整许可证和可重现构建信息随源码分发。Intel macOS 使用最后支持该架构的官方 cryptography universal2 wheel；同一组件也用于保护保存的HTTPS证书密码及读取用户提供的PKCS#12证书，TLS连接由Python的ssl模块提供。

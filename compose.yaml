@@ -9,6 +9,9 @@ services:
       # 可选：网页启用独立分享端口后，取消下一行注释并重新创建容器。
       # 容器内固定 8081；左侧宿主机端口可自定。公网穿透只指向此分享端口。
       # - "${SHARE_WEB_PORT:-8081}:8081"
+      # 可选：使用自己的证书提供 HTTPS 时，取消下一行注释并重新创建容器。
+      # 主 HTTPS 容器端口固定 8443；独立分享仍用 8081，证书模式下改用 HTTPS。
+      # - "${HTTPS_WEB_PORT:-8443}:8443"
     environment:
       # 写真/漫画媒体库只能选择此目录及其子目录；网页填容器路径。
       LIBRARY_PATH: /library
@@ -25,6 +28,11 @@ services:
       - type: bind
         source: "${DATA_PATH:-./data}"
         target: /data
+      # 可选：先准备已有 PFX/P12 证书，再取消注释并在网页填写 /certificates/文件名.pfx。
+      # - type: bind
+      #   source: "${HTTPS_CERTIFICATES_PATH:-./certificates}"
+      #   target: /certificates
+      #   read_only: true
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m,mode=1777

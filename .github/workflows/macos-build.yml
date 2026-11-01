@@ -146,6 +146,10 @@ jobs:
           env -u GRAVELLE_STARTUP_TRACE python desktop/smoke_macos.py --executable "$executable" --work-root 'work/macos-smoke-${{ matrix.arch }}' --report 'work/macos-smoke-${{ matrix.arch }}/report.json' --skip-gui
       - name: Verify artifact checksums
         run: cd 'dist/macos-${{ matrix.arch }}' && shasum -a 256 -c SHA256SUMS.txt
+      - name: Verify HTTPS in the frozen macOS package
+        run: |
+          executable=$(python -c 'import json; print(json.load(open("dist/macos-${{ matrix.arch }}/build-report.json"))["app"] + "/Contents/MacOS/Gravelle")')
+          python packaging/smoke_https.py --executable "$executable" --work-root 'work/macos-https-smoke-${{ matrix.arch }}' --report 'work/macos-https-smoke-${{ matrix.arch }}/report.json'
       - name: Smoke test native launcher window and menu bar
         timeout-minutes: 8
         env:
@@ -201,6 +205,14 @@ jobs:
           path: |
             work/macos-gui-${{ matrix.arch }}/gui-report.json
             work/macos-gui-${{ matrix.arch }}/*-port-*.png
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Preserve macOS HTTPS report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-${{ matrix.arch }}-https-smoke-report
+          path: work/macos-https-smoke-${{ matrix.arch }}/report.json
           if-no-files-found: warn
           retention-days: 14
       - name: Remove temporary signing credentials

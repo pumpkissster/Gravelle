@@ -216,6 +216,8 @@ class UpdateHttpTests(unittest.TestCase):
             "security_entry_enabled": False, "security_entry_code": "",
             "share_port_enabled": False, "public_share_url": "",
             "entry_epoch": "0" * 64,
+            "connection_mode": "http", "certificate_path": "",
+            "certificate_password_ciphertext": "",
         }
         library.session.side_effect = lambda token: {
             "authenticated": token in ("update-test-session", "child-test-session"),

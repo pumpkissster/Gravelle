@@ -35,7 +35,8 @@ _TEXT = {
     "network": ("访问设置", "Connection"),
     "port": ("服务端口", "Port"),
     "share_port": ("分享端口", "Share Port"),
-    "share_port_hint": ("在网页网络设置中开启独立分享端口", "Enable the separate share port in the web network settings"),
+    "https_port": ("HTTPS 端口", "HTTPS Port"),
+    "share_port_hint": ("在网页网络设置中开启 HTTPS 或独立分享端口", "Enable HTTPS or the separate share port in web Network Settings"),
     "lan": ("允许局域网设备访问", "Allow access from the local network"),
     "diagnose": ("检查连接", "Check Connection"),
     "ready": ("选择写真根文件夹，启动后在浏览器阅读。", "Choose your photo folders, then start reading in your browser."),
@@ -128,6 +129,7 @@ class LauncherState:
             self.configuration_error = str(error)
         self.roots = list(config.library_paths)
         self.port, self.share_port, self.lan_enabled = str(config.port), str(config.share_port), config.lan_enabled
+        self.https_port = str(config.https_port)
         self.release_config, self.release, self.downloaded = None, None, None
 
     def configuration(self) -> LauncherConfig:
@@ -140,9 +142,13 @@ class LauncherState:
             if not share_value.isascii() or not share_value.isdecimal():
                 raise ValueError("Invalid share port")
             share_port = int(share_value)
+            https_value = str(self.https_port).strip()
+            if not https_value.isascii() or not https_value.isdecimal():
+                raise ValueError("Invalid HTTPS port")
+            https_port = int(https_value)
         except (ValueError, TypeError) as error:
             raise LauncherError("端口需要是 1 至 65535 之间的整数。") from error
-        return LauncherConfig(port=port, share_port=share_port, lan_enabled=self.lan_enabled, library_paths=self.roots).validate()
+        return LauncherConfig(port=port, share_port=share_port, https_port=https_port, lan_enabled=self.lan_enabled, library_paths=self.roots).validate()
 
     def add_roots(self, paths) -> None:
         proposed = normalise_roots([*self.roots, *paths])
@@ -303,6 +309,16 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
             self.share_port_height = self.share_port.frame().size.height
             self.share_port.setAccessibilityLabel_(tr("share_port"))
             self.network_card.addSubview_(self.share_port)
+            self.https_port_label = self.label(tr("https_port"), self.network_card)
+            self.https_port = A.NSTextField.alloc().initWithFrame_(A.NSMakeRect(0, 0, 125, 34))
+            self.https_port.setStringValue_(state.https_port)
+            self.https_port.setFont_(A.NSFont.systemFontOfSize_(14))
+            self.https_port.setBezelStyle_(A.NSTextFieldRoundedBezel)
+            self.https_port.cell().setUsesSingleLineMode_(True)
+            self.https_port.sizeToFit()
+            self.https_port_height = self.https_port.frame().size.height
+            self.https_port.setAccessibilityLabel_(tr("https_port"))
+            self.network_card.addSubview_(self.https_port)
             self.share_port_hint = self.label(tr("share_port_hint"), self.network_card, size=12, color=muted)
             self.lan = A.NSButton.checkboxWithTitle_target_action_(tr("lan"), self, "changeLAN:")
             self.lan.setFont_(A.NSFont.systemFontOfSize_(13))
@@ -310,7 +326,7 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
             self.network_card.addSubview_(self.lan)
             self.diagnose_button = self.button(tr("diagnose"), "diagnose:", self.network_card)
             self.address_label = self.label(tr("address"), self.network_card, size=12, color=muted)
-            self.address = self.label(LauncherConfig(port=int(state.port), share_port=int(state.share_port), library_paths=state.roots).local_url,
+            self.address = self.label(LauncherConfig(port=int(state.port), share_port=int(state.share_port), https_port=int(state.https_port), library_paths=state.roots).local_url,
                                       self.network_card, size=13, wrap=True)
             self.address.setSelectable_(True)
             self.log_button = self.button(tr("logs"), "showLogs:", self.document)
@@ -460,7 +476,7 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
             self.frame(self.scroll, 28, 107, width - 56, height - footer - 107)
             content_width = max(1, self.scroll.contentSize().width)
             roots_height = 76 + len(state.roots) * 46
-            document_height = roots_height + 16 + 310 + 112
+            document_height = roots_height + 16 + 352 + 112
             self.document.setFrameSize_(A.NSMakeSize(content_width, document_height))
             self.frame(self.roots_card, 0, 0, content_width, roots_height)
             self.frame(self.roots_heading, 20, 24, content_width - 204, 26)
@@ -472,21 +488,23 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
                 self.frame(choose, content_width - 176, y, 76, 38)
                 self.frame(remove, content_width - 96, y, 76, 38)
             y = roots_height + 16
-            self.frame(self.network_card, 0, y, content_width, 310)
+            self.frame(self.network_card, 0, y, content_width, 352)
             self.frame(self.network_heading, 20, 20, content_width - 40, 26)
             self.frame(self.port_label, 20, 65, 108, 24)
             self.frame(self.port, 128, 76 - self.port_height / 2, 116, self.port_height)
             self.frame(self.diagnose_button, content_width - 170, 56, 150, 40)
             self.frame(self.share_port_label, 20, 107, 108, 24)
             self.frame(self.share_port, 128, 118 - self.share_port_height / 2, 116, self.share_port_height)
-            self.frame(self.share_port_hint, 20, 145, content_width - 40, 20)
-            self.frame(self.lan, 20, 182, content_width - 40, 28)
-            self.frame(self.address_label, 20, 225, content_width - 40, 20)
-            self.frame(self.address, 20, 252, content_width - 40, 48)
-            self.frame(self.log_button, 0, y + 327, 115, 38)
-            self.frame(self.data_button, 123, y + 327, 115, 38)
-            self.frame(self.reset_button, content_width - 228, y + 327, 228, 38)
-            self.frame(self.reset_entry_button, content_width - 228, y + 373, 228, 38)
+            self.frame(self.https_port_label, 20, 149, 108, 24)
+            self.frame(self.https_port, 128, 160 - self.https_port_height / 2, 116, self.https_port_height)
+            self.frame(self.share_port_hint, 20, 187, content_width - 40, 20)
+            self.frame(self.lan, 20, 224, content_width - 40, 28)
+            self.frame(self.address_label, 20, 267, content_width - 40, 20)
+            self.frame(self.address, 20, 294, content_width - 40, 48)
+            self.frame(self.log_button, 0, y + 369, 115, 38)
+            self.frame(self.data_button, 123, y + 369, 115, 38)
+            self.frame(self.reset_button, content_width - 228, y + 369, 228, 38)
+            self.frame(self.reset_entry_button, content_width - 228, y + 415, 228, 38)
             self.frame(self.status, 30, height - 127, width - 60, 49)
             self.frame(self.start_button, 28, height - 67, width - 316, 43)
             self.frame(self.stop_button, width - 280, height - 67, 100, 43)
@@ -500,7 +518,7 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
             for field, choose, remove in zip(self.folder_controls[::3], self.folder_controls[1::3], self.folder_controls[2::3]):
                 choose.setEnabled_(editing)
                 remove.setEnabled_(editing and len(state.roots) > 1)
-            for control in (self.port, self.share_port, self.lan, self.add_button):
+            for control in (self.port, self.share_port, self.https_port, self.lan, self.add_button):
                 control.setEnabled_(editing)
             self.start_button.setEnabled_(editing)
             self.stop_button.setEnabled_(running and not busy)
@@ -514,6 +532,7 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
         def read_configuration(self):
             state.port = str(self.port.stringValue())
             state.share_port = str(self.share_port.stringValue())
+            state.https_port = str(self.https_port.stringValue())
             state.lan_enabled = bool(self.lan.state())
             return state.configuration()
 

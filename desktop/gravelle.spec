@@ -25,7 +25,7 @@ analysis = Analysis(
         (str(resources / 'desktop' / 'release.json'), 'desktop'),
         (str(root / 'desktop' / 'assets' / 'gravelle-wordmark.png'), 'desktop/assets'),
     ] + pdfium_data,
-    hiddenimports=['server', 'network_settings', 'transcoding', 'image_search', 'image_search_features', 'avatar_face_crop', 'task_scheduler', 'library_covers', 'cache_manager', 'epub_reader', 'pdf_reader', 'pypdfium2', 'pypdfium2_raw', 'pypdfium2_cfg', 'sharing', 'share_crypto', 'share_passwords', 'cryptography.hazmat.primitives.ciphers.aead', 'desktop.runtime', 'desktop.platforms', 'PIL.Image', 'cv2', 'numpy'],
+    hiddenimports=['server', 'network_settings', 'https_settings', 'ssl', 'transcoding', 'image_search', 'image_search_features', 'avatar_face_crop', 'task_scheduler', 'library_covers', 'cache_manager', 'epub_reader', 'pdf_reader', 'pypdfium2', 'pypdfium2_raw', 'pypdfium2_cfg', 'sharing', 'share_crypto', 'share_passwords', 'cryptography.hazmat.primitives.ciphers.aead', 'cryptography.hazmat.primitives.serialization.pkcs12', 'desktop.runtime', 'desktop.platforms', 'PIL.Image', 'cv2', 'numpy'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

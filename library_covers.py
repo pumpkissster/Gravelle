@@ -257,7 +257,8 @@ class LibraryCoverManager:
             for value in ids:
                 self._plan(connection, value)
         self._prune_obsolete()
-        self.wake.set()
+        # _plan wakes the worker when it queues an actual cover. Signalling an
+        # unchanged periodic check here would wake the loop itself forever.
 
     def start(self):
         with self.lock:

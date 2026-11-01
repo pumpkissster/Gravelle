@@ -1088,7 +1088,7 @@
     settingsLayout.items.cache.entry.hidden = !isAdmin();
     settingsLayout.items.network.entry.hidden = !isAdmin();
     renderOptimizationReminders();
-    const subtitles = { service: '版本、连接与访问地址', users: state.session?.user?.username || '当前账户与子账户', interface: (document.documentElement.dataset.interfaceSkin === 'board' ? 'Board' : '经典') + ' · ' + (interfaceTheme() === 'light' ? '亮色主题' : '暗色主题'), performance: '加载、缓存与列表', reading: '图片适配与阅读背景', transcoding: '规则、作品与后台任务', 'image-search': '图片索引与后台任务', cache: '空间占用与缓存清理', network: '安全入口、独立分享端口与公网地址' };
+    const subtitles = { service: '版本、连接与访问地址', users: state.session?.user?.username || '当前账户与子账户', interface: (document.documentElement.dataset.interfaceSkin === 'board' ? 'Board' : '经典') + ' · ' + (interfaceTheme() === 'light' ? '亮色主题' : '暗色主题'), performance: '加载、缓存与列表', reading: '图片适配与阅读背景', transcoding: '规则、作品与后台任务', 'image-search': '图片索引与后台任务', cache: '空间占用与缓存清理', network: 'HTTPS、安全入口与分享设置' };
     Object.entries(settingsLayout.items).forEach(([key, value]) => { value.detail.textContent = subtitles[key]; });
     $('#subaccounts-setting').hidden = !isAdmin();
     renderSubaccountSummary();

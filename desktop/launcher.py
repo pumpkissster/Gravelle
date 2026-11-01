@@ -169,6 +169,7 @@ class LauncherWindow:
         self.folder_widgets = []
         self.port = tk.StringVar(value=str(config.port))
         self.share_port = tk.StringVar(value=str(config.share_port))
+        self.https_port = tk.StringVar(value=str(config.https_port))
         self.lan = tk.BooleanVar(value=config.lan_enabled)
         self.status = tk.StringVar(value=configuration_error or "选择写真根文件夹，点击启动后在浏览器阅读。")
         self.addresses = tk.StringVar(value=config.local_url)
@@ -302,8 +303,11 @@ class LauncherWindow:
         ttk.Label(network, text="分享端口", style="Field.TLabel").grid(row=1, column=0, sticky="w", pady=(px(12), 0))
         self.share_port_entry = ttk.Entry(network, textvariable=self.share_port, width=8, font=("Microsoft YaHei UI", 10))
         self.share_port_entry.grid(row=1, column=1, padx=(px(12), px(24)), pady=(px(12), 0))
-        ttk.Label(network, text="在网页网络设置中开启独立分享端口", style="CardMuted.TLabel").grid(
-            row=2, column=0, columnspan=3, sticky="w", pady=(px(10), 0))
+        ttk.Label(network, text="HTTPS 端口", style="Field.TLabel").grid(row=2, column=0, sticky="w", pady=(px(12), 0))
+        self.https_port_entry = ttk.Entry(network, textvariable=self.https_port, width=8, font=("Microsoft YaHei UI", 10))
+        self.https_port_entry.grid(row=2, column=1, padx=(px(12), px(24)), pady=(px(12), 0))
+        ttk.Label(network, text="在网页网络设置中开启 HTTPS 或独立分享端口", style="CardMuted.TLabel").grid(
+            row=3, column=0, columnspan=3, sticky="w", pady=(px(10), 0))
         self.diagnose_button = ttk.Button(configuration, text="检查目录与网络", command=self.diagnose)
         self.diagnose_button.grid(row=3, column=0, columnspan=2, sticky="ew")
 
@@ -419,9 +423,13 @@ class LauncherWindow:
         try:
             port = int(self.port.get().strip())
             share_port = int(self.share_port.get().strip())
+            https_value = self.https_port.get().strip()
+            if not https_value.isascii() or not https_value.isdecimal():
+                raise ValueError("Invalid HTTPS port")
+            https_port = int(https_value)
         except ValueError as error:
             raise LauncherError("端口需要是 1 至 65535 之间的整数。") from error
-        return LauncherConfig(port=port, share_port=share_port, lan_enabled=bool(self.lan.get()),
+        return LauncherConfig(port=port, share_port=share_port, https_port=https_port, lan_enabled=bool(self.lan.get()),
                               library_paths=tuple(value.get() for value in self.library_values)).validate()
 
     def _render_folders(self):
@@ -505,7 +513,7 @@ class LauncherWindow:
     def _set_busy(self, value):
         self.busy = value
         running = self.controller.running
-        for widget in (*self.folder_widgets, self.port_entry, self.share_port_entry, self.lan_check, self.add_folder_button):
+        for widget in (*self.folder_widgets, self.port_entry, self.share_port_entry, self.https_port_entry, self.lan_check, self.add_folder_button):
             widget.configure(state="disabled" if value or running else "normal")
         if len(self.library_values) == 1:
             self.folder_widgets[-1].configure(state="disabled")
@@ -792,6 +800,7 @@ def main(argv=None):
     parser.add_argument("--host", choices=("127.0.0.1", "0.0.0.0"), default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--share-port", type=int)
+    parser.add_argument("--https-port", type=int)
     parser.add_argument("--instance", default="")
     modes.add_argument("--version", action="store_true")
     arguments = parser.parse_args(argv)
@@ -810,7 +819,7 @@ def main(argv=None):
         _restore_child_stdio()
         if not arguments.library or not arguments.data:
             parser.error("--serve requires --library and --data")
-        return serve(LauncherConfig(port=arguments.port, share_port=arguments.share_port, lan_enabled=arguments.host == "0.0.0.0",
+        return serve(LauncherConfig(port=arguments.port, share_port=arguments.share_port, https_port=arguments.https_port, lan_enabled=arguments.host == "0.0.0.0",
                                     library_paths=arguments.library), arguments.data, arguments.instance)
     from server import VERSION
     if arguments.version:
@@ -824,7 +833,7 @@ def main(argv=None):
         try:
             config = load_config(config_path)
             if arguments.library:
-                config = LauncherConfig(port=arguments.port, share_port=arguments.share_port, lan_enabled=arguments.host == "0.0.0.0",
+                config = LauncherConfig(port=arguments.port, share_port=arguments.share_port, https_port=arguments.https_port, lan_enabled=arguments.host == "0.0.0.0",
                                         library_paths=arguments.library)
             config.validate()
             result = {"version": VERSION, "data_directory": str(arguments.data or storage / "data"),

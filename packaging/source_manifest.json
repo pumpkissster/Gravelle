@@ -1,5 +1,5 @@
 [
-  "server.py", "accounts.py", "password_reset.py", "network_settings.py", "transcoding.py", "image_search.py", "image_search_features.py", "avatar_face_crop.py", "task_scheduler.py", "library_covers.py", "cache_manager.py", "epub_reader.py", "pdf_reader.py", "release.json", "requirements.txt", "README.md", "LICENSE",
+  "server.py", "accounts.py", "password_reset.py", "network_settings.py", "https_settings.py", "transcoding.py", "image_search.py", "image_search_features.py", "avatar_face_crop.py", "task_scheduler.py", "library_covers.py", "cache_manager.py", "epub_reader.py", "pdf_reader.py", "release.json", "requirements.txt", "README.md", "LICENSE",
   "models/yunet/face_detection_yunet_2023mar.onnx", "models/yunet/LICENSE", "models/yunet/provenance.json", "models/yunet/README.md",
   "tests/test_avatar_face_crop.py", "tests/test_avatar_face_worker.py", "tests/test_avatar_face_packaging.py", "tests/test_model_avatar_regeneration.py", "tests/test_model_avatar_ui.js", "static/board-skin.css", "tests/test_interface_skin.js", "static/vendor/remixicon-LICENSE.txt", "static/vendor/remixicon-provenance.json",
   "Dockerfile", "compose.yaml", "compose.build.yaml", "compose.optimization.yaml", ".env.example", ".dockerignore", ".gitignore", ".gitattributes",
@@ -12,6 +12,8 @@
   "static/list-state.js", "tests/test_list_state.js",
   "static/cache-management-ui.js", "tests/test_decoded_cache.js", "tests/test_next_update_api.py",
   "static/network-settings-ui.js", "static/network-settings-ui.css", "tests/test_network_settings.py", "tests/test_network_settings_ui.js", "tests/test_desktop_network_settings.py", "docs/network.md",
+  "tests/test_https_packaging.py", "tests/test_https_settings.py", "tests/test_desktop_https.py",
+  "packaging/smoke_https.py", "tests/test_https_smoke.py",
   "tests/test_library_covers.py", "tests/test_cache_manager.py", "tests/test_transcoding_details.py", "tests/test_optimization_cache_ui.js",
   "tests/test_image_search_failures.py", "tests/test_image_search_reuse.py", "tests/test_image_search_failures_ui.js",
   "static/gravelle-logo.png", "static/gravelle-wordmark.svg", "static/gravelle-icon.png", "static/default-avatar.png",
@@ -42,5 +44,6 @@
   "tests/test_image_search_crops.py", "tests/test_image_search_catalogue.py", "tests/test_image_search_activity.py", "tests/test_image_search_page_io.py", "tests/test_image_search_png_metadata.py",
   "tests/test_reader_model.js", "tests/test_performance_settings.js", "tests/test_reader_end.js", "tests/test_avatar_ui.js", "tests/test_user_management.js", "tests/test_batch_selection.js", "tests/test_page_router.js", "tests/test_transcoding_ui.js", "tests/test_image_search_ui.js",
   "docs/releases/0.9.2.md",
+  "docs/releases/0.9.3.md",
   "tests/test_release_assets.py", "tests/test_release_workflow.py", "packaging/source_manifest.json", "packaging/package_source.py", "packaging/check_docker_context.py", "packaging/smoke_image_workers.py"
 ]

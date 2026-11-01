@@ -118,7 +118,8 @@ class NetworkHTTPTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(self.request(path, cookie=self.admin)[0], 404)
         self.assertEqual(self.request("/api/login", {"username": "network-admin", "password": "network-test-password"})[0], 404)
-        self.assertEqual(self.request("/api/health")[1], {"status": "ok", "version": VERSION})
+        self.assertEqual(self.request("/api/health")[1], {"status": "ok", "version": VERSION,
+                         "connection_mode": "http", "https_port": 8443, "https_listening": False})
         status, html, headers = self.request("/secret_Entry-123")
         self.assertEqual(status, 200)
         self.assertIn(b"app.js", html)
@@ -287,9 +288,10 @@ class NetworkHTTPTests(unittest.TestCase):
             restarted.server_close()
 
     def test_runtime_cannot_override_docker_container_share_port(self):
-        container = ReaderServer(("127.0.0.1", 0), self.library, share_port=12345, runtime="docker")
+        container = ReaderServer(("127.0.0.1", 0), self.library, share_port=12345, https_port=12346, runtime="docker")
         try:
             self.assertEqual(container.network_snapshot()["share_port"], 8081)
+            self.assertEqual(container.network_snapshot()["https_port"], 8443)
             self.assertEqual(container.network_snapshot()["runtime"], "docker")
         finally:
             container.server_close()
