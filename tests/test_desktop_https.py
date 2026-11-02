@@ -122,7 +122,11 @@ class DesktopHTTPSConfigTests(unittest.TestCase):
 
 class DesktopHTTPSStatusTests(unittest.TestCase):
     def setUp(self):
-        self.config = LauncherConfig(port=18080, https_port=18443)
+        temporary = tempfile.TemporaryDirectory(prefix="gravelle-desktop-https-status-")
+        self.addCleanup(temporary.cleanup)
+        root = str(Path(temporary.name).resolve())
+        self.config = LauncherConfig(library_path=root, library_paths=(root,),
+                                     port=18080, https_port=18443)
         self.fallback = {"connection_mode": "http", "https_port": 18443, "https_listening": False}
 
     def health(self, payload, status=200):

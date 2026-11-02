@@ -106,7 +106,9 @@ class CertificateUploadHTTPTests(unittest.TestCase):
         cls.password = '  上传证书 密码  '
         cls.protected, protected_ca = certificate(root, 'locked', cls.password)
         cls.context = ssl.create_default_context(cafile=str(plain_ca))
-        cls.context.load_verify_locations(cafile=str(protected_ca))
+        # Distinct self-signed leaves share a subject, so use separate trust
+        # stores rather than depending on platform-specific anchor selection.
+        cls.protected_context = ssl.create_default_context(cafile=str(protected_ca))
         cls.expired, _ = certificate(root, 'expired', expired=True)
         cls.without_key, _ = certificate(root, 'no-key', missing_key=True)
 
@@ -171,6 +173,9 @@ class CertificateUploadHTTPTests(unittest.TestCase):
         for key in ('certificate_upload', 'certificate_password', 'certificate_password_ciphertext'):
             self.assertNotIn(key, result)
         self.assertNotIn(self.password, json.dumps(self.library.network.current(), ensure_ascii=False))
+        with self.assertRaises(ssl.SSLCertVerificationError):
+            self.request('/api/health', tls=True, context=self.context)
+        self.context = self.protected_context
         self.assertEqual(self.request('/api/health', tls=True)[0], 200)
         self.assertEqual(self.request('/share-reader.js', tls=True, port=self.share_port)[0], 200)
         self.assertEqual(self.request('/api/network-settings', {}, tls=True, port=self.share_port, cookie=self.admin)[0], 404)
