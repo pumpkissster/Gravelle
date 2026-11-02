@@ -9,6 +9,7 @@ No system trust store or TLS verification settings are changed.
 from __future__ import annotations
 
 import argparse
+import base64
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -343,6 +344,28 @@ def exercise(origin, library, data, ports, scratch, report):
         require(shared.request(base + '/pages/0')[0] == 200 and admin.request('/share/' + token)[0] == 404,
                 'TLS-only encrypted sharing or HTTP isolation failed')
         checks.append('password_protected_share_and_encrypted_page_over_verified_tls')
+        upload = {'name': 'generated-browser-certificate.p12',
+                  'data': base64.b64encode(path.read_bytes()).decode('ascii')}
+        status, imported, _ = admin.request('/api/network-settings', {'certificate_upload': upload})
+        managed = Path(imported.get('certificate_path', ''))
+        require(status == 200 and managed.parent == Path(data).resolve() / 'https-certificates'
+                and managed.name != upload['name'] and managed.is_file()
+                and managed.read_bytes() == path.read_bytes(), 'Uploaded PFX was not privately managed')
+        require(not {'certificate_upload', 'certificate_password', 'certificate_password_ciphertext'} & set(imported)
+                and main.request('/')[0] == 200 and shared.request('/share-reader.js')[0] == 200,
+                'Uploaded certificate disclosed a secret or damaged verified TLS')
+        if os.name != 'nt':
+            require(managed.stat().st_mode & 0o077 == 0, 'Uploaded private certificate permissions are too broad')
+        checks.append('browser_certificate_upload_uses_private_storage_and_verified_tls')
+        status, replaced, _ = admin.request('/api/network-settings', {'certificate_upload': upload})
+        replacement = Path(replaced.get('certificate_path', ''))
+        require(status == 200 and replacement.is_file() and replacement != managed and not managed.exists()
+                and path.is_file(), 'Replacement removed an external certificate or retained an old managed copy')
+        require(admin.request('/api/network-settings', {'connection_mode': 'http', 'certificate_path': str(managed)})[0] == 400
+                and admin.request('/api/network-settings')[1] == replaced
+                and replacement.is_file() and main.request('/')[0] == 200,
+                'A stale settings tab removed the newly uploaded certificate')
+        checks.append('uploaded_replacement_rejects_stale_paths_and_only_cleans_old_managed_copy')
         before = admin.request('/api/network-settings')[1]
         require(admin.request('/api/network-settings', {'certificate_password': secrets.token_urlsafe(24)})[0] == 400,
                 'Incorrect PFX password was accepted')

@@ -13,6 +13,7 @@
   "static/cache-management-ui.js", "tests/test_decoded_cache.js", "tests/test_next_update_api.py",
   "static/network-settings-ui.js", "static/network-settings-ui.css", "tests/test_network_settings.py", "tests/test_network_settings_ui.js", "tests/test_desktop_network_settings.py", "docs/network.md",
   "tests/test_https_packaging.py", "tests/test_https_settings.py", "tests/test_desktop_https.py",
+  "tests/test_https_upload.py",
   "packaging/smoke_https.py", "tests/test_https_smoke.py",
   "tests/test_library_covers.py", "tests/test_cache_manager.py", "tests/test_transcoding_details.py", "tests/test_optimization_cache_ui.js",
   "tests/test_image_search_failures.py", "tests/test_image_search_reuse.py", "tests/test_image_search_failures_ui.js",

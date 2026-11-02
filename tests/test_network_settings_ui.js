@@ -15,6 +15,7 @@ class Element {
   setAttribute(name, value) { this.attributes[name] = value; }
   addEventListener(name, fn) { this.handlers[name] = fn; }
   emit(name) { return this.handlers[name]?.({ preventDefault() {} }); }
+  click() { this.clickCount = (this.clickCount || 0) + 1; return this.emit('click'); }
   reportValidity() { return true; }
 }
 function fixture(options = {}) {
@@ -24,9 +25,14 @@ function fixture(options = {}) {
   const doc = { defaultView: win, createElement(tag) { return new Element(tag, doc); } }; const host = new Element('section', doc);
   const walk = node => [node, ...node.children.flatMap(walk)]; const get = name => walk(host).find(node => node.name === name || node.textContent === name);
   let admin = true;
-  const ui = Network.create({ host, isAdmin: () => admin, api: async path => { calls.push(path); return options.api ? options.api(path) : { ...initial }; }, post: async (path, data) => { posts.push({ path, data }); if (options.post) return options.post(path, data); const response = { ...initial, ...data, security_entry_path: data.security_entry_enabled ? '/' + data.security_entry_code : '/' }; if ('connection_mode' in response) { response.certificate_password_set = Object.prototype.hasOwnProperty.call(data, 'certificate_password') ? Boolean(data.certificate_password) : initial.certificate_password_set; response.https_listening = data.connection_mode === 'https'; response.share_scheme = data.connection_mode === 'https' ? 'https' : 'http'; } delete response.certificate_password; return response; }, toast: value => messages.push(value) });
+  const ui = Network.create({ host, isAdmin: () => admin, api: async path => { calls.push(path); return options.api ? options.api(path) : { ...initial }; }, post: async (path, data) => { posts.push({ path, data }); if (options.post) return options.post(path, data); const response = { ...initial, ...data, security_entry_path: data.security_entry_enabled ? '/' + data.security_entry_code : '/' }; if ('connection_mode' in response) { response.certificate_password_set = Object.prototype.hasOwnProperty.call(data, 'certificate_password') ? Boolean(data.certificate_password) : initial.certificate_password_set; response.https_listening = data.connection_mode === 'https'; response.share_scheme = data.connection_mode === 'https' ? 'https' : 'http'; } if (data.certificate_upload) response.certificate_path = '/data/https-certificates/generated.pfx'; delete response.certificate_password; delete response.certificate_upload; return response; }, toast: value => messages.push(value) });
   return { ui, host, win, get, walk, calls, posts, history, copied, messages, setAdmin(value) { admin = value; }, form: () => walk(host).find(node => node.tagName === 'form') };
 }
+
+function sampleCertificate(name = 'example.pfx', bytes = Uint8Array.from([3, 8, 12, 77])) {
+  return { name, size: bytes.byteLength, readCalls: 0, async arrayBuffer() { this.readCalls++; return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength); } };
+}
+function chooseCertificate(f, file) { const input = f.get('certificate_file'); input.files = file ? [file] : []; input.value = file ? 'C:\\fakepath\\' + file.name : ''; input.emit('change'); }
 
 test('network routes are copyable secondary settings pages', () => {
   assert.deepEqual(Routes.parse('#/settings/network'), { view: 'settings', section: 'network' });
@@ -73,9 +79,112 @@ test('HTTPS payload preserves optional passwords and rejects invalid modes or ce
 test('network snapshots accept legacy servers but never accept a returned certificate password', () => {
   assert.equal(Network.valid(state), true); assert.equal(Network.valid(tlsState), true);
   assert.equal(Network.valid({ ...tlsState, certificate_password: 'must-not-return' }), false);
+  assert.equal(Network.valid({ ...tlsState, certificate_upload: { name: 'private.pfx', data: 'c2VjcmV0' } }), false);
+  assert.equal(Network.valid({ ...tlsState, certificate_password_ciphertext: 'must-not-return' }), false);
   assert.equal(Network.valid({ ...state, connection_mode: 'https' }), false);
   assert.equal(Network.valid({ ...tlsState, https_port: '8443' }), false);
   assert.equal(Network.valid({ ...tlsState, share_scheme: 'ftp' }), false);
+});
+
+test('certificate upload encoding preserves every byte through chunk boundaries and the 16 MiB limit', async () => {
+  for (const length of [1, 2, 3, 24575, 24576, 24577, Network.MAX_CERTIFICATE_BYTES]) {
+    const bytes = new Uint8Array(length); for (let i = 0; i < bytes.length; i++) bytes[i] = i % 251;
+    const file = sampleCertificate('测试.P12', bytes); const upload = await Network.readCertificateUpload(file);
+    assert.equal(upload.name, '测试.P12'); assert.equal(file.readCalls, 1);
+    assert.deepEqual(Buffer.from(upload.data, 'base64'), Buffer.from(bytes));
+    if (length === Network.MAX_CERTIFICATE_BYTES) assert.equal(Network.payload({ ...tlsState, connection_mode: 'https', certificate_upload: upload }).certificate_upload.data, upload.data);
+  }
+  for (const file of [{ name: 'empty.pfx', size: 0 }, { name: 'huge.pfx', size: Network.MAX_CERTIFICATE_BYTES + 1 }, { name: 'text.pem', size: 5 }, { name: '../escape.pfx', size: 5 }, { name: 'bad\0.p12', size: 5 }]) await assert.rejects(Network.readCertificateUpload(file));
+  await assert.rejects(Network.readCertificateUpload({ name: 'broken.pfx', size: 3, async arrayBuffer() { throw Error('private bytes'); } }), /无法读取证书文件/);
+  await assert.rejects(Network.readCertificateUpload({ name: 'partial.pfx', size: 3, async arrayBuffer() { return new ArrayBuffer(2); } }), /读取不完整/);
+});
+
+test('upload payload replaces the path draft and does not send uploads while HTTPS is off', () => {
+  const certificate_upload = { name: 'example.pfx', data: 'AQID' };
+  const result = Network.payload({ ...tlsState, connection_mode: 'https', certificate_path: '/stale/not-a-certificate', certificate_upload });
+  assert.deepEqual(result.certificate_upload, certificate_upload); assert.ok(!('certificate_path' in result));
+  for (const value of [{ ...tlsState, certificate_upload }, { ...state, certificate_upload }, { ...tlsState, connection_mode: 'https', certificate_upload: { name: '../secret.pfx', data: 'AQID' } }, { ...tlsState, connection_mode: 'https', certificate_upload: { name: 'a.pfx', data: '' } }, { ...tlsState, connection_mode: 'https', certificate_upload: { name: 'a.pfx', data: 'not-base64!' } }, { ...tlsState, connection_mode: 'https', certificate_upload: { name: 'a.pfx', data: 'A===' } }]) assert.throws(() => Network.payload(value));
+});
+
+test('choosing a certificate stages it locally until save, then shows the returned managed path', async () => {
+  const configured = { ...tlsState, connection_mode: 'https', certificate_path: '/old/original.pfx', certificate_password_set: true };
+  const f = fixture({ state: configured }); f.ui.show(); await tick();
+  assert.equal(f.get('certificate_file').type, 'file'); assert.equal(f.get('certificate_file').accept, '.pfx,.p12'); assert.equal(f.get('certificate_file').hidden, true);
+  f.get('上传证书').emit('click'); assert.equal(f.get('certificate_file').clickCount, 1);
+  const file = sampleCertificate(); chooseCertificate(f, file);
+  assert.equal(file.readCalls, 0); assert.equal(f.posts.length, 0); assert.equal(f.get('certificate_path').value, configured.certificate_path);
+  assert.equal(f.get('certificate_path').disabled, true); assert.equal(f.get('certificate_path').required, false);
+  assert.ok(f.walk(f.host).some(node => node.textContent.includes('example.pfx · 保存后上传')));
+  for (const label of f.walk(f.host).filter(node => node.tagName === 'label')) assert.ok(!f.walk(label).includes(f.get('certificate_file')));
+  await f.form().emit('submit'); assert.equal(file.readCalls, 1); assert.equal(f.posts.length, 1);
+  assert.deepEqual(f.posts[0].data.certificate_upload, { name: file.name, data: 'AwgMTQ==' }); assert.ok(!('certificate_path' in f.posts[0].data)); assert.ok(!('certificate_password' in f.posts[0].data));
+  assert.equal(f.get('certificate_path').value, '/data/https-certificates/generated.pfx'); assert.equal(f.get('certificate_path').disabled, false);
+  assert.equal(f.get('certificate_file').value, ''); assert.equal(f.walk(f.host).find(node => node.className === 'network-upload-status').hidden, true);
+});
+
+test('invalid certificate selections are rejected without reading or posting', async () => {
+  const f = fixture({ state: { ...tlsState, connection_mode: 'https', certificate_path: '/old/original.pfx' } }); f.ui.show(); await tick();
+  for (const file of [sampleCertificate('wrong.png'), { ...sampleCertificate(), size: Network.MAX_CERTIFICATE_BYTES + 1 }]) {
+    chooseCertificate(f, file); assert.equal(file.readCalls, 0); assert.equal(f.posts.length, 0); assert.equal(f.get('certificate_file').value, '');
+    assert.equal(f.get('certificate_path').disabled, false); assert.equal(f.get('certificate_path').required, true);
+    assert.equal(f.walk(f.host).find(node => node.className === 'network-error').hidden, false);
+  }
+});
+
+test('canceling a staged certificate restores path editing and preserves the saved password', async () => {
+  const configured = { ...tlsState, connection_mode: 'https', certificate_path: '/old/original.pfx', certificate_password_set: true };
+  const f = fixture({ state: configured }); f.ui.show(); await tick(); chooseCertificate(f, sampleCertificate());
+  f.get('certificate_password').value = 'password-for-staged-file'; f.get('certificate_password').emit('input'); f.get('取消上传').emit('click');
+  assert.equal(f.get('certificate_file').value, ''); assert.equal(f.get('certificate_password').value, ''); assert.equal(f.get('certificate_path').disabled, false);
+  await f.form().emit('submit'); assert.ok(!('certificate_path' in f.posts[0].data)); assert.ok(!('certificate_upload' in f.posts[0].data)); assert.ok(!('certificate_password' in f.posts[0].data));
+});
+
+test('a file chosen during refresh survives the late status response and remains the save source', async () => {
+  let finish, calls = 0; const configured = { ...tlsState, connection_mode: 'https', certificate_path: '/old/original.pfx' };
+  const f = fixture({ api() { return ++calls === 1 ? { ...configured } : new Promise(resolve => { finish = resolve; }); } });
+  f.ui.show(); await tick(); const refreshing = f.get('刷新状态').emit('click'); const file = sampleCertificate(); chooseCertificate(f, file);
+  finish({ ...configured, certificate_path: '/newer/server.pfx' }); await refreshing;
+  assert.equal(f.get('certificate_path').value, configured.certificate_path); assert.equal(f.get('certificate_path').disabled, true);
+  await f.form().emit('submit'); assert.equal(f.posts.length, 1); assert.equal(f.posts[0].data.certificate_upload.name, file.name);
+});
+
+test('a pending file read blocks duplicate saves and cannot post after account reset', async () => {
+  let finish; const file = { name: 'slow.pfx', size: 3, arrayBuffer() { return new Promise(resolve => { finish = resolve; }); } };
+  const f = fixture({ state: { ...tlsState, connection_mode: 'https', certificate_path: '/old/original.pfx' } }); f.ui.show(); await tick(); chooseCertificate(f, file);
+  f.get('certificate_password').value = 'do-not-send'; f.get('certificate_password').emit('input'); const saving = f.form().emit('submit');
+  assert.equal(f.get('保存网络设置').disabled, true); await f.form().emit('submit'); assert.equal(f.posts.length, 0);
+  f.setAdmin(false); f.ui.reset(); finish(Uint8Array.from([1, 2, 3]).buffer); await saving;
+  assert.equal(f.posts.length, 0); assert.equal(f.get('certificate_file').value, ''); assert.equal(f.get('certificate_password').value, ''); assert.equal(f.host.hidden, true);
+  assert.ok(!f.walk(f.host).some(node => node.textContent.includes('slow.pfx')));
+});
+
+test('disabling HTTPS during a pending read cancels its upload and password draft', async () => {
+  let finish; const f = fixture({ state: { ...tlsState, connection_mode: 'https', certificate_path: '/old/original.pfx', certificate_password_set: true } }); f.ui.show(); await tick();
+  chooseCertificate(f, { name: 'slow.pfx', size: 3, arrayBuffer() { return new Promise(resolve => { finish = resolve; }); } });
+  f.get('certificate_password').value = 'do-not-send'; f.get('certificate_password').emit('input'); const saving = f.form().emit('submit');
+  f.get('https_enabled').checked = false; f.get('https_enabled').emit('change'); finish(Uint8Array.from([1, 2, 3]).buffer); await saving;
+  assert.equal(f.posts.length, 0); assert.equal(f.get('certificate_file').value, ''); assert.equal(f.get('certificate_password').value, '');
+  await f.form().emit('submit'); assert.equal(f.posts[0].data.connection_mode, 'http'); assert.ok(!('certificate_upload' in f.posts[0].data)); assert.ok(!('certificate_password' in f.posts[0].data));
+});
+
+test('file read and server failures keep the selection available for an explicit retry', async () => {
+  let reads = 0, requests = 0;
+  const f = fixture({ state: { ...tlsState, connection_mode: 'https', certificate_path: '/old/original.pfx' }, post(path, data) { if (++requests === 1) throw Error('证书密码不正确'); const response = { ...tlsState, connection_mode: 'https', certificate_path: '/data/https-certificates/retried.pfx', certificate_password_set: false, https_listening: true, share_scheme: 'https' }; return response; } });
+  f.ui.show(); await tick(); chooseCertificate(f, { name: 'retry.pfx', size: 3, async arrayBuffer() { if (++reads === 1) throw Error('unreadable file'); return Uint8Array.from([1, 2, 3]).buffer; } });
+  await f.form().emit('submit'); assert.equal(f.posts.length, 0); assert.equal(f.get('certificate_path').disabled, true); assert.equal(f.get('保存网络设置').disabled, false);
+  await f.form().emit('submit'); assert.equal(f.posts.length, 1); assert.equal(f.get('certificate_path').disabled, true); assert.ok(f.get('certificate_file').value);
+  await f.form().emit('submit'); assert.equal(f.posts.length, 2); assert.equal(reads, 3); assert.equal(f.get('certificate_file').value, ''); assert.equal(f.get('certificate_path').value, '/data/https-certificates/retried.pfx');
+});
+
+test('discard and account reset remove staged files from subsequent saves', async () => {
+  for (const action of ['discard', 'reset']) {
+    const f = fixture({ state: { ...tlsState, connection_mode: 'https', certificate_path: '/old/original.pfx', certificate_password_set: true } }); f.ui.show(); await tick();
+    chooseCertificate(f, sampleCertificate()); f.get('certificate_password').value = 'staged-password'; f.get('certificate_password').emit('input');
+    if (action === 'discard') f.get('放弃修改').emit('click'); else { f.ui.reset(); f.ui.show(); await tick(); }
+    assert.equal(f.get('certificate_file').value, ''); assert.equal(f.get('certificate_password').value, '');
+    f.get('public_share_url').value = 'https://public.example.com'; f.get('public_share_url').emit('input'); await f.form().emit('submit');
+    assert.ok(!('certificate_upload' in f.posts[0].data)); assert.ok(!('certificate_password' in f.posts[0].data)); assert.ok(!('certificate_path' in f.posts[0].data)); assert.equal(f.get('certificate_path').value, '/old/original.pfx');
+  }
 });
 
 test('HTTPS switch reveals certificate controls and web settings cannot edit ports', async () => {
@@ -109,6 +218,35 @@ test('an existing certificate password is retained on blank save and explicitly 
   assert.equal(f.posts[1].data.certificate_password, ''); assert.equal(f.get('清除已保存密码').hidden, true);
 });
 
+test('a dirty refresh preserves the displayed certificate baseline without resending a replaced path', async () => {
+  const initial = { ...tlsState, connection_mode: 'https', certificate_path: '/data/https-certificates/old.pfx', certificate_password_set: true };
+  const newer = { ...initial, certificate_path: '/data/https-certificates/new.pfx' };
+  let reads = 0;
+  const f = fixture({ state: initial, api() { return { ...(++reads === 1 ? initial : newer) }; }, post(path, data) { return { ...newer, ...data, https_listening: false, share_scheme: 'http' }; } });
+  f.ui.show(); await tick();
+  f.get('public_share_url').value = 'https://photos.example.com'; f.get('public_share_url').emit('input');
+  await f.get('刷新状态').emit('click');
+  assert.equal(f.get('certificate_path').value, initial.certificate_path);
+  f.get('https_enabled').checked = false; f.get('https_enabled').emit('change');
+  await f.form().emit('submit');
+  assert.equal(f.posts[0].data.connection_mode, 'http');
+  assert.ok(!('certificate_path' in f.posts[0].data));
+  assert.ok(!('certificate_password' in f.posts[0].data));
+  assert.equal(f.get('certificate_path').value, newer.certificate_path);
+});
+
+test('manual certificate path edits are sent but reverting to the filled path keeps the server value', async () => {
+  const configured = { ...tlsState, connection_mode: 'https', certificate_path: '/certs/original.pfx' };
+  for (const revert of [false, true]) {
+    const f = fixture({ state: configured }); f.ui.show(); await tick();
+    f.get('certificate_path').value = '/certs/manual.p12'; f.get('certificate_path').emit('input');
+    if (revert) { f.get('certificate_path').value = configured.certificate_path; f.get('certificate_path').emit('input'); }
+    await f.form().emit('submit');
+    if (revert) assert.ok(!('certificate_path' in f.posts[0].data));
+    else assert.equal(f.posts[0].data.certificate_path, '/certs/manual.p12');
+  }
+});
+
 test('password drafts survive stale refresh but are cleared by disabling HTTPS, discard and account reset', async () => {
   let finish, calls = 0; const configured = { ...tlsState, connection_mode: 'https', certificate_path: '/certs/reader.pfx', certificate_password_set: true };
   const f = fixture({ api() { return ++calls === 1 ? { ...configured } : new Promise(resolve => { finish = resolve; }); } });
@@ -125,7 +263,7 @@ test('legacy HTTP and proxy settings load with HTTPS off and keep certificate se
     const f = fixture({ state: { ...tlsState, connection_mode, certificate_path: '/certs/retained.pfx', certificate_password_set: true } });
     f.ui.show(); await tick(); assert.equal(f.get('https_enabled').checked, false);
     f.get('public_share_url').value = 'https://photos.example.com'; f.get('public_share_url').emit('input'); await f.form().emit('submit');
-    assert.equal(f.posts[0].data.connection_mode, 'http'); assert.equal(f.posts[0].data.certificate_path, '/certs/retained.pfx');
+    assert.equal(f.posts[0].data.connection_mode, 'http'); assert.ok(!('certificate_path' in f.posts[0].data)); assert.equal(f.get('certificate_path').value, '/certs/retained.pfx');
     assert.ok(!('certificate_password' in f.posts[0].data)); assert.ok(!('https_enabled' in f.posts[0].data));
     assert.equal(f.get('https_enabled').checked, false);
   }

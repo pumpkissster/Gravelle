@@ -23,6 +23,9 @@
 .network-field > .network-hint { margin: 0; }
 .network-input-actions, .network-address-row { display: flex; align-items: center; gap: 10px; }
 .network-input-actions input { flex: 1; min-width: 0; }
+.network-upload-status { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.network-upload-status .network-hint { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.network-upload-status[hidden] { display: none; }
 .network-settings-page .button { border-radius: 11px; min-height: 42px; white-space: nowrap; }
 .network-entry-url { display: block; flex: 1; min-width: 0; margin: 16px 0; color: var(--ink); font-size: 13px; line-height: 1.8; overflow-wrap: anywhere; user-select: all; }
 .network-port-row { display: flex; flex-wrap: wrap; align-items: center; gap: 13px; margin-bottom: 12px; }
@@ -38,6 +41,7 @@
   .network-toggle-row { gap: 16px; align-items: flex-start; }
   .network-input-actions, .network-address-row { align-items: stretch; flex-direction: column; }
   .network-address-row .button { align-self: flex-start; }
+  .network-upload-status { align-items: flex-start; flex-direction: column; }
   .network-entry-url { margin: 14px 0 0; }
   .network-actions .button { flex: 1; }
 }

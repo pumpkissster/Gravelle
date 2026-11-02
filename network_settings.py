@@ -24,7 +24,7 @@ import time
 from urllib.parse import urlsplit
 
 from password_reset import DataDirectoryLock, PasswordResetError
-from https_settings import CertificatePasswordVault, validate_certificate_path
+from https_settings import CertificatePasswordVault, CertificateUploadStore, validate_certificate_path
 
 ENTRY_COOKIE = "gravelle_entry"
 ENTRY_SECONDS = 30 * 24 * 60 * 60
@@ -243,6 +243,7 @@ class NetworkSettings:
         self.library = library
         self.lock = threading.RLock()
         self.passwords = CertificatePasswordVault(library.data)
+        self.certificates = CertificateUploadStore(library.data)
         with closing(library.connect()) as connection, connection:
             existed = connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='network_settings'").fetchone()
             connection.execute("CREATE TABLE IF NOT EXISTS network_settings(id INTEGER PRIMARY KEY CHECK(id=1),settings TEXT NOT NULL)")

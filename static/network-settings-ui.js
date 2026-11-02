@@ -5,6 +5,21 @@
   else root.GravelleNetworkSettingsUI = api;
 })(typeof window === 'undefined' ? globalThis : window, () => {
   'use strict';
+  const MAX_CERTIFICATE_BYTES = 16 * 1024 * 1024;
+  function certificateFile(file) {
+    if (!file || typeof file.name !== 'string' || file.name.length > 255 || /[\x00-\x1f\x7f/\\:]/.test(file.name) || !/\.(pfx|p12)$/i.test(file.name)) throw new Error('请选择 .pfx 或 .p12 证书文件。');
+    if (!Number.isSafeInteger(file.size) || file.size <= 0 || file.size > MAX_CERTIFICATE_BYTES) throw new Error('证书文件不能为空，且不能超过 16 MiB。');
+  }
+  async function readCertificateUpload(file, encode = globalThis.btoa) {
+    certificateFile(file);
+    let buffer;
+    try { buffer = await file.arrayBuffer(); } catch (_) { throw new Error('无法读取证书文件，请重新选择后重试。'); }
+    if (!(buffer instanceof ArrayBuffer) || buffer.byteLength !== file.size) throw new Error('证书文件读取不完整，请重新选择后重试。');
+    const bytes = new Uint8Array(buffer), parts = [];
+    // Each full chunk is divisible by three, so only the final chunk is padded.
+    for (let offset = 0; offset < bytes.length; offset += 24576) parts.push(encode(String.fromCharCode(...bytes.subarray(offset, offset + 24576))));
+    return { name: file.name, data: parts.join('') };
+  }
   function publicUrl(value) {
     const text = String(value || '').trim(); if (!text) return '';
     if (/[\s\\]/.test(text)) throw new Error('公网分享地址只能填写 http 或 https 的域名与端口。');
@@ -17,11 +32,21 @@
     if (value.security_entry_enabled && !/^[A-Za-z0-9_-]{8,64}$/.test(code)) throw new Error('安全入口码需要 8–64 位英文字母、数字、下划线或短横线。');
     if (!value.security_entry_enabled && !/^[A-Za-z0-9_-]{8,64}$/.test(code)) code = '';
     const data = { security_entry_enabled: Boolean(value.security_entry_enabled), security_entry_code: code, share_port_enabled: Boolean(value.share_port_enabled), public_share_url: publicUrl(value.public_share_url) };
+    if (Object.prototype.hasOwnProperty.call(value, 'certificate_upload') && value.connection_mode !== 'https') throw new Error('请先启用 HTTPS，再上传证书。');
     if (Object.prototype.hasOwnProperty.call(value, 'connection_mode')) {
       if (!['http', 'proxy', 'https'].includes(value.connection_mode)) throw new Error('请选择有效的连接方式。');
-      const path = String(value.certificate_path || '').trim();
-      if (path.length > 4096 || /[\x00-\x1f\x7f]/.test(path) || value.connection_mode === 'https' && !/\.(pfx|p12)$/i.test(path)) throw new Error('请选择服务器上的 .pfx 或 .p12 证书文件。');
-      data.connection_mode = value.connection_mode; data.certificate_path = path;
+      data.connection_mode = value.connection_mode;
+      if (Object.prototype.hasOwnProperty.call(value, 'certificate_upload')) {
+        const upload = value.certificate_upload;
+        if (value.connection_mode !== 'https' || !upload || typeof upload.data !== 'string' || !upload.data || upload.data.length > Math.ceil(MAX_CERTIFICATE_BYTES / 3) * 4 || upload.data.length % 4 || !/^[A-Za-z0-9+/]*={0,2}$/.test(upload.data)) throw new Error('上传的证书格式无效，请重新选择文件。');
+        const size = upload.data.length * 3 / 4 - (upload.data.endsWith('==') ? 2 : upload.data.endsWith('=') ? 1 : 0);
+        certificateFile({ name: upload.name, size });
+        data.certificate_upload = { name: upload.name, data: upload.data };
+      } else if (Object.prototype.hasOwnProperty.call(value, 'certificate_path')) {
+        const path = String(value.certificate_path || '').trim();
+        if (path.length > 4096 || /[\x00-\x1f\x7f]/.test(path) || value.connection_mode === 'https' && !/\.(pfx|p12)$/i.test(path)) throw new Error('请上传证书，或填写服务器上的 .pfx 或 .p12 证书文件路径。');
+        data.certificate_path = path;
+      }
       if (Object.prototype.hasOwnProperty.call(value, 'certificate_password')) {
         if (typeof value.certificate_password !== 'string' || value.certificate_password.length > 1024) throw new Error('证书密码格式不正确。');
         data.certificate_password = value.certificate_password;
@@ -31,7 +56,7 @@
   }
   function valid(value) {
     const base = Boolean(value && typeof value.security_entry_enabled === 'boolean' && typeof value.security_entry_code === 'string' && typeof value.security_entry_path === 'string' && typeof value.share_port_enabled === 'boolean' && Number.isInteger(value.share_port) && value.share_port > 0 && value.share_port <= 65535 && typeof value.share_listening === 'boolean' && typeof value.public_share_url === 'string' && ['docker', 'desktop', 'source'].includes(value.runtime));
-    if (!base || Object.prototype.hasOwnProperty.call(value, 'certificate_password')) return false;
+    if (!base || ['certificate_password', 'certificate_upload', 'certificate_password_ciphertext'].some(key => Object.prototype.hasOwnProperty.call(value, key))) return false;
     const keys = ['connection_mode', 'certificate_path', 'certificate_password_set', 'https_port', 'https_listening', 'https_error', 'share_scheme'];
     if (keys.every(key => !Object.prototype.hasOwnProperty.call(value, key))) return true;
     return ['http', 'proxy', 'https'].includes(value.connection_mode) && typeof value.certificate_path === 'string' && typeof value.certificate_password_set === 'boolean' && Number.isInteger(value.https_port) && value.https_port > 0 && value.https_port <= 65535 && typeof value.https_listening === 'boolean' && typeof value.https_error === 'string' && ['http', 'https'].includes(value.share_scheme);
@@ -46,7 +71,7 @@
   }
   function create({ host, api, post, isAdmin, toast = () => {}, onSaved = () => {}, window: injectedWindow }) {
     const doc = host.ownerDocument, win = injectedWindow || doc.defaultView || window;
-    let generation = 0, active = false, snapshot = null, loading = null, busy = false, dirty = false, edits = 0, clearPassword = false;
+    let generation = 0, active = false, snapshot = null, loading = null, busy = false, dirty = false, edits = 0, clearPassword = false, selectedCertificate = null, filledCertificatePath = '';
     const authorized = () => typeof isAdmin === 'function' ? Boolean(isAdmin()) : Boolean(isAdmin);
     const el = (tag, cls, text) => { const node = doc.createElement(tag); if (cls) node.className = cls; if (text !== undefined) node.textContent = text; return node; };
     const button = (text, handler, primary = false) => { const node = el('button', 'button ' + (primary ? 'button-primary' : 'button-secondary'), text); node.type = 'button'; if (handler) node.addEventListener('click', handler); return node; };
@@ -59,10 +84,14 @@
     const https = el('section', 'settings-panel network-card'); https.append(el('h2', '', 'HTTPS'));
     const httpsEnabled = toggle('https_enabled', '启用 HTTPS', '关闭时使用 HTTP；外部反向代理提供 HTTPS 时无需开启。');
     const certificateDetails = el('div', 'network-details network-certificate-details');
-    const pathLabel = el('label', 'network-field'); pathLabel.append(el('span', '', '证书文件路径')); const certificatePath = input('certificate_path', '证书文件路径'); certificatePath.type = 'text'; certificatePath.autocomplete = 'off'; certificatePath.spellcheck = false; certificatePath.maxLength = 4096; certificatePath.placeholder = '服务器上的 .pfx 或 .p12 文件路径'; pathLabel.append(certificatePath, el('small', 'network-hint', '填写运行 Gravelle 的设备可读取的文件路径，支持 .pfx 和 .p12 证书。'));
+    const pathLabel = el('label', 'network-field'); pathLabel.htmlFor = 'network-certificate_path'; pathLabel.append(el('span', '', '证书文件')); const certificatePath = input('certificate_path', '证书文件路径'); certificatePath.type = 'text'; certificatePath.autocomplete = 'off'; certificatePath.spellcheck = false; certificatePath.maxLength = 4096; certificatePath.placeholder = '上传证书，或填写服务器上的文件路径';
+    const certificateInput = input('certificate_file', '选择 PFX 或 P12 证书文件'); certificateInput.type = 'file'; certificateInput.accept = '.pfx,.p12'; certificateInput.hidden = true;
+    const uploadCertificate = button('上传证书', () => { if (!busy && authorized() && httpsEnabled.control.checked && snapshot && Object.prototype.hasOwnProperty.call(snapshot, 'connection_mode')) certificateInput.click(); });
+    const pathControls = el('div', 'network-input-actions'); pathControls.append(certificatePath, uploadCertificate); pathLabel.append(pathControls, el('small', 'network-hint', '支持 PFX／P12，最多 16 MiB；也可填写服务器已有证书的路径。'));
+    const uploadStatus = el('div', 'network-upload-status'); const uploadHint = el('span', 'network-hint'); uploadHint.setAttribute('role', 'status'); const cancelUpload = button('取消上传', () => { clearCertificateFile(); certificatePassword.value = ''; clearPassword = false; changed(); }); uploadStatus.append(uploadHint, cancelUpload); uploadStatus.hidden = true;
     const passwordLabel = el('label', 'network-field'); passwordLabel.append(el('span', '', '证书密码')); const passwordControls = el('div', 'network-input-actions'); const certificatePassword = input('certificate_password', '证书密码'); certificatePassword.type = 'password'; certificatePassword.autocomplete = 'new-password'; certificatePassword.maxLength = 1024; certificatePassword.placeholder = '证书没有密码时留空';
     const clearStoredPassword = button('清除已保存密码', () => { certificatePassword.value = ''; clearPassword = !clearPassword; changed(); }); passwordControls.append(certificatePassword, clearStoredPassword); const passwordHint = el('small', 'network-hint'); passwordLabel.append(passwordControls, passwordHint);
-    const httpsPortRow = el('div', 'network-port-row'); const httpsPort = el('strong', 'network-port'); const httpsListening = el('span', 'network-listening'); httpsListening.setAttribute('role', 'status'); httpsPortRow.append(httpsPort, httpsListening); const httpsPortHint = el('p', 'network-hint'); certificateDetails.append(pathLabel, passwordLabel, httpsPortRow, httpsPortHint); https.append(httpsEnabled.row, certificateDetails);
+    const httpsPortRow = el('div', 'network-port-row'); const httpsPort = el('strong', 'network-port'); const httpsListening = el('span', 'network-listening'); httpsListening.setAttribute('role', 'status'); httpsPortRow.append(httpsPort, httpsListening); const httpsPortHint = el('p', 'network-hint'); certificateDetails.append(pathLabel, certificateInput, uploadStatus, passwordLabel, httpsPortRow, httpsPortHint); https.append(httpsEnabled.row, certificateDetails);
     const security = el('section', 'settings-panel network-card'); security.append(el('h2', '', '安全入口'));
     const enabled = toggle('security_entry_enabled', '启用安全入口', '通过专属路径进入阅读器，降低登录入口被随意发现的机会。'); security.append(enabled.row);
     const entry = el('div', 'network-details'); const codeLabel = el('label', 'network-field'); codeLabel.append(el('span', '', '安全入口码')); const codeControls = el('div', 'network-input-actions'); const code = input('security_entry_code', '安全入口码'); code.type = 'text'; code.autocomplete = 'off'; code.spellcheck = false; code.maxLength = 64; code.minLength = 8; code.pattern = '[A-Za-z0-9_-]{8,64}'; code.placeholder = '8–64 位英文字母、数字、_ 或 -';
@@ -74,10 +103,12 @@
     const publicPanel = el('section', 'settings-panel network-card'); publicPanel.append(el('h2', '', '公网分享地址')); const publicLabel = el('label', 'network-field'); publicLabel.append(el('span', '', '分享链接前缀')); const publicInput = input('public_share_url', '公网分享地址'); publicInput.type = 'url'; publicInput.autocomplete = 'off'; publicInput.spellcheck = false; publicInput.placeholder = 'https://photos.example.com'; publicInput.maxLength = 2048; publicLabel.append(publicInput); const publicHint = el('p', 'network-hint'); publicPanel.append(publicLabel, publicHint);
     const actions = el('div', 'network-actions'); const refresh = button('刷新状态', () => load(true).catch(() => {})); const discard = button('放弃修改', () => { if (snapshot) { dirty = false; fill(snapshot); showError(''); update(); } }); const save = el('button', 'button button-primary', '保存网络设置'); save.type = 'submit'; actions.append(refresh, discard, save); form.append(https, security, sharing, publicPanel, actions, status); host.append(error, form);
     function showError(message, reveal = false) { let text = String(message || ''); if (certificatePassword.value) text = text.split(certificatePassword.value).join('［已隐藏］'); error.textContent = text; error.hidden = !text; if (text && reveal && active) error.scrollIntoView?.({ block: 'nearest' }); }
-    function fill(value) { enabled.control.checked = value.security_entry_enabled; code.value = value.security_entry_code; separate.control.checked = value.share_port_enabled; publicInput.value = value.public_share_url; httpsEnabled.control.checked = value.connection_mode === 'https'; certificatePath.value = value.certificate_path || ''; certificatePassword.value = ''; clearPassword = false; }
+    function clearCertificateFile() { selectedCertificate = null; certificateInput.value = ''; }
+    function fill(value) { clearCertificateFile(); enabled.control.checked = value.security_entry_enabled; code.value = value.security_entry_code; separate.control.checked = value.share_port_enabled; publicInput.value = value.public_share_url; httpsEnabled.control.checked = value.connection_mode === 'https'; filledCertificatePath = certificatePath.value = value.certificate_path || ''; certificatePassword.value = ''; clearPassword = false; }
     function update() {
       const unavailable = busy || !snapshot, tlsSupported = Boolean(snapshot && Object.prototype.hasOwnProperty.call(snapshot, 'connection_mode')), ownCertificate = httpsEnabled.control.checked; for (const control of [enabled.control, separate.control, code, generate, publicInput]) control.disabled = unavailable;
-      httpsEnabled.control.disabled = unavailable || !tlsSupported; certificatePath.disabled = certificatePassword.disabled = unavailable || !ownCertificate || !tlsSupported; certificatePath.required = ownCertificate; certificateDetails.hidden = !ownCertificate;
+      httpsEnabled.control.disabled = unavailable || !tlsSupported; certificatePassword.disabled = certificateInput.disabled = uploadCertificate.disabled = unavailable || !ownCertificate || !tlsSupported; certificatePath.disabled = unavailable || !ownCertificate || !tlsSupported || Boolean(selectedCertificate); certificatePath.required = ownCertificate && !selectedCertificate; certificateDetails.hidden = !ownCertificate;
+      uploadStatus.hidden = !selectedCertificate; cancelUpload.disabled = unavailable; uploadHint.textContent = selectedCertificate ? selectedCertificate.name + ' · 保存后上传并使用此证书。' : '';
       clearStoredPassword.hidden = !snapshot?.certificate_password_set; clearStoredPassword.disabled = unavailable || !ownCertificate; clearStoredPassword.textContent = clearPassword ? '取消清除密码' : '清除已保存密码';
       certificatePassword.placeholder = snapshot?.certificate_password_set && !clearPassword ? '已设置，留空继续使用' : '证书没有密码时留空'; passwordHint.textContent = clearPassword ? '保存后将清除已保存的证书密码。' : snapshot?.certificate_password_set ? '已有密码不会在网页显示。留空保留，填写新密码后保存即可替换。' : '证书有密码时填写，密码仅保存在服务端。';
       httpsEnabled.description.textContent = !tlsSupported && snapshot ? '当前服务尚不支持 HTTPS 配置。' : ownCertificate ? '使用已有证书提供 HTTPS，原 HTTP 端口继续可用。' : '关闭时使用 HTTP；外部反向代理提供 HTTPS 时无需开启。';
@@ -97,7 +128,14 @@
     function changed() { dirty = true; edits++; showError(''); update(); }
     for (const control of [enabled.control, separate.control]) control.addEventListener('change', changed);
     for (const control of [code, publicInput]) control.addEventListener('input', changed);
-    httpsEnabled.control.addEventListener('change', () => { if (!httpsEnabled.control.checked) { certificatePassword.value = ''; clearPassword = false; } changed(); });
+    httpsEnabled.control.addEventListener('change', () => { if (!httpsEnabled.control.checked) { clearCertificateFile(); certificatePassword.value = ''; clearPassword = false; } changed(); });
+    certificateInput.addEventListener('change', () => {
+      if (busy || !snapshot || !authorized() || !httpsEnabled.control.checked || !Object.prototype.hasOwnProperty.call(snapshot, 'connection_mode')) { clearCertificateFile(); update(); return; }
+      const file = certificateInput.files?.[0];
+      if (!file) { clearCertificateFile(); changed(); return; }
+      try { certificateFile(file); selectedCertificate = file; changed(); }
+      catch (problem) { clearCertificateFile(); dirty = true; edits++; update(); showError(problem.message, true); }
+    });
     certificatePath.addEventListener('input', changed); certificatePassword.addEventListener('input', () => { if (certificatePassword.value) clearPassword = false; changed(); });
     async function load(force = false) {
       if (!authorized()) throw new Error('仅管理员可管理网络设置。');
@@ -108,15 +146,20 @@
     }
     form.addEventListener('submit', async event => {
       event.preventDefault(); if (busy || loading || !snapshot || !authorized() || !form.reportValidity()) return;
-      let data; try { data = payload({ security_entry_enabled: enabled.control.checked, security_entry_code: code.value, share_port_enabled: separate.control.checked, public_share_url: publicInput.value,
-        ...(Object.prototype.hasOwnProperty.call(snapshot, 'connection_mode') ? { connection_mode: httpsEnabled.control.checked ? 'https' : 'http', certificate_path: certificatePath.value,
-          ...(httpsEnabled.control.checked && (certificatePassword.value || clearPassword) ? { certificate_password: clearPassword ? '' : certificatePassword.value } : {}) } : {}) }); } catch (problem) { showError(problem.message, true); return; }
-      const token = generation; busy = true; showError(''); update();
-      try { const value = await post('/api/network-settings', data); if (token !== generation || !authorized()) return; if (!valid(value)) throw new Error('服务端未返回完整网络设置，请刷新状态核对。'); replaceEntry(value, win); snapshot = value; dirty = false; fill(value); onSaved(value); toast('网络设置已保存'); }
+      const token = generation, edit = edits, file = selectedCertificate;
+      let data, draft; try { draft = { security_entry_enabled: enabled.control.checked, security_entry_code: code.value, share_port_enabled: separate.control.checked, public_share_url: publicInput.value,
+        ...(Object.prototype.hasOwnProperty.call(snapshot, 'connection_mode') ? { connection_mode: httpsEnabled.control.checked ? 'https' : 'http',
+          ...(certificatePath.value !== filledCertificatePath ? { certificate_path: certificatePath.value } : {}),
+          ...(httpsEnabled.control.checked && (certificatePassword.value || clearPassword) ? { certificate_password: clearPassword ? '' : certificatePassword.value } : {}) } : {}) }; if (file) certificateFile(file); else data = payload(draft); } catch (problem) { showError(problem.message, true); return; }
+      busy = true; showError(''); update();
+      try {
+        if (file) { const upload = await readCertificateUpload(file, win.btoa?.bind(win) || globalThis.btoa); if (token !== generation || !authorized() || edit !== edits || file !== selectedCertificate || !httpsEnabled.control.checked) return; data = payload({ ...draft, certificate_upload: upload }); }
+        if (token !== generation || !authorized()) return;
+        const value = await post('/api/network-settings', data); if (token !== generation || !authorized()) return; if (!valid(value)) throw new Error('服务端未返回完整网络设置，请刷新状态核对。'); replaceEntry(value, win); snapshot = value; dirty = false; fill(value); onSaved(value); toast('网络设置已保存'); }
       catch (problem) { if (token === generation && authorized()) showError(problem.message || '保存失败，请重试。', true); }
       finally { if (token === generation) { busy = false; update(); } }
     });
-    return { getSettings: load, show() { if (!authorized()) return; host.hidden = false; if (!active) { active = true; load(true).catch(() => {}); } }, hide() { active = false; host.hidden = true; }, reset() { generation++; active = false; snapshot = null; loading = null; busy = dirty = false; clearPassword = false; edits++; code.value = publicInput.value = certificatePath.value = certificatePassword.value = ''; httpsEnabled.control.checked = enabled.control.checked = separate.control.checked = false; host.hidden = true; showError(''); update(); } };
+    return { getSettings: load, show() { if (!authorized()) return; host.hidden = false; if (!active) { active = true; load(true).catch(() => {}); } }, hide() { active = false; host.hidden = true; }, reset() { generation++; active = false; snapshot = null; loading = null; busy = dirty = false; clearPassword = false; clearCertificateFile(); edits++; code.value = publicInput.value = certificatePath.value = certificatePassword.value = filledCertificatePath = ''; httpsEnabled.control.checked = enabled.control.checked = separate.control.checked = false; host.hidden = true; showError(''); update(); } };
   }
-  return { publicUrl, payload, valid, entryUrl, replaceEntry, create };
+  return { publicUrl, payload, valid, entryUrl, replaceEntry, readCertificateUpload, MAX_CERTIFICATE_BYTES, create };
 });

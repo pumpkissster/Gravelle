@@ -57,7 +57,7 @@ from epub_reader import EpubManager, METADATA_VERSION as EPUB_METADATA_VERSION, 
 from sharing import SharingManager
 from network_settings import (NetworkSettings, ENTRY_COOKIE, ENTRY_SECONDS,
                               SHARE_STATIC, SHARE_PAGE, SHARE_GET, SHARE_POST)
-from https_settings import HTTPSSettingsError, load_context
+from https_settings import HTTPSSettingsError, MAX_CERTIFICATE_BODY_BYTES, load_context
 
 VERSION = "0.9.3"
 MEDIA_TYPES = {"manga_jp", "manga_kr", "comic_us", "photo"}
@@ -3034,13 +3034,30 @@ class ReaderServer(ThreadingHTTPServer):
         with self.library.network.lock:
             if self.network_closing:
                 raise ReaderError("阅读器正在停止。", 503)
+            old = self.library.network.current()
+            upload_requested = isinstance(body, dict) and "certificate_upload" in body
+            upload = body.get("certificate_upload") if upload_requested else None
             try:
-                value = self.library.network.prepare(body)
+                if upload_requested:
+                    if "certificate_path" in body:
+                        raise HTTPSSettingsError("上传证书时请勿同时填写服务器证书路径。")
+                    settings = {key: item for key, item in body.items() if key != "certificate_upload"}
+                    value = self.library.network.prepare(settings) if settings else old.copy()
+                    if value["connection_mode"] != "https":
+                        raise HTTPSSettingsError("请先启用 HTTPS，再上传证书。")
+                else:
+                    value = self.library.network.prepare(body)
             except ValueError as error:
                 raise ReaderError(str(error)) from error
             context = None
+            staged = None
             started_share = started_https = False
             try:
+                if upload_requested:
+                    staged = self.library.network.certificates.stage(upload)
+                    value["certificate_path"] = str(staged)
+                elif old["certificate_path"] != value["certificate_path"]:
+                    self.library.network.certificates.validate_reference(value["certificate_path"])
                 if value["connection_mode"] == "https":
                     context = self._certificate_context(value)
                     if self.https_server is None:
@@ -3055,6 +3072,8 @@ class ReaderServer(ThreadingHTTPServer):
                     self._stop_share_listener()
                 if started_https:
                     self._stop_https_listener()
+                if staged is not None:
+                    self._discard_certificate(staged, required=True)
                 message = str(error) if isinstance(error, HTTPSSettingsError) else "网络端口不可用，设置未保存。请检查端口占用和启动配置。"
                 raise ReaderError(message, 400 if isinstance(error, HTTPSSettingsError) else 409) from error
             except BaseException:
@@ -3062,6 +3081,8 @@ class ReaderServer(ThreadingHTTPServer):
                     self._stop_share_listener()
                 if started_https:
                     self._stop_https_listener()
+                if staged is not None:
+                    self._discard_certificate(staged, required=True)
                 raise
             # Accepted connections still run the current gate. TLS mode refuses
             # any plaintext sharing request accepted immediately before this swap.
@@ -3077,7 +3098,19 @@ class ReaderServer(ThreadingHTTPServer):
                 self.share_error = ""
             if value["connection_mode"] != "https":
                 self._stop_https_listener()
+            if old["certificate_path"] and old["certificate_path"] != value["certificate_path"]:
+                self._discard_certificate(old["certificate_path"])
             return self.network_snapshot()
+
+    def _discard_certificate(self, path, *, required=False):
+        # Filesystem cleanup must not turn an already committed, live TLS
+        # configuration into an apparent failed save or mask its real error.
+        try:
+            removed = self.library.network.certificates.discard(path)
+        except Exception:
+            removed = False
+        if required and not removed:
+            LOG.warning("无法清理未使用的 HTTPS 上传证书，请检查资料目录权限。")
 
     def shutdown(self):
         if self.network_owner is self and self.library is not None:
@@ -3739,9 +3772,19 @@ class ReaderHandler(BaseHTTPRequestHandler):
             self.library.require_admin()
             if request.query:
                 raise ReaderError("网络设置不接受查询参数。")
+            lengths = self.headers.get_all("Content-Length", [])
+            if (self.headers.get("Content-Encoding") or self.headers.get("Transfer-Encoding")
+                    or len(lengths) > 1 or (lengths and not re.fullmatch(r"[0-9]{1,10}", lengths[0]))):
+                raise ReaderError("网络设置请求长度或编码无效。")
+            # Receiving a potentially large certificate must not hold the gate
+            # lock and stall unrelated reading/health requests. Re-check the
+            # current entry and administrator session after the body arrives.
+            body = self.read_body(MAX_CERTIFICATE_BODY_BYTES)
             with self.library.network.lock:
                 self.network_gate()
-                result = self.server.network_owner.configure_network(self.read_body())
+                self.require_auth()
+                self.library.require_admin()
+                result = self.server.network_owner.configure_network(body)
                 header = self.entry_cookie_header(clear=not result["security_entry_enabled"])
             self.respond(result, headers={"Set-Cookie": header})
             return
