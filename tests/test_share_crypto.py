@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 from pathlib import Path
+import struct
 import unittest
 from unittest.mock import patch
+import zlib
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -13,6 +16,17 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 import share_crypto as crypto
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def large_png():
+    """Valid one-pixel PNG with a large ancillary chunk, not a decode bomb."""
+    def chunk(kind, data):
+        checksum = zlib.crc32(data, zlib.crc32(kind))
+        return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', checksum)
+    return (b'\x89PNG\r\n\x1a\n'
+            + chunk(b'IHDR', struct.pack('>IIBBBBB', 1, 1, 8, 2, 0, 0, 0))
+            + chunk(b'paDd', b'\x5a' * (64 * 1024 * 1024 + 1))
+            + chunk(b'IDAT', zlib.compress(b'\0\xc0\x1f\x5d')) + chunk(b'IEND', b''))
 
 
 class ShareCryptoTests(unittest.TestCase):
@@ -67,7 +81,20 @@ class ShareCryptoTests(unittest.TestCase):
         self.assertEqual(packet.hex(), vector["packet_hex"])
         self.assertEqual(crypto.encode_key(self.key), vector["key"])
 
-    def test_invalid_keys_types_limits_and_unrenderable_mimes_fail_closed(self):
+    def test_image_above_old_limit_roundtrips_and_still_authenticates_the_complete_payload(self):
+        data = large_png()
+        expected = hashlib.sha256(data).digest()
+        packet = crypto.encrypt(data, 'image/png', self.key, self.context)
+        self.assertGreater(len(data), 64 * 1024 * 1024)
+        self.assertEqual(len(packet), len(data) + crypto.HEADER_BYTES + crypto.TAG_BYTES)
+        self.assertEqual(hashlib.sha256(self.open_packet(packet)).digest(), expected)
+        del data
+        damaged = bytearray(packet)
+        damaged[-1] ^= 1
+        with self.assertRaises(InvalidTag):
+            self.open_packet(bytes(damaged))
+
+    def test_invalid_keys_types_contexts_and_unrenderable_mimes_fail_closed(self):
         for key in (b"", bytes(16), bytes(24), bytes(33), "password", bytearray(32), None):
             with self.subTest(key=type(key).__name__), self.assertRaises(ValueError):
                 crypto.encrypt(b"data", "image/png", key)
@@ -82,8 +109,6 @@ class ShareCryptoTests(unittest.TestCase):
         for context in ("string", bytearray(2), b"x" * 4097, None):
             with self.subTest(context=type(context).__name__), self.assertRaises(ValueError):
                 crypto.encrypt(b"data", "image/png", self.key, context)
-        with patch.object(crypto, "MAX_IMAGE_BYTES", 5), self.assertRaises(ValueError):
-            crypto.encrypt(b"123456", "image/png", self.key)
 
 
 if __name__ == "__main__":

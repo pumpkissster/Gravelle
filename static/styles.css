@@ -1812,3 +1812,5 @@ html body select:disabled { cursor: default; opacity: .5; }
   html body select option::checkmark { order: 1; margin-inline-start: auto; color: var(--accent); }
   html body select option[hidden] { display: none; }
 }
+.book-grid.catalog-windowed { overflow-anchor: none; }
+.catalog-grid-spacer { grid-column: 1 / -1; min-height: 0; margin: 0; padding: 0; border: 0; pointer-events: none; visibility: hidden; }

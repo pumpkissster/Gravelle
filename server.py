@@ -51,6 +51,7 @@ from transcoding import TranscodingManager
 from image_search import ImageSearchManager, MAX_QUERY_BYTES
 from task_scheduler import SharedTaskScheduler
 from library_covers import LibraryCoverManager
+from page_cache import SourcePageCache, file_identity, source_identity
 from cache_manager import CacheManager
 from pdf_reader import PdfManager, page_key as pdf_page_key, source_version as pdf_source_version
 from epub_reader import EpubManager, METADATA_VERSION as EPUB_METADATA_VERSION, legacy_image_page
@@ -59,14 +60,14 @@ from network_settings import (NetworkSettings, ENTRY_COOKIE, ENTRY_SECONDS,
                               SHARE_STATIC, SHARE_PAGE, SHARE_GET, SHARE_POST)
 from https_settings import HTTPSSettingsError, MAX_CERTIFICATE_BODY_BYTES, load_context
 
-VERSION = "0.9.3"
+VERSION = "0.9.4"
 MEDIA_TYPES = {"manga_jp", "manga_kr", "comic_us", "photo"}
 IMAGE_TYPES = {
     ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
     ".webp": "image/webp", ".gif": "image/gif", ".avif": "image/avif",
 }
 ARCHIVE_TYPES = {".cbz", ".zip"}
-MAX_PAGE_BYTES = 64 * 1024 * 1024
+IMAGE_CHUNK_BYTES = 1024 * 1024
 MAX_BOOK_BYTES = 8 * 1024 * 1024 * 1024
 MAX_PAGES = 10000
 MAX_ZIP_ENTRIES = 50000
@@ -80,6 +81,7 @@ SESSION_SECONDS = 30 * 24 * 60 * 60
 COOKIE_NAME = "sumi_session"
 PASSWORD_ITERATIONS = 600_000
 STATIC_FILES = {
+    "/catalog-render.js": "catalog-render.js",
     "/": "index.html", "/index.html": "index.html", "/app.js": "app.js",
     "/styles.css": "styles.css", "/favicon.svg": "favicon.svg",
     "/favicon.ico": "favicon.ico", "/manifest.webmanifest": "manifest.webmanifest",
@@ -443,8 +445,8 @@ def validate_archive_image(info):
     # more memory than the page itself. Common CBZ STORE/DEFLATE remain supported.
     if info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED, zipfile.ZIP_BZIP2):
         raise ReaderError("压缩方式不支持，请将写真重新打包为普通 ZIP 或 CBZ。", 422)
-    if info.file_size > MAX_PAGE_BYTES:
-        raise ReaderError("单张图片超过 64 MiB，请缩小图片后重新扫描。", 422)
+    if info.file_size > MAX_BOOK_BYTES:
+        raise ReaderError("压缩包解压后的图片超过 8 GiB，请拆成分卷。", 422)
     if info.file_size > 1024 * 1024 and info.file_size / max(1, info.compress_size) > 200:
         raise ReaderError("图片压缩比例异常，已跳过此压缩包。", 422)
 
@@ -481,6 +483,9 @@ class Library:
         self.database = self.data / "library.sqlite3"
         self.password = password
         self.scan_interval = scan_interval
+        self.scan_timer_condition = threading.Condition()
+        self.scan_timer_revision = 0
+        self.periodic_thread = None
         self.stop_event = threading.Event()
         self.state_lock = threading.RLock()
         self.scanning = False
@@ -522,6 +527,75 @@ class Library:
         self.epub = EpubManager(self, ReaderError)
         self.sharing = SharingManager(self, ReaderError)
         self.cache_manager.register_category("pdf", self.pdf)
+        self.source_pages = SourcePageCache(self.data, cancelled=self.stop_event.is_set)
+        self._catalog_nonce = secrets.token_bytes(32)
+        self._initialize_catalog_revision()
+
+    def _initialize_catalog_revision(self):
+        """Track observable catalogue changes, never decoder/cache heartbeat writes.
+
+        Install after every manager has migrated its tables. Recreating these
+        small triggers also recovers them after a manager rebuilds a table.
+        """
+        watched = {
+            "books": None, "media_libraries": None, "book_metadata": None,
+            "models": None, "book_models": None, "users": None,
+            "user_libraries": None, "user_hidden_libraries": None,
+            "progress": None, "favorites": None, "bookmarks": None,
+            "reading_preferences": None,
+            "tc_settings": ("enabled",), "tc_books": ("published",),
+            "library_cover_cache": ("selection", "source_signature", "generation",
+                "ready_signature", "cache_file", "cache_etag", "deferred", "retry_after", "error"),
+        }
+        with closing(self.connect()) as connection, connection:
+            connection.execute("""CREATE TABLE IF NOT EXISTS catalog_revision (
+                id INTEGER PRIMARY KEY CHECK(id=1), value INTEGER NOT NULL DEFAULT 1)""")
+            connection.execute("INSERT OR IGNORE INTO catalog_revision(id) VALUES(1)")
+            for table, selected in watched.items():
+                columns = [row["name"] for row in connection.execute(f'PRAGMA table_info("{table}")')]
+                if not columns:
+                    raise RuntimeError("A catalogue source table is missing: " + table)
+                # Reading-history timestamps affect recent order. A routine
+                # scan/profile maintenance timestamp alone does not redraw a
+                # catalogue; scan transitions are represented in the token.
+                selected = columns if selected is None else [name for name in selected if name in columns]
+                if table == "media_libraries":
+                    selected = [name for name in selected if name != "last_scan"]
+                elif table == "users":
+                    selected = [name for name in selected if name != "updated_at"]
+                changed = " OR ".join(f'OLD."{name}" IS NOT NEW."{name}"' for name in selected)
+                for operation in ("insert", "update", "delete"):
+                    name = f"catalog_revision_{table}_{operation}"
+                    connection.execute(f'DROP TRIGGER IF EXISTS "{name}"')
+                    condition = " WHEN " + changed if operation == "update" else ""
+                    connection.execute(f'''CREATE TRIGGER "{name}" AFTER {operation.upper()} ON "{table}"{condition}
+                        BEGIN UPDATE catalog_revision SET value=value+1 WHERE id=1; END''')
+
+    def catalog_status(self):
+        """Cheap, account-scoped invalidation token; never plans/generates covers."""
+        with self.state_lock, closing(self.connect()) as connection:
+            connection.execute("BEGIN")
+            actor = self._actor(connection)
+            revision = connection.execute("SELECT value FROM catalog_revision WHERE id=1").fetchone()[0]
+            clause = "l.id NOT IN (SELECT library_id FROM user_hidden_libraries WHERE user_id=?)"
+            arguments = [actor["id"]]
+            if actor["role"] != "admin":
+                clause += " AND l.id IN (SELECT library_id FROM user_libraries WHERE user_id=?)"
+                arguments.append(actor["id"])
+            rows = connection.execute("""SELECT l.id,c.selection,c.source_signature,c.ready_signature,
+                c.cache_file,c.deferred,c.retry_after FROM media_libraries l
+                LEFT JOIN library_cover_cache c ON c.library_id=l.id WHERE """ + clause, arguments).fetchall()
+            active = self.pending_scans | ({self.current_scan} if self.current_scan else set())
+            scanning_ids = sorted(row["id"] for row in rows if row["id"] in active)
+            now = time.time()
+            cover_pending = any(row["selection"] and json.loads(row["selection"])
+                and (row["ready_signature"] != row["source_signature"] or not row["cache_file"])
+                and not row["deferred"] and row["retry_after"] <= now and not self.stop_event.is_set()
+                for row in rows)
+            identity = json.dumps([actor["id"], actor["role"], actor["permissions"], revision,
+                                   scanning_ids, bool(cover_pending)], separators=(",", ":")).encode()
+            token = hmac.new(self._catalog_nonce, identity, hashlib.sha256).hexdigest()
+            return {"revision": token, "scanning": bool(scanning_ids), "cover_pending": bool(cover_pending)}
 
     def connect(self):
         connection = sqlite3.connect(self.database, timeout=20)
@@ -1489,13 +1563,43 @@ class Library:
         self.periodic_thread.start()
 
     def _periodic(self):
-        if self.scan_interval <= 0:
-            return
-        while not self.stop_event.wait(self.scan_interval):
-            self.start_scan()
+        while True:
+            with self.scan_timer_condition:
+                while self.scan_interval <= 0 and not self.stop_event.is_set():
+                    self.scan_timer_condition.wait()
+                if self.stop_event.is_set():
+                    return
+                revision = self.scan_timer_revision
+                deadline = time.monotonic() + self.scan_interval
+                while not self.stop_event.is_set() and revision == self.scan_timer_revision:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    self.scan_timer_condition.wait(remaining)
+                if self.stop_event.is_set():
+                    return
+                if revision != self.scan_timer_revision:
+                    continue
+            # A slow scan is already handling these sources. Do not queue a
+            # duplicate full pass on every timer tick while it is still busy.
+            with self.state_lock, self.scan_timer_condition:
+                if (not self.stop_event.is_set() and revision == self.scan_timer_revision
+                        and self.scan_interval > 0 and not self.scanning):
+                    self.start_scan()
+
+    def set_scan_interval(self, seconds):
+        with self.scan_timer_condition:
+            self.scan_interval = seconds
+            self.scan_timer_revision += 1
+            self.scan_timer_condition.notify_all()
 
     def close(self):
         self.stop_event.set()
+        self.source_pages.close()
+        with self.scan_timer_condition:
+            self.scan_timer_condition.notify_all()
+        if self.periodic_thread and self.periodic_thread is not threading.current_thread():
+            self.periodic_thread.join(timeout=5)
         self.task_scheduler.close()
         self.pdf.close()
         self.epub.close()
@@ -1616,10 +1720,10 @@ class Library:
                             if not stat.S_ISREG(info.st_mode) or is_link_node(info):
                                 continue
                             if suffix in IMAGE_TYPES:
-                                if 0 < info.st_size <= MAX_PAGE_BYTES:
+                                if info.st_size > 0:
                                     image_files.append((relative, info))
                                 else:
-                                    report(relative, "图片为空或超过 64 MiB，已跳过。")
+                                    report(relative, "图片文件为空，已跳过。")
                             elif suffix == ".epub":
                                 book_id = previous_ids.get((self._source_identity(root, relative), "epub")) or self._book_id("source\0" + self._source_identity(root, relative), "epub", library_id)
                                 with self._open_media_file(root, relative) as handle:
@@ -1937,7 +2041,12 @@ class Library:
     def _select(self, connection, book_id=None, library_id=None, visible=False, management=False):
         actor = self._actor(connection)
         access, arguments = self._access_sql(connection, visible=visible, management=management)
-        sql = '''SELECT b.*, p.page, p.completed, p.updated_at, p.position AS read_position, COALESCE(f.favorite,0) AS favorite,
+        # Directory exports never need the potentially huge page manifest or
+        # PDF geometry. Single-book/internal callers retain the complete row.
+        columns = 'b.*' if book_id is not None else ','.join('b.' + name for name in (
+            'id', 'title', 'series', 'path', 'format', 'page_count', 'size', 'modified', 'added_at',
+            'signature', 'library_id', 'source_root', 'epub_metadata'))
+        sql = 'SELECT ' + columns + ''', p.page, p.completed, p.updated_at, p.position AS read_position, COALESCE(f.favorite,0) AS favorite,
             l.name AS library_name, l.path AS library_path,
             CASE WHEN l.media_type='photo' THEN COALESCE(library_author.name,folder_model.name,l.default_author)
                  ELSE COALESCE(library_author.name,l.default_author) END AS author,
@@ -2006,18 +2115,34 @@ class Library:
     def _models_for_books(self, connection, book_ids):
         result = {}
         access, arguments = self._access_sql(connection, 'other', visible=True)
+        bindings, models = [], {}
         for offset in range(0, len(book_ids), 500):
             batch = book_ids[offset:offset + 500]
             marks = ','.join('?' for _ in batch)
-            rows = connection.execute(f'''SELECT bm.book_id,m.id,m.name,m.avatar_file,m.avatar_revision,
-                (SELECT MIN(other.id) FROM books other JOIN book_models obm ON obm.book_id=other.id
-                 WHERE obm.model_id=m.id AND other.active=1 AND {access}) AS cover_book_id FROM book_models bm
+            rows = connection.execute(f'''SELECT bm.book_id,m.id,m.name,m.avatar_file,m.avatar_revision FROM book_models bm
                 JOIN models m ON m.id=bm.model_id WHERE bm.book_id IN ({marks})
-                ORDER BY bm.book_id,bm.position,m.id''', [*arguments, *batch])
+                ORDER BY bm.book_id,bm.position,m.id''', batch)
             for row in rows:
-                model = {key: row[key] for key in ('id', 'name', 'avatar_revision')}
-                model['avatar_url'] = self._model_avatar_url(row)
-                result.setdefault(row['book_id'], []).append(model)
+                bindings.append((row['book_id'], row['id']))
+                models[row['id']] = dict(row)
+        fallback_ids = [identifier for identifier, model in models.items() if not model['avatar_file']]
+        fallback = {}
+        for offset in range(0, len(fallback_ids), 500):
+            batch = fallback_ids[offset:offset + 500]
+            marks = ','.join('?' for _ in batch)
+            for row in connection.execute(f'''SELECT obm.model_id,MIN(other.id) AS cover_book_id
+                FROM book_models obm JOIN books other ON other.id=obm.book_id
+                WHERE obm.model_id IN ({marks}) AND other.active=1 AND {access} GROUP BY obm.model_id''',
+                [*batch, *arguments]):
+                fallback[row['model_id']] = row['cover_book_id']
+        exported = {}
+        for identifier, row in models.items():
+            row['cover_book_id'] = fallback.get(identifier)
+            model = {key: row[key] for key in ('id', 'name', 'avatar_revision')}
+            model['avatar_url'] = self._model_avatar_url(row)
+            exported[identifier] = model
+        for book_id, identifier in bindings:
+            result.setdefault(book_id, []).append(dict(exported[identifier]))
         return result
 
     def listing(self, library_id=None):
@@ -2064,7 +2189,7 @@ class Library:
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("error", Image.DecompressionBombWarning)
-                with Image.open(BytesIO(data)) as image:
+                with Image.open(BytesIO(data) if isinstance(data, (bytes, bytearray)) else data) as image:
                     if image.format not in (("JPEG", "PNG", "WEBP", "GIF", "AVIF", "BMP") if allow_bmp else ("JPEG", "PNG", "WEBP", "GIF", "AVIF")):
                         raise ReaderError("封面只支持 JPG、PNG、WebP、GIF 或 AVIF 图片。", 422)
                     if image.width <= 0 or image.height <= 0 or image.width * image.height > MAX_COVER_PIXELS:
@@ -2648,6 +2773,40 @@ class Library:
         return {'favorite':favorite}
 
     def image(self, book_id, index, management=False, width=None):
+        """Byte interface for consumers such as authenticated share encryption."""
+        with self.open_image(book_id, index, management=management, width=width) as (source, length, mime, etag):
+            data = source.read(length)
+            if (len(data) != length or (not isinstance(source, BytesIO) and not getattr(source, 'immutable_snapshot', False)
+                    and '"' + hashlib.sha256(data).hexdigest() + '"' != etag)):
+                raise ReaderError("源图片在读取期间发生变化，请重新扫描后重试。", 422)
+            return data, mime, etag
+
+    def _prepare_image_stream(self, source, size, mime, *, output=None):
+        if size <= 0:
+            raise ReaderError("图片文件为空，请检查文件。", 422)
+        digest = hashlib.sha256()
+        remaining = size
+        while remaining:
+            if self.stop_event.is_set():
+                raise ReaderError("阅读器正在停止，请稍后重试。", 503)
+            chunk = source.read(min(IMAGE_CHUNK_BYTES, remaining))
+            if not chunk:
+                raise ReaderError("源图片在读取期间发生变化，请重新扫描后重试。", 422)
+            remaining -= len(chunk)
+            digest.update(chunk)
+            if output is not None:
+                output.write(chunk)
+        if source.read(1):
+            raise ReaderError("源图片在读取期间发生变化，请重新扫描后重试。", 422)
+        result = source if output is None else output
+        if output is not None:
+            output.flush()
+        result.seek(0)
+        return result, size, mime, '"' + digest.hexdigest() + '"'
+
+    @contextmanager
+    def open_image(self, book_id, index, management=False, width=None):
+        """Keep safe source handles alive while a page is sent in bounded chunks."""
         book = self.book(book_id, internal=True, management=management)
         if index is None:
             index = min(max(book["cover_page"], 0), max(0, book["page_count"] - 1))
@@ -2655,9 +2814,15 @@ class Library:
             raise ReaderError("图片页码不存在。", 404)
         if book["format"] == "pdf":
             book["pdf_source_version"] = book["signature"]
-            return self.pdf.image(book, index, 1600 if width is None else width)
+            data, mime, etag = self.pdf.image(book, index, 1600 if width is None else width)
+            with BytesIO(data) as source:
+                yield source, len(data), mime, etag
+            return
         if book["format"] == "epub":
-            return self.epub.image(book, index)
+            data, mime, etag = self.epub.image(book, index)
+            with BytesIO(data) as source:
+                yield source, len(data), mime, etag
+            return
         page = json.loads(book["pages"])[index]
         if not management:
             try:
@@ -2665,34 +2830,69 @@ class Library:
             except (OSError, KeyError, zipfile.BadZipFile, RuntimeError, EOFError, NotImplementedError) as error:
                 raise ReaderError("无法读取这一页的来源或优化图片，请管理员重新扫描和处理。", 422) from error
             if optimized is not None:
-                return optimized
+                data, mime, etag = optimized
+                with BytesIO(data) as source:
+                    yield source, len(data), mime, etag
+                return
+        mime = IMAGE_TYPES.get(PurePosixPath(page).suffix.lower(), "application/octet-stream")
         try:
             root = self._directory_path(book["source_root"])
             if book["format"] == "folder":
                 with self._open_media_file(root, page) as handle:
-                    if os.fstat(handle.fileno()).st_size > MAX_PAGE_BYTES:
-                        raise ReaderError("图片超过 64 MiB，请调整图片后重新扫描。", 422)
-                    data = handle.read(MAX_PAGE_BYTES + 1)
+                    before = os.fstat(handle.fileno())
+                    identity = source_identity(handle, before)
+                    stamp = file_identity(before)
+                    key = ('folder', str(root), page, identity) if identity is not None else None
+                    def verify():
+                        after = os.fstat(handle.fileno())
+                        if file_identity(after) != stamp or identity is not None and source_identity(handle, after) != identity:
+                            raise ReaderError("源图片在读取期间发生变化，请重新扫描后重试。", 422)
+                    def build(output):
+                        prepared = self._prepare_image_stream(handle, before.st_size, mime, output=output)
+                        verify()
+                        return prepared[2], prepared[3]
+                    with self.source_pages.open(key, before.st_size, build) as cached:
+                        if cached is None:
+                            handle.seek(0)
+                            result = self._prepare_image_stream(handle, before.st_size, mime)
+                        else:
+                            result = cached
+                        verify()
+                        yield result
             else:
                 with self._open_media_file(root, book["path"]) as handle:
+                    before = os.fstat(handle.fileno())
+                    identity = source_identity(handle, before)
+                    stamp = file_identity(before)
+                    def verify():
+                        after = os.fstat(handle.fileno())
+                        if file_identity(after) != stamp or identity is not None and source_identity(handle, after) != identity:
+                            raise ReaderError("源图片在读取期间发生变化，请重新扫描后重试。", 422)
                     check_zip_directory(handle)
                     with zipfile.ZipFile(handle) as archive:
                         if len(archive.infolist()) > MAX_ZIP_ENTRIES:
                             raise ReaderError("压缩包中的文件过多，请重新整理写真。", 422)
                         info = archive.getinfo(page)
                         validate_archive_image(info)
-                        with archive.open(info) as source:
-                            data = source.read(MAX_PAGE_BYTES + 1)
-            if len(data) > MAX_PAGE_BYTES:
-                raise ReaderError("图片超过 64 MiB，已停止读取。", 422)
-            if not data:
-                raise ReaderError("图片文件为空，请检查文件。", 422)
+                        key = ('archive', str(root), book['path'], identity, page,
+                               info.CRC, info.file_size, info.compress_size, info.header_offset,
+                               info.compress_type, info.flag_bits) if identity is not None else None
+                        def build(output):
+                            with archive.open(info) as source:
+                                prepared = self._prepare_image_stream(source, info.file_size, mime, output=output)
+                            verify()
+                            return prepared[2], prepared[3]
+                        with self.source_pages.open(key, info.file_size, build) as cached:
+                            verify()
+                            if cached is not None:
+                                yield cached
+                            else:
+                                with archive.open(info) as source:
+                                    result = self._prepare_image_stream(source, info.file_size, mime)
+                                    verify()
+                                    yield result
         except (OSError, KeyError, zipfile.BadZipFile, RuntimeError, EOFError, NotImplementedError) as error:
             raise ReaderError("无法读取这一页，文件可能已移动或损坏，请重新扫描。", 422) from error
-        mime = IMAGE_TYPES.get(PurePosixPath(page).suffix.lower(), "application/octet-stream")
-        # The digest reflects the actual bytes, including changes made between scans.
-        etag = '"' + hashlib.sha256(data).hexdigest() + '"'
-        return data, mime, etag
 
     def cover(self, book_id):
         with self.cover_lock:
@@ -2723,8 +2923,8 @@ class Library:
                 try:
                     data = candidate.read_bytes()
                 except FileNotFoundError:
-                    original, _, _ = self.image(book_id, page_index, width=600)
-                    data = self._thumbnail(original, allow_bmp=book["format"] == "epub")
+                    with self.open_image(book_id, page_index, width=600) as (source, _length, _mime, _etag):
+                        data = self._thumbnail(source, allow_bmp=book["format"] == "epub")
                     self._write_cover(name, data)
                     self._prune_covers(book_id, {name})
             etag = '"' + hashlib.sha256(data).hexdigest() + '"'
@@ -3494,21 +3694,41 @@ class ReaderHandler(BaseHTTPRequestHandler):
             width = query.get("width", ["1600"])[0]
             if width not in ("800", "1600", "2400"):
                 raise ReaderError("分享图片尺寸无效。")
-            data, mime = self.library.sharing.image(token, session, int(index), width=int(width))
-            # A public image endpoint never serves plaintext or conditional
-            # cached responses; every request rechecks its live share session.
-            self.send_response(200)
-            self.send_header("Content-Type", mime)
-            self.send_header("Content-Length", str(len(data)))
-            self.send_header("Cache-Control", "private, no-store")
-            self.send_header("Pragma", "no-cache")
-            self.send_header("Vary", "Cookie")
-            self.end_headers()
-            if self.command != "HEAD":
-                self.wfile.write(data)
+            response_started = False
+            try:
+                with self.library.sharing.image_response(token, session, int(index), width=int(width)) as response:
+                    response.check()
+                    # A share never serves plaintext or a conditional cached
+                    # response. Its lease covers the entire network transfer.
+                    self.send_response(200)
+                    self.send_header("Content-Type", response.mime)
+                    self.send_header("Content-Length", str(response.length))
+                    self.send_header("Cache-Control", "private, no-store")
+                    self.send_header("Pragma", "no-cache")
+                    self.send_header("Vary", "Cookie")
+                    response_started = True
+                    self.end_headers()
+                    if self.command != "HEAD":
+                        remaining = response.length
+                        while remaining:
+                            response.check()
+                            chunk = response.source.read(min(IMAGE_CHUNK_BYTES, remaining))
+                            if not chunk:
+                                raise ReaderError("分享图片读取中断，请重新打开分享。", 422)
+                            self.wfile.write(chunk)
+                            remaining -= len(chunk)
+            except (OSError, ReaderError, EOFError, RuntimeError):
+                if not response_started:
+                    raise
+                self.close_connection = True
             return
         if path.startswith("/api/"):
             self.require_auth()
+            if path == "/api/catalog/status":
+                if request.query:
+                    raise ReaderError("目录状态不接受查询参数。")
+                self.respond(self.library.catalog_status())
+                return
             if path == "/api/network-settings":
                 self.library.require_admin()
                 if request.query:
@@ -3578,7 +3798,7 @@ class ReaderHandler(BaseHTTPRequestHandler):
                 self.library.require_admin()
                 if request.query:
                     raise ReaderError("优化预览不接受外部路径或查询参数。")
-                self.respond_image(*self.library.image(transcode_preview[1], int(transcode_preview[2]), management=True))
+                self.respond_page(transcode_preview[1], int(transcode_preview[2]), management=True)
                 return
             if path == "/api/updates":
                 self.library.require_admin()
@@ -3661,22 +3881,10 @@ class ReaderHandler(BaseHTTPRequestHandler):
                             width = int(value)
                         if "v" in query and not re.fullmatch(r"[a-f0-9]{24}", query["v"][0]):
                             raise ReaderError("页面版本无效。")
-                    data, mime, etag = (self.library.cover(book_id) if media == "cover" else
-                                       self.library.image(book_id, int(index), width=width))
-                    if self.headers.get("If-None-Match") == etag:
-                        self.send_response(304)
-                        self.send_header("ETag", etag)
-                        self.send_header("Cache-Control", "private, no-cache")
-                        self.end_headers()
-                        return
-                    self.send_response(200)
-                    self.send_header("Content-Type", mime)
-                    self.send_header("Content-Length", str(len(data)))
-                    self.send_header("Cache-Control", "private, no-cache")
-                    self.send_header("ETag", etag)
-                    self.end_headers()
-                    if self.command != "HEAD":
-                        self.wfile.write(data)
+                    if media == "cover":
+                        self.respond_image(*self.library.cover(book_id))
+                    else:
+                        self.respond_page(book_id, int(index), width=width)
                 return
             raise ReaderError("接口不存在。", 404)
         is_share_page = re.fullmatch(r"/share/[A-Za-z0-9_-]{43}", path) is not None
@@ -3718,6 +3926,53 @@ class ReaderHandler(BaseHTTPRequestHandler):
                 raise ReaderError("分页参数需要是正整数。")
             values.append(int(value))
         return values
+
+    def respond_page(self, book_id, index, management=False, width=None):
+        response_started = False
+        try:
+            with self.library.open_image(book_id, index, management=management, width=width) as (source, length, mime, etag):
+                # Hashing a large source can outlive a logout or access change.
+                self.require_auth()
+                self.library.book(book_id, internal=True, management=management)
+                if self.headers.get("If-None-Match") == etag:
+                    self.send_response(304)
+                    self.send_header("ETag", etag)
+                    self.send_header("Cache-Control", "private, no-cache")
+                    response_started = True
+                    self.end_headers()
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", mime)
+                self.send_header("Content-Length", str(length))
+                self.send_header("Cache-Control", "private, no-cache")
+                self.send_header("ETag", etag)
+                response_started = True
+                self.end_headers()
+                if self.command == "HEAD":
+                    return
+                # Buffered PDF/EPUB/optimized pages are immutable snapshots.
+                # Raw sources can change during this second pass; withhold the
+                # final chunk unless the exact transmitted bytes match ETag.
+                digest = None if isinstance(source, BytesIO) or getattr(source, 'immutable_snapshot', False) else hashlib.sha256()
+                remaining = length
+                while remaining:
+                    if self.library.stop_event.is_set():
+                        raise ReaderError("阅读器正在停止，请稍后重试。", 503)
+                    chunk = source.read(min(IMAGE_CHUNK_BYTES, remaining))
+                    if not chunk:
+                        raise ReaderError("源图片在读取期间发生变化，请重新扫描后重试。", 422)
+                    if digest is not None:
+                        digest.update(chunk)
+                        if remaining == len(chunk) and (source.read(1) or '"' + digest.hexdigest() + '"' != etag):
+                            raise ReaderError("源图片在读取期间发生变化，请重新扫描后重试。", 422)
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
+        except (OSError, ReaderError, EOFError, RuntimeError, zipfile.BadZipFile):
+            if not response_started:
+                raise
+            # Include handle/context cleanup errors here, too. Once headers
+            # escaped, never append a second JSON/HTTP response to the image.
+            self.close_connection = True
 
     def respond_image(self, data, mime, etag):
         if self.headers.get("If-None-Match") == etag:

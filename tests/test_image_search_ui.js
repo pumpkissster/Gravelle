@@ -159,3 +159,31 @@ test('catalog permission changes discard visible matches and pending responses',
   run.dispatch('click'); ui.syncCatalog('changed-again'); resolveQuery({ results: [{ book: { id: 'private', title: 'Private' }, page: 0, match: 'exact' }] }); await flush(); assert.equal(results.children.length, 0);
   ui.reset();
 });
+
+test('hidden image search stops status polling and refreshes immediately when visible again', async () => {
+  const fixture = browserFixture(); const timer = new Map(); let next = 0; let reads = 0;
+  const originalSet = global.setTimeout, originalClear = global.clearTimeout;
+  global.setTimeout = (fn, delay) => { const id = ++next; timer.set(id, { fn, delay }); return id; };
+  global.clearTimeout = id => timer.delete(id);
+  const ui = Search.create({ ...fixture, api: async () => { reads += 1; return { enabled: true, available: true, indexing: false }; }, post: async () => ({}), openBook() {}, isAdmin: () => false });
+  try {
+    ui.showSearch(); await flush(); assert.equal(reads, 1); assert.equal(timer.size, 1); assert.equal([...timer.values()][0].delay, 7000);
+    const queued = [...timer.values()][0].fn;
+    fixture.document.hidden = true; fixture.document.listeners.visibilitychange(); assert.equal(timer.size, 0);
+    queued(); await flush(); assert.equal(reads, 1);
+    fixture.document.hidden = false; fixture.document.listeners.visibilitychange(); await flush(); assert.equal(reads, 2); assert.equal(timer.size, 1);
+  } finally { ui.reset(); global.setTimeout = originalSet; global.clearTimeout = originalClear; }
+});
+
+test('hiding a pending status request aborts it and an old result cannot overwrite the resumed state', async () => {
+  const fixture = browserFixture(); let finish; let signal; let reads = 0;
+  const api = async (_path, options) => ++reads === 1 ? new Promise(resolve => { finish = resolve; signal = options.signal; }) : { enabled: true, available: true };
+  const ui = Search.create({ ...fixture, api, post: async () => ({}), openBook() {}, isAdmin: () => false });
+  try {
+    ui.showSearch(); fixture.document.hidden = true; fixture.document.listeners.visibilitychange(); assert.equal(signal.aborted, true);
+    fixture.document.hidden = false; fixture.document.listeners.visibilitychange(); await flush(); assert.equal(reads, 2);
+    finish({ enabled: false, available: false }); await flush();
+    const input = fixture.find(fixture.searchHost, item => item.id === 'image-search-file'); input.files = [pngFile()]; await input.dispatch('change'); await flush();
+    assert.equal(fixture.find(fixture.searchHost, item => item.textContent === '开始搜索').disabled, false);
+  } finally { ui.reset(); }
+});

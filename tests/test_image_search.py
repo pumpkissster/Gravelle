@@ -481,7 +481,7 @@ class ImageSearchTests(ImageSearchFixture):
         stream = BytesIO()
         Image.new("RGB", (8, 8)).save(stream, "GIF")
         self.error(422, self.manager.query, stream.getvalue())
-        with patch("image_search.MAX_BYTES", 1):
+        with patch("image_search.MAX_QUERY_BYTES", 1):
             self.error(422, self.manager.query, b"xx")
         image = Image.new("L", (10001, 10000))
         stream = BytesIO()

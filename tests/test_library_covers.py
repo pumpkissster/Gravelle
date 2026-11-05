@@ -327,6 +327,62 @@ class LibraryCoverTests(unittest.TestCase):
         self.assertEqual(queried, {"'" + item + "'" for item in json.loads(self.record()["selection"])})
         self.assertEqual(len(queried), 4)
 
+    def test_repeated_full_montage_metadata_only_queries_its_four_sources(self):
+        self.ready()
+        before = self.record()
+        statements = []
+        connect = self.app.connect
+        def traced():
+            connection = connect()
+            connection.set_trace_callback(statements.append)
+            return connection
+        with patch.object(self.app, "connect", side_effect=traced):
+            result = self.manager.metadata_many([self.library_id, self.library_id])
+        candidates = [sql for sql in statements if "SELECT b.id,b.signature" in sql]
+        self.assertEqual(len(candidates), 1)
+        self.assertIn("AND b.id IN (", candidates[0])
+        self.assertEqual(set(re.findall(r"'[a-f0-9]{24}'", candidates[0])),
+                         {"'" + value + "'" for value in [self.library_id, *json.loads(before["selection"])]})
+        self.assertEqual(sum(sql == "BEGIN IMMEDIATE" for sql in statements), 1)
+        self.assertFalse(result[self.library_id]["pending"])
+        self.assertEqual(self.record(), before)
+
+    def test_batch_authorization_precedes_all_planning_and_never_caches_grants(self):
+        self.ready()
+        other = self.app.save_library({"name": "Second", "path": str(self.media), "media_type": "photo"})["library"]["id"]
+        deadline = time.monotonic() + 10
+        while self.app.scanning and time.monotonic() < deadline:
+            time.sleep(.01)
+        child = self.app.save_user({"username": "batch-child", "password": "temporary-batch-password",
+                                    "enabled": True, "library_ids": [self.library_id]})["user"]["id"]
+        with self.app.acting_as(child):
+            self.assertIn(self.library_id, self.manager.metadata_many([self.library_id]))
+            with patch.object(self.manager, "_plan", side_effect=AssertionError("Unauthorized batch planned a cover")):
+                with self.assertRaises(ReaderError) as caught:
+                    self.manager.metadata_many([self.library_id, other])
+                self.assertEqual(caught.exception.status, 404)
+            self.app.save_my_libraries({"visible_library_ids": []})
+            with self.assertRaises(ReaderError):
+                self.manager.metadata_many([self.library_id])
+        with closing(self.app.connect()) as connection, connection:
+            connection.execute("DELETE FROM user_hidden_libraries WHERE user_id=?", (child,))
+            connection.execute("DELETE FROM user_libraries WHERE user_id=?", (child,))
+        with self.app.acting_as(child), self.assertRaises(ReaderError):
+            self.manager.metadata_many([self.library_id])
+
+    def test_periodic_cover_check_skips_redundant_directory_walks(self):
+        self.ready()
+        self.manager.reconcile()
+        with patch.object(self.manager, "_prune_obsolete", wraps=self.manager._prune_obsolete) as prune:
+            self.manager.reconcile(prune=False)
+            self.manager.reconcile(prune=False)
+            prune.assert_not_called()
+            self.manager._last_prune -= 301
+            self.manager.reconcile(prune=False)
+            self.assertEqual(prune.call_count, 1)
+            self.manager.reconcile()
+            self.assertEqual(prune.call_count, 2, "Explicit source reconciliation still prunes immediately")
+
 
 if __name__ == "__main__":
     unittest.main()

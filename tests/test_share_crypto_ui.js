@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const crypto = require('node:crypto');
+const zlib = require('node:zlib');
 
 const root = path.resolve(__dirname, '..');
 const fallback = fs.readFileSync(path.join(root, 'static/vendor/noble-gcm.js'), 'utf8');
@@ -28,6 +29,26 @@ function encrypt(data, code, aad = vector.aad, useKey = key) {
   const cipher = crypto.createCipheriv('aes-256-gcm', useKey, nonce);
   cipher.setAAD(Buffer.concat([header, Buffer.from(aad)]));
   return Uint8Array.from(Buffer.concat([header, cipher.update(data), cipher.final(), cipher.getAuthTag()]));
+}
+
+function largePng() {
+  const table = Uint32Array.from({ length: 256 }, (_, byte) => {
+    let value = byte;
+    for (let bit = 0; bit < 8; bit++) value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+    return value >>> 0;
+  });
+  function chunk(kind, data) {
+    const result = Buffer.allocUnsafe(data.length + 12);
+    result.writeUInt32BE(data.length); result.write(kind, 4, 4, 'ascii'); data.copy(result, 8);
+    let checksum = 0xffffffff;
+    for (let index = 4; index < result.length - 4; index++) checksum = table[(checksum ^ result[index]) & 255] ^ (checksum >>> 8);
+    result.writeUInt32BE((checksum ^ 0xffffffff) >>> 0, result.length - 4);
+    return result;
+  }
+  const header = Buffer.alloc(13); header.writeUInt32BE(1); header.writeUInt32BE(1, 4); header[8] = 8; header[9] = 2;
+  return Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), chunk('IHDR', header),
+    chunk('paDd', Buffer.alloc(64 * 1024 * 1024 + 1, 0x5a)),
+    chunk('IDAT', zlib.deflateSync(Buffer.from([0, 0xc0, 0x1f, 0x5d]))), chunk('IEND', Buffer.alloc(0))]);
 }
 
 for (const native of [true, false]) {
@@ -84,6 +105,19 @@ for (const native of [true, false]) {
       await assert.rejects(api.decrypt(packet, vector.key, context), /无法解密/);
     }
   });
+
+  test(`${label} decrypts a PNG above 64 MiB and still rejects a modified authentication tag`, async () => {
+    const api = runtime(native).GravelleShareCrypto;
+    const data = largePng();
+    assert.ok(data.length > 64 * 1024 * 1024);
+    const expected = crypto.createHash('sha256').update(data).digest('hex');
+    const packet = encrypt(data, 2);
+    const result = await api.decrypt(packet, vector.key, vector.aad);
+    assert.equal(result.mime, 'image/png'); assert.equal(result.data.length, data.length);
+    assert.equal(crypto.createHash('sha256').update(result.data).digest('hex'), expected);
+    packet[packet.length - 1] ^= 1;
+    await assert.rejects(api.decrypt(packet, vector.key, vector.aad), /无法解密/);
+  });
 }
 
 test('native authentication errors never fall back or expose bytes', async () => {
@@ -99,7 +133,11 @@ test('HTTP with a missing local crypto bundle fails closed', async () => {
   await assert.rejects(api.decrypt(encrypt(Buffer.from('photo'), 1), vector.key, vector.aad), /无法解密/);
 });
 
-test('maximum packet bound is enforced before decryption', async () => {
-  const api = runtime(false).GravelleShareCrypto;
-  await assert.rejects(api.decrypt(new Uint8Array(64 * 1024 * 1024 + 34), vector.key), /无法解密/);
+test('empty and truncated image envelopes are rejected before decryption', async () => {
+  let decryptions = 0;
+  const api = runtime({ subtle: { importKey: async () => ({}), decrypt: async () => { decryptions++; return new ArrayBuffer(0); } } }).GravelleShareCrypto;
+  for (const length of [0, 1, 16, 17, 32, 33]) {
+    await assert.rejects(api.decrypt(new Uint8Array(length), vector.key, vector.aad), /无法解密/);
+  }
+  assert.equal(decryptions, 0);
 });

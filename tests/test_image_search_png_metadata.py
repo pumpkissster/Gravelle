@@ -105,8 +105,10 @@ class PNGMetadataUnitTests(unittest.TestCase):
                                 ("oversized-chunk", bytes(oversized))):
             with self.subTest(case=name), self.assertRaises(ValueError):
                 _features(BytesIO(candidate), preview=True)
-        with patch("image_search.MAX_BYTES", len(self.bad) - 1), self.assertRaises(ValueError):
-            _features(BytesIO(self.bad), preview=True)
+        # The bounded query upload policy is independent of library decoding.
+        with patch("image_search.MAX_QUERY_BYTES", len(self.bad) - 1):
+            self.assert_same_visual_features(_features(BytesIO(self.bad), preview=True),
+                                            _features(BytesIO(self.pixels), preview=True))
 
     def test_unknown_critical_chunk_is_not_discarded(self):
         candidate = self.bad[:33] + chunk(b"ABCD", b"unknown") + self.bad[33:]
@@ -115,6 +117,32 @@ class PNGMetadataUnitTests(unittest.TestCase):
 
 
 class PNGMetadataWorkerTests(ImageSearchFixture):
+    def test_large_png_with_bad_exif_is_indexed_by_real_worker_without_size_cap(self):
+        bad = change_crc(png_with_orientation(self.source, 6), b"eXIf")
+        target = self.album / "1.png"
+        kind, payload_size = b"pADd", 64 * 1024 * 1024
+        block = bytes(1024 * 1024)
+        checksum = zlib.crc32(kind)
+        with target.open("wb") as output:
+            output.write(bad[:33])
+            output.write(struct.pack(">I", payload_size) + kind)
+            for _ in range(payload_size // len(block)):
+                output.write(block)
+                checksum = zlib.crc32(block, checksum)
+            output.write(struct.pack(">I", checksum & 0xffffffff))
+            output.write(bad[33:])
+        self.assertGreater(target.stat().st_size, 64 * 1024 * 1024)
+        with target.open("rb") as source:
+            expected_digest = hashlib.file_digest(source, "sha256").hexdigest()
+        self.app._scan_library(self.app._library_config(self.library_id))
+        self.enable()
+        row = next(row for row in self.rows() if row["page_key"].endswith("/1.png"))
+        self.assertEqual(row["status"], "ready", row["error"])
+        self.assertEqual(row["local_state"], "ready", row["local_error"])
+        self.assertEqual(row["digest"], expected_digest)
+        with target.open("rb") as source:
+            self.assertEqual(hashlib.file_digest(source, "sha256").hexdigest(), expected_digest)
+
     def test_real_source_and_stdin_workers_share_policy_and_keep_original_digest(self):
         bad = change_crc(png_with_orientation(self.source, 6), b"eXIf")
         target = self.album / "1.png"

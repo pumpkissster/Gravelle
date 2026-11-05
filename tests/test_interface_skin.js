@@ -38,6 +38,7 @@ function fixture(initial = []) {
     state: { prefs: { fit: 'height', theme: 'dark' }, selectedModels: new Set() },
     userManagement: { generation: 0 }, visibleLibraries: { generation: 0 },
     selection: { busy: false }, librarySorts: new Map(), catalogPaging: {}, chapterPaging: {}, renderedLibraryData: '',
+    catalogSearch: { cancel() {} }, catalogLoader: { reset() {} }, catalogCards: { clear() {} }, catalogFlow: {},
     sharingUI: null, networkSettingsUI: null, transcodingUI: null, imageSearchUI: null, cacheManagementUI: null,
     libraryCoverRequest: 0, libraryCoverBusy: false, searchMode: 'text',
     readPrefs: () => ({ fit: 'height', theme: 'dark' }),
@@ -102,8 +103,10 @@ test('account changes and logout restore each account independently without inhe
   ]);
   f.scope.activateAccount({ id: 1, role: 'admin' });
   assert.equal(f.root.dataset.interfaceSkin, 'board'); assert.equal(f.root.dataset.interfaceTheme, 'light');
+  f.scope.catalogFlow.books = [{ id: 'previous-account' }]; f.scope.catalogFlow.indices.set('previous-account', 0);
   f.scope.activateAccount({ id: 2, role: 'user' });
   assert.equal(f.root.dataset.interfaceSkin, 'classic'); assert.equal(f.root.dataset.interfaceTheme, 'dark');
+  assert.equal(f.scope.catalogFlow.books.length, 0); assert.equal(f.scope.catalogFlow.indices.size, 0);
   f.choose('board'); assert.equal(f.meta.content, '#121212');
   f.scope.activateAccount(null);
   assert.equal(f.root.dataset.interfaceSkin, 'classic'); assert.equal(f.root.dataset.interfaceTheme, 'dark');

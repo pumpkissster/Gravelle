@@ -24,6 +24,7 @@ from PIL import Image, ImageDraw, ImageOps
 WIDTH, HEIGHT = 960, 480
 MAX_COVER_BYTES = 2 * 1024 * 1024
 MAX_COVER_PIXELS = 400 * 600
+PRUNE_INTERVAL_SECONDS = 300
 _NAME = re.compile(r"([a-f0-9]{24})-([a-f0-9]{24})\.jpg")
 _TEMP = re.compile(r"\.tmp-[a-f0-9]{24}")
 
@@ -48,6 +49,7 @@ class LibraryCoverManager:
         self.stop_event = threading.Event()
         self.thread = None
         self.pending = set()
+        self._last_prune = 0
         self.random = secrets.SystemRandom()
         self.root = library.data / "library-covers"
         self.placeholder = self._placeholder()
@@ -110,7 +112,14 @@ class LibraryCoverManager:
                               (actor["id"], library_id)).fetchone():
             raise self._error("写真库不存在。", 404)
 
-    def _candidates(self, connection, library_id):
+    def _candidates(self, connection, library_id, selected=None):
+        extra = ""
+        arguments = [library_id]
+        if selected is not None:
+            if not selected:
+                return {}
+            extra = " AND b.id IN (" + ",".join("?" for _ in selected) + ")"
+            arguments.extend(selected)
         rows = connection.execute("""SELECT b.id,b.signature,
             COALESCE(m.cover_source,'page') AS cover_source, COALESCE(m.cover_page,0) AS cover_page,
             COALESCE(m.cover_file,'') AS cover_file, COALESCE(m.cover_revision,0) AS cover_revision
@@ -118,7 +127,7 @@ class LibraryCoverManager:
             WHERE b.library_id=? AND b.active=1 AND b.removed=0
             AND (NOT EXISTS(SELECT 1 FROM tc_settings WHERE enabled=1)
                  OR NOT EXISTS(SELECT 1 FROM tc_books tc WHERE tc.book_id=b.id AND tc.published=0))
-            ORDER BY b.id""", (library_id,))
+            """ + extra + " ORDER BY b.id", arguments)
         return {row["id"]: _hash([row[key] for key in row.keys()]) for row in rows}
 
     @staticmethod
@@ -136,9 +145,14 @@ class LibraryCoverManager:
 
     def _plan(self, connection, library_id, *, shuffle=False, request=False):
         """Caller holds self.lock; the short transaction never performs image I/O."""
-        candidates = self._candidates(connection, library_id)
         row = connection.execute("SELECT * FROM library_cover_cache WHERE library_id=?", (library_id,)).fetchone()
         old = json.loads(row["selection"]) if row else []
+        # A full montage keeps its four choices until a choice changes or is
+        # removed. Added books only matter when filling fewer than four slots,
+        # or when an administrator explicitly asks for a new random group.
+        candidates = self._candidates(connection, library_id, old) if not shuffle and len(old) == 4 else {}
+        if shuffle or len(old) != 4 or len(candidates) != 4:
+            candidates = self._candidates(connection, library_id)
         selected = [item for item in old if item in candidates][:4]
         count = min(4, len(candidates))
         if shuffle:
@@ -205,7 +219,30 @@ class LibraryCoverManager:
             return self._metadata(self._plan(connection, library_id, request=True))
 
     def metadata_many(self, library_ids):
-        return {library_id: self.metadata(library_id) for library_id in library_ids}
+        ids = list(library_ids)
+        if not ids:
+            return {}
+        if any(not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{24}", value) for value in ids):
+            raise self._error("写真库不存在。", 404)
+        ids = list(dict.fromkeys(ids))
+        # Validate the complete batch under the same current identity before
+        # planning any montage. Never cache authorization between requests.
+        with self.library.auth_lock, self.lock, closing(self.library.connect()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            actor = self.library._actor(connection)
+            allowed = set()
+            for offset in range(0, len(ids), 400):
+                batch = ids[offset:offset + 400]
+                marks = ",".join("?" for _ in batch)
+                rows = connection.execute(f"""SELECT l.id FROM media_libraries l
+                    WHERE l.id IN ({marks}) AND NOT EXISTS(
+                        SELECT 1 FROM user_hidden_libraries h WHERE h.user_id=? AND h.library_id=l.id)
+                    AND (? OR EXISTS(SELECT 1 FROM user_libraries u WHERE u.user_id=? AND u.library_id=l.id))""",
+                    [*batch, actor["id"], actor["role"] == "admin", actor["id"]])
+                allowed.update(row[0] for row in rows)
+            if allowed != set(ids):
+                raise self._error("写真库不存在。", 404)
+            return {value: self._metadata(self._plan(connection, value, request=True)) for value in ids}
 
     def shuffle(self, library_id):
         with self.library.auth_lock, self.lock, closing(self.library.connect()) as connection, connection:
@@ -249,14 +286,16 @@ class LibraryCoverManager:
                     self.wake.set()
             return self.placeholder, "image/jpeg", self.placeholder_etag
 
-    def reconcile(self, library_id=None):
+    def reconcile(self, library_id=None, *, prune=True):
         with self.lock, closing(self.library.connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             ids = [row[0] for row in connection.execute("SELECT id FROM media_libraries" if library_id is None else
                     "SELECT id FROM media_libraries WHERE id=?", () if library_id is None else (library_id,))]
             for value in ids:
                 self._plan(connection, value)
-        self._prune_obsolete()
+        if prune or time.monotonic() - self._last_prune >= PRUNE_INTERVAL_SECONDS:
+            self._prune_obsolete()
+            self._last_prune = time.monotonic()
         # _plan wakes the worker when it queues an actual cover. Signalling an
         # unchanged periodic check here would wake the loop itself forever.
 
@@ -291,7 +330,7 @@ class LibraryCoverManager:
             self.wake.clear()
             if not self._cancelled():
                 try:
-                    self.reconcile()
+                    self.reconcile(prune=False)
                 except Exception as error:
                     logging.getLogger("sumi").warning("Library cover catalogue check failed (%s)", type(error).__name__)
 

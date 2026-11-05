@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const Model = require('../static/reader-model.js');
 const Performance = require('../static/performance-settings.js');
+const Catalog = require('../static/catalog-render.js');
 
 // Exercise the actual reader loader with controllable image completion order.
 // The rest of the application (authentication, lists and dialogs) is irrelevant here.
@@ -17,6 +18,7 @@ function fixture() {
   const book = { id: 'pdf', format: 'pdf', page_revision: 'a'.repeat(24), title: 'test', page_count: 3 };
   const reader = { open: true, book, token: 1, epoch: 1, rows: [], sizes: [[595, 842], [595, 842], [595, 842]].map(Model.pageDimensions), pdfUpgrades: new Map(), visible: new Set([0]) };
   reader.pageCache = Performance.createCache(0, entry => entry.cancel?.());
+  reader.scrollRetained = Catalog.createRetainedPages();
   const state = { prefs: { mode: 'single', fit: 'height' } };
   const context = {
     reader, state, Model, Performance, window: { innerWidth: 390, innerHeight: 680, devicePixelRatio: 1 }, queueMicrotask,
@@ -92,9 +94,12 @@ test('continuous PDF resize upgrades visible pages only and keeps a loaded page 
   f.reader.rows = Array.from({ length: 3 }, () => ({ element: f.context.node('div'), loaded: false, loading: false, failed: false }));
   f.context.loadScrollPage(0); const first = f.requests.at(-1); f.finish(first);
   assert.equal(f.reader.rows[0].loaded, true); assert.equal(f.reader.rows[0].element.children[0], first);
+  const initialBytes = f.reader.scrollRetained.bytes;
   f.context.window.devicePixelRatio = 3; f.context.refreshPdfResolution(); const upgrade = f.requests.at(-1);
   assert.equal(f.requests.length, 2); assert.equal(f.reader.rows[0].element.children[0], first); assert.equal(f.reader.rows[1].loading, false);
   upgrade.listeners.error(); assert.equal(f.reader.rows[0].loaded, true); assert.equal(f.reader.rows[0].failed, false); assert.equal(f.reader.rows[0].element.children[0], first);
+  assert.equal(f.reader.scrollRetained.bytes, initialBytes);
   f.context.refreshPdfResolution(); const retry = f.requests.at(-1); f.finish(retry, 1600);
   assert.equal(f.reader.rows[0].element.children[0], retry); assert.equal(f.reader.rows[0].width, 1600); assert.equal(f.viewport.scrollTop, 217);
+  assert.equal(f.reader.scrollRetained.bytes, 1600 * retry.naturalHeight * 4);
 });

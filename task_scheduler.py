@@ -7,6 +7,7 @@ import threading
 
 
 MAX_TASK_CONCURRENCY = 8
+MAX_SCAN_INTERVAL_SECONDS = 7 * 24 * 60 * 60
 _POLL_SECONDS = .1
 _PRIORITY_BURST = 8
 
@@ -31,7 +32,7 @@ class SharedTaskScheduler:
         self.library = library
         self._error = error_type
         self._condition = threading.Condition()
-        self._configure_lock = threading.Lock()
+        self._configure_lock = threading.RLock()
         self._closed = False
         self._active = 0
         self._resources = {}
@@ -45,10 +46,16 @@ class SharedTaskScheduler:
                     CHECK(task_concurrency BETWEEN 1 AND 8)
             )""")
             connection.execute("INSERT OR IGNORE INTO performance_settings(id) VALUES(1)")
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(performance_settings)")}
+            if "scan_interval_seconds" not in columns:
+                connection.execute("""ALTER TABLE performance_settings ADD COLUMN scan_interval_seconds INTEGER
+                    CHECK(scan_interval_seconds BETWEEN 0 AND 604800)""")
             row = connection.execute(
-                "SELECT task_concurrency FROM performance_settings WHERE id=1"
+                "SELECT task_concurrency,scan_interval_seconds FROM performance_settings WHERE id=1"
             ).fetchone()
             self._concurrency = int(row[0])
+            if row[1] is not None:
+                library.set_scan_interval(int(row[1]))
 
     @property
     def concurrency(self):
@@ -56,8 +63,11 @@ class SharedTaskScheduler:
             return self._concurrency
 
     def snapshot(self):
-        return {"taskConcurrency": self.concurrency,
-                "maxTaskConcurrency": MAX_TASK_CONCURRENCY}
+        with self._configure_lock:
+            return {"taskConcurrency": self.concurrency,
+                    "maxTaskConcurrency": MAX_TASK_CONCURRENCY,
+                    "scanIntervalSeconds": self.library.scan_interval,
+                    "maxScanIntervalSeconds": MAX_SCAN_INTERVAL_SECONDS}
 
     def snapshot_debug(self):
         """Read-only process state for lifecycle and concurrency checks."""
@@ -79,16 +89,30 @@ class SharedTaskScheduler:
         with self._configure_lock:
             with closing(self.library.connect()) as connection, connection:
                 self.library.require_admin(connection)
-                if (not isinstance(body, dict) or set(body) != {"taskConcurrency"}
-                        or type(body["taskConcurrency"]) is not int
+                if (not isinstance(body, dict) or not body
+                        or set(body) - {"taskConcurrency", "scanIntervalSeconds"}):
+                    raise self._error("性能设置参数无效。")
+                if "taskConcurrency" in body and (type(body["taskConcurrency"]) is not int
                         or not 1 <= body["taskConcurrency"] <= MAX_TASK_CONCURRENCY):
                     raise self._error("同时任务数需要是 1 到 8 之间的整数。")
-                value = body["taskConcurrency"]
-                connection.execute("UPDATE performance_settings SET task_concurrency=? WHERE id=1", (value,))
+                if "scanIntervalSeconds" in body and (type(body["scanIntervalSeconds"]) is not int
+                        or not 0 <= body["scanIntervalSeconds"] <= MAX_SCAN_INTERVAL_SECONDS):
+                    raise self._error("自动扫描间隔需要是 0 到 604800 之间的整数秒，0 表示关闭。")
+                if "taskConcurrency" in body:
+                    connection.execute("UPDATE performance_settings SET task_concurrency=? WHERE id=1", (body["taskConcurrency"],))
+                if "scanIntervalSeconds" in body:
+                    connection.execute("UPDATE performance_settings SET scan_interval_seconds=? WHERE id=1", (body["scanIntervalSeconds"],))
             with self._condition:
-                self._concurrency = value
+                if "taskConcurrency" in body:
+                    self._concurrency = body["taskConcurrency"]
+                if "scanIntervalSeconds" in body:
+                    self.library.set_scan_interval(body["scanIntervalSeconds"])
                 self._condition.notify_all()
-        return self.snapshot()
+            if "taskConcurrency" in body:
+                manager = getattr(self.library, "transcoding", None)
+                if manager is not None:
+                    manager.wake.set()
+            return self.snapshot()
 
     def wake(self):
         with self._condition:

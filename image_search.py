@@ -34,8 +34,7 @@ import image_search_features as local_features
 ALGORITHM_VERSION = 1
 LOCAL_VERSION = 1
 MIB = 1024 * 1024
-MAX_BYTES = 64 * MIB
-MAX_QUERY_BYTES = MAX_BYTES
+MAX_QUERY_BYTES = 64 * MIB
 MAX_QUERY_PIXELS = 100_000_000
 MAX_SOURCE_PIXELS = 250_000_000
 MEMORY_MB = 1024
@@ -49,6 +48,7 @@ INDEX_WORKER_PAGES = 32
 INDEX_WORKER_LIFETIME = 300
 INDEX_WORKER_IDLE = 10
 INDEX_WORKER_RECYCLE_RSS = 512 * MIB
+INDEX_IDLE_POLL_SECONDS = 30
 INDEX_PROTOCOL = 1
 INDEX_MAX_REQUEST = 16 * 1024
 AVATAR_TIMEOUT_SECONDS = 15
@@ -72,19 +72,15 @@ def _source_fingerprint(path, preview):
     info = path.lstat()
     if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
         raise ValueError("图片任务输入不能是链接。")
-    if not 0 < info.st_size <= MAX_BYTES:
-        raise ValueError("图片文件为空或超过 64 MiB。")
+    if info.st_size <= 0:
+        raise ValueError("图片文件为空。")
     fd = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0))
     with os.fdopen(fd, "rb") as source:
         opened = os.fstat(source.fileno())
         if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
             raise ValueError("图片任务输入发生变化。")
         digest = hashlib.sha256()
-        total = 0
         while chunk := source.read(MIB):
-            total += len(chunk)
-            if total > MAX_BYTES:
-                raise ValueError("图片文件超过 64 MiB。")
             digest.update(chunk)
         source.seek(0)
         result = _features(source, preview=preview, max_pixels=MAX_SOURCE_PIXELS)
@@ -196,11 +192,12 @@ class _IndexWorkerSession:
 
 
 def _png_without_bad_exif(source):
-    """Return a bounded decode-only copy after discarding only bad eXIf CRCs.
+    """Return a validated decode-only copy after discarding only bad eXIf CRCs.
 
     Called solely after Pillow rejects the input. Every other chunk retains its
     original bytes and checksum, and must pass framing/order/CRC checks before
-    the copy is decoded. No source bytes or source digest are changed.
+    the copy is decoded under the worker's resource budget. No source bytes or
+    source digest are changed.
     """
     import zlib
 
@@ -210,8 +207,6 @@ def _png_without_bad_exif(source):
         return None
     source.seek(0, os.SEEK_END)
     size = source.tell()
-    if size > MAX_BYTES:
-        raise ValueError("PNG 图片超过 64 MiB，无法建立索引。")
     source.seek(8)
     output = BytesIO()
     output.write(signature)
@@ -424,8 +419,8 @@ def worker_main(argv=None):
         if args.stdin == bool(args.source):
             raise ValueError("图片任务输入无效。")
         if args.stdin:
-            data = sys.stdin.buffer.read(MAX_BYTES + 1)
-            if not data or len(data) > MAX_BYTES:
+            data = sys.stdin.buffer.read(MAX_QUERY_BYTES + 1)
+            if not data or len(data) > MAX_QUERY_BYTES:
                 raise ValueError("图片文件为空或超过 64 MiB。")
             source = BytesIO(data)
             digest = hashlib.sha256(data).hexdigest()
@@ -509,6 +504,10 @@ class ImageSearchManager:
                                       ("actual_format", "TEXT NOT NULL DEFAULT ''")):
                 if name not in columns:
                     connection.execute(f"ALTER TABLE is_pages ADD COLUMN {name} {declaration}")
+            # An empty queue must not inspect every fully indexed page just to
+            # discover that its local feature work has also finished.
+            connection.execute("""CREATE INDEX IF NOT EXISTS is_pages_work_state
+                ON is_pages(status,local_state,book_id,page_index)""")
             connection.execute("UPDATE is_pages SET status='pending' WHERE status='running'")
             connection.execute("UPDATE is_pages SET local_state='pending' WHERE local_state='running' OR local_version<>?", (LOCAL_VERSION,))
             connection.execute("UPDATE is_pages SET status='pending' WHERE algorithm<>?", (ALGORITHM_VERSION,))
@@ -618,6 +617,10 @@ class ImageSearchManager:
 
     def _loop(self):
         while not self.stop_event.is_set() and not self.library.stop_event.is_set():
+            # Clear before inspecting persisted work, so a change committed
+            # during the check leaves a signal for the following wait.
+            self.wake.clear()
+            delay = INDEX_IDLE_POLL_SECONDS
             with self.activity_lock:
                 attempt_generation = self.activity["generation"]
                 self._failed_generation = None
@@ -625,6 +628,7 @@ class ImageSearchManager:
                 if self.run_once():
                     continue
             except Exception as error:
+                delay = 2
                 # Failed error persistence must not silently kill indexing.
                 # Log exception classes only; decoder/source paths stay private.
                 logging.getLogger("sumi").error("Image index coordinator error (%s)", type(error).__name__)
@@ -638,8 +642,9 @@ class ImageSearchManager:
                                            ("图片索引任务失败，正在重试，请检查服务端日志。", generation))
                 except Exception as persistence_error:
                     logging.getLogger("sumi").error("Image index error could not be recorded (%s)", type(persistence_error).__name__)
-            self.wake.wait(2)
-            self.wake.clear()
+            if self.stop_event.is_set() or self.library.stop_event.is_set():
+                break
+            self.wake.wait(delay)
 
     def reconcile(self):
         """Catalogue mutation hook: queue work without inspecting sources here."""
@@ -820,14 +825,19 @@ class ImageSearchManager:
                 rows = connection.execute("""SELECT p.status,p.local_state,COUNT(*) AS n FROM is_pages p JOIN books b ON b.id=p.book_id
                     WHERE b.active=1 AND b.removed=0 GROUP BY p.status,p.local_state""")
                 summary = self._counts(rows)
-            else:
-                summary = self._visible_counts(connection)
-            visible = self._visible_counts(connection)
             access, arguments = self.library._access_sql(connection, visible=True)
-            available = connection.execute(f"""SELECT 1 FROM is_pages p JOIN books b ON b.id=p.book_id
+            available = settings["enabled"] and connection.execute(f"""SELECT 1 FROM is_pages p JOIN books b ON b.id=p.book_id
                 WHERE p.status='ready' AND b.active=1 AND b.removed=0 AND {access} LIMIT 1""", arguments).fetchone()
+            indexing = bool(settings["enabled"] and not settings["paused"] and settings["reconcile_pending"])
+            if settings["enabled"] and not settings["paused"] and not indexing:
+                # Ordinary callers only need a yes/no answer, never catalogue
+                # counts. Stop on the first authorized pending/running page.
+                indexing = bool(connection.execute(f"""SELECT 1 FROM is_pages p JOIN books b ON b.id=p.book_id
+                    WHERE b.active=1 AND b.removed=0 AND {access}
+                    AND (p.status IN ('pending','running')
+                         OR (p.status='ready' AND p.local_state IN ('pending','running'))) LIMIT 1""", arguments).fetchone())
             result = {"enabled": bool(settings["enabled"]), "available": bool(settings["enabled"] and available),
-                      "indexing": bool(settings["enabled"] and not settings["paused"] and (visible["pending"] or settings["reconcile_pending"]))}
+                      "indexing": indexing}
             if actor["role"] == "admin":
                 result.update(paused=bool(settings["paused"]), summary=summary,
                               progress={"done": summary["indexed"] + summary["failed"], "total": summary["total"]},
@@ -1066,12 +1076,12 @@ class ImageSearchManager:
                     total = 0
                     while chunk := source.read(MIB):
                         total += len(chunk)
-                        if total > MAX_BYTES:
-                            raise self._error("图片超过 64 MiB，无法建立索引。", 422)
                         if not self._current(generation, connection):
                             raise self._error("索引任务已暂停或取消。", 409)
                         sink.write(chunk)
                         self._set_activity("reading", generation, done=total)
+                    if total == 0:
+                        raise self._error("图片文件为空，无法建立索引。", 422)
             self._set_activity("decoding", generation)
             result = self._decode(source_path=source_path, preview=True, generation=generation, reusable=True)
             with self.library.transcoding._open_source(job, job["page_key"]) as (source, version):
@@ -1484,7 +1494,7 @@ class ImageSearchManager:
         return [(candidates[index], distance) for index, distance in matches]
 
     def query(self, image_bytes, user_id=None, limit=30):
-        if not isinstance(image_bytes, bytes) or not 0 < len(image_bytes) <= MAX_BYTES:
+        if not isinstance(image_bytes, bytes) or not 0 < len(image_bytes) <= MAX_QUERY_BYTES:
             raise self._error("请选择不超过 64 MiB 的 JPG、PNG 或 WebP 图片。", 422)
         if type(limit) is not int or not 1 <= limit <= 100:
             raise self._error("图片搜索结果数量无效。")

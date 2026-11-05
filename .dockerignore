@@ -12,6 +12,7 @@
 !task_scheduler.py
 !library_covers.py
 !cache_manager.py
+!page_cache.py
 !pdf_reader.py
 !epub_reader.py
 !sharing.py

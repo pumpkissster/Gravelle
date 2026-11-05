@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from test_image_search import ImageSearchFixture
-from image_search import MIB
+from image_search import MIB, _source_fingerprint
 from image_search_features import SKETCH_BYTES
 from server import ReaderError
 
@@ -56,6 +56,35 @@ class PollingProcess:
 
 
 class ImageSearchPageIOTests(ImageSearchFixture):
+    def test_real_source_above_64_mib_is_copied_and_indexed_without_query_budget(self):
+        import hashlib
+        target = self.album / "1.png"
+        with target.open("r+b") as source:
+            source.truncate(64 * MIB + 257)
+        self.assertGreater(target.stat().st_size, 64 * MIB)
+        with target.open("rb") as source:
+            expected_digest = hashlib.file_digest(source, "sha256").hexdigest()
+        self.app._scan_library(self.app._library_config(self.library_id))
+        job, generation = self.prepare()
+        self.assertTrue(job["page_key"].endswith("/1.png"))
+        # Library sources use a private file path rather than the HTTP query
+        # bytes contract, including when a reusable real worker is selected.
+        with patch("image_search.MAX_QUERY_BYTES", 1):
+            result = self.manager._index_page(job, generation)
+        self.assertEqual(result["digest"], expected_digest)
+        self.assertEqual((result["width"], result["height"]), (384, 576))
+        self.assertIn("local_features", result)
+        self.assertEqual(list(self.manager.root.glob(".index-*")), [])
+        with target.open("rb") as source:
+            self.assertEqual(hashlib.file_digest(source, "sha256").hexdigest(), expected_digest)
+
+    def test_empty_source_is_rejected_before_fingerprint_decode(self):
+        target = self.album / "empty.png"
+        target.touch()
+        with patch("image_search._features", side_effect=AssertionError("Empty file decoded")):
+            with self.assertRaisesRegex(ValueError, "为空"):
+                _source_fingerprint(target, False)
+
     def prepare(self, payload=None):
         if payload is not None:
             (self.album / "1.png").write_bytes(payload)
@@ -150,11 +179,14 @@ class ImageSearchPageIOTests(ImageSearchFixture):
                 if action == "clear":
                     self.assertEqual(self.rows(), [])
 
-    def test_copy_size_limit_still_stops_before_decode_and_cleans_temporary_file(self):
-        job, generation = self.prepare(self.source + bytes(MIB * 3))
-        with patch("image_search.MAX_BYTES", MIB * 2), patch.object(self.manager, "_decode") as decoder:
-            self.error(422, self.manager._index_page, job, generation)
-            decoder.assert_not_called()
+    def test_library_source_copy_is_not_limited_by_query_upload_budget(self):
+        payload = self.source + bytes(MIB * 3)
+        job, generation = self.prepare(payload)
+        def inspect_copy(**options):
+            self.assertEqual(options["source_path"].read_bytes(), payload)
+            return {"copied": True}
+        with patch("image_search.MAX_QUERY_BYTES", MIB * 2), patch.object(self.manager, "_decode", side_effect=inspect_copy):
+            self.assertEqual(self.manager._index_page(job, generation), {"copied": True})
         self.assertEqual(list(self.manager.root.glob(".index-*")), [])
 
     def test_background_polling_reuses_one_connection_and_reaps_success(self):

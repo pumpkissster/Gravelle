@@ -10,13 +10,14 @@ import base64
 import secrets
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 MAGIC = b"GSH1"
 NONCE_BYTES = 12
 KEY_BYTES = 32
 HEADER_BYTES = 17
 TAG_BYTES = 16
-MAX_IMAGE_BYTES = 64 * 1024 * 1024
+CHUNK_BYTES = 1024 * 1024
 MIME_CODES = {
     "image/jpeg": 1,
     "image/png": 2,
@@ -51,8 +52,8 @@ def encrypt(data: bytes, mime: str, key: bytes, aad: bytes = b"") -> bytes:
     count, and must not persist these envelopes as the original image cache.
     """
     _key(key)
-    if not isinstance(data, bytes) or not data or len(data) > MAX_IMAGE_BYTES:
-        raise ValueError("The share image is empty or exceeds the size limit.")
+    if not isinstance(data, bytes) or not data:
+        raise ValueError("The share image is empty or invalid.")
     if mime not in MIME_CODES:
         raise ValueError("The share image type is not supported.")
     if not isinstance(aad, bytes) or len(aad) > 4096:
@@ -60,3 +61,45 @@ def encrypt(data: bytes, mime: str, key: bytes, aad: bytes = b"") -> bytes:
     nonce = secrets.token_bytes(NONCE_BYTES)
     header = MAGIC + nonce + bytes((MIME_CODES[mime],))
     return header + AESGCM(key).encrypt(nonce, data, header + aad)
+
+
+def encrypt_stream(source, target, length: int, mime: str, key: bytes,
+                   aad: bytes = b"", *, check=None, on_chunk=None) -> int:
+    """Write the identical GSH1 envelope using bounded plaintext buffers.
+
+    The caller owns the private seekable destination and must not expose it
+    before this function completes and source/access checks have succeeded.
+    No partially authenticated packet is returned on failure.
+    """
+    _key(key)
+    if type(length) is not int or length <= 0:
+        raise ValueError("The share image is empty or invalid.")
+    if mime not in MIME_CODES:
+        raise ValueError("The share image type is not supported.")
+    if not isinstance(aad, bytes) or len(aad) > 4096:
+        raise ValueError("The share image context is invalid.")
+    nonce = secrets.token_bytes(NONCE_BYTES)
+    header = MAGIC + nonce + bytes((MIME_CODES[mime],))
+    cipher = Cipher(algorithms.AES(key), modes.GCM(nonce)).encryptor()
+    cipher.authenticate_additional_data(header + aad)
+    if check:
+        check()
+    target.write(header)
+    remaining = length
+    while remaining:
+        if check:
+            check()
+        chunk = source.read(min(CHUNK_BYTES, remaining))
+        if not chunk or len(chunk) > remaining:
+            raise ValueError("The share image changed while being read.")
+        if on_chunk:
+            on_chunk(chunk)
+        target.write(cipher.update(chunk))
+        remaining -= len(chunk)
+    if source.read(1):
+        raise ValueError("The share image changed while being read.")
+    if check:
+        check()
+    target.write(cipher.finalize())
+    target.write(cipher.tag)
+    return HEADER_BYTES + length + TAG_BYTES

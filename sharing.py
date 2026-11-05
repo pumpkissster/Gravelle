@@ -7,14 +7,18 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from contextlib import closing, contextmanager
+from dataclasses import dataclass
+import errno
 import hashlib
+from io import BytesIO
 import re
 import secrets
+import tempfile
 import threading
 import time
 
 from accounts import check_password, hash_password
-from share_crypto import encode_key, encrypt, generate_key
+from share_crypto import encode_key, encrypt, encrypt_stream, generate_key
 from share_passwords import SharePasswordVault
 
 TOKEN = re.compile(r"[A-Za-z0-9_-]{43}\Z")
@@ -30,6 +34,14 @@ SUPPORTED_FORMATS = frozenset(("folder", "zip", "cbz", "archive", "pdf", "epub")
 
 def _digest(value):
     return hashlib.sha256(value.encode("ascii")).hexdigest()
+
+
+@dataclass(frozen=True)
+class ShareImageResponse:
+    source: object
+    length: int
+    mime: str
+    check: object
 
 
 class SharingManager:
@@ -453,3 +465,87 @@ class SharingManager:
             if current["book_id"] != book_id or index >= book["page_count"]:
                 raise self._error("分享作品已变化，请重新打开分享。", 410)
         return packet, "application/octet-stream"
+
+    @contextmanager
+    def image_response(self, token, session, index, width=None):
+        """Keep the image budget until the HTTP consumer finishes sending.
+
+        Only ciphertext is spooled, in the protected data filesystem rather
+        than a possibly memory-backed system temp directory. The anonymous
+        file is never a reusable guest cache and closes on every exit path.
+        """
+        self._open()
+        if not self.image_slots.acquire(blocking=False):
+            raise self._error("图片正在加载，请稍后再试。", 503)
+        try:
+            if type(index) is not int or index < 0:
+                raise self._error("图片页码不存在。", 404)
+            if width is not None and (type(width) is not int or not 1 <= width <= 4096):
+                raise self._error("图片宽度无效。")
+            now = time.time()
+            with closing(self.library.connect()) as connection:
+                row, book, _ = self._share(connection, token, now)
+                guest = self._session(connection, row, session, now)
+                if guest is None:
+                    raise self._error("请先输入访问密码。", 401)
+                if index >= book["page_count"]:
+                    raise self._error("图片页码不存在。", 404)
+                creator, book_id = row["creator_id"], row["book_id"]
+                key = bytes(guest["encryption_key"])
+                share_expiry, session_expiry = row["expires_at"], guest["expires_at"]
+            next_check = time.monotonic() + 1
+
+            def check(force=False):
+                nonlocal next_check
+                self._open()
+                stop = getattr(self.library, "stop_event", None)
+                if stop is not None and stop.is_set():
+                    raise self._error("阅读器正在停止，请稍后重试。", 503)
+                now = time.time()
+                if share_expiry is not None and now >= share_expiry:
+                    raise self._error("分享已失效或不可用。", 410)
+                if now >= session_expiry:
+                    raise self._error("访问已失效，请重新打开分享。", 401)
+                tick = time.monotonic()
+                if not force and tick < next_check:
+                    return
+                with closing(self.library.connect()) as connection:
+                    current, current_book, _ = self._share(connection, token, now)
+                    live = self._session(connection, current, session, now)
+                    if live is None:
+                        raise self._error("访问已失效，请重新打开分享。", 401)
+                    if (current["book_id"] != book_id or index >= current_book["page_count"]
+                            or bytes(live["encryption_key"]) != key):
+                        raise self._error("分享作品已变化，请重新打开分享。", 410)
+                next_check = tick + 1
+
+            try:
+                packet = tempfile.TemporaryFile(mode="w+b", prefix=".share-", dir=self.library.data)
+            except OSError as error:
+                raise self._error("无法准备分享图片，请检查资料目录的可用空间。", 507) from error
+            with packet:
+                try:
+                    with self.library.acting_as(creator):
+                        with self.library.open_image(book_id, index, width=width) as (source, length, mime, etag):
+                            digest = (None if isinstance(source, BytesIO)
+                                      or getattr(source, "immutable_snapshot", False)
+                                      else hashlib.sha256())
+                            size = encrypt_stream(source, packet, length, mime, key,
+                                ("gravelle-share-v1:" + token + ":" + str(index)).encode("utf-8"),
+                                check=check, on_chunk=None if digest is None else digest.update)
+                            if digest is not None and '"' + digest.hexdigest() + '"' != etag:
+                                raise self._error("源图片在读取期间发生变化，请重新扫描后重试。", 422)
+                    packet.flush()
+                    packet.seek(0)
+                except OSError as error:
+                    if error.errno in (errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC)):
+                        raise self._error("分享图片临时空间不足，请稍后重试。", 507) from error
+                    raise self._error("无法准备分享图片，请检查文件后重试。", 422) from error
+                except ValueError as error:
+                    raise self._error("分享图片无效或在读取期间发生变化。", 422) from error
+                # No database transaction or creator identity extends into
+                # network IO. Recheck immediately before headers can escape.
+                check(force=True)
+                yield ShareImageResponse(packet, size, "application/octet-stream", check)
+        finally:
+            self.image_slots.release()

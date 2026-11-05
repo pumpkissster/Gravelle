@@ -2,7 +2,7 @@
 
 Gravelle 是属于你自己的写真库阅读器，支持 Windows、macOS 和 Docker。电脑、手机和平板通过浏览器阅读，同一账号共用进度、书签和收藏。
 
-当前版本 **0.9.3** · [下载与更新说明](https://github.com/pumpkissster/Gravelle/releases/latest)
+当前版本 **0.9.4** · [下载与更新说明](https://github.com/pumpkissster/Gravelle/releases/latest)
 
 ## 主要功能
 
@@ -52,7 +52,7 @@ services:
       # - "8443:8443"                  # 外部反向代理提供 HTTPS 时无需启用
     restart: unless-stopped            # 除非手动停止，否则自动重启
     environment:
-      SCAN_INTERVAL: "300"             # 定时扫描间隔，单位秒；设为 0 关闭定时扫描
+      SCAN_INTERVAL: "300"             # 初始扫描间隔（秒）；后续可在性能设置修改，0 关闭定时扫描
     volumes:
       # 资料目录：保存账号、作品信息、阅读记录及缓存
       - "/path/to/data:/data"

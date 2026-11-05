@@ -15,6 +15,7 @@ MIB = 1024 * 1024
 DEFAULT_COVER_LIMIT_MB = 512
 DEFAULT_PDF_LIMIT_MB = 1024
 MAX_ENTRIES = 100_000
+MAINTENANCE_INTERVAL_SECONDS = 300
 PAGE_COVER = re.compile(r"[a-f0-9]{24}-page-[a-f0-9]{24}\.jpg")
 UPLOAD_COVER = re.compile(r"[a-f0-9]{24}-upload-[a-f0-9]{24}\.jpg")
 LIBRARY_COVER = re.compile(r"[a-f0-9]{24}-[a-f0-9]{24}\.jpg")
@@ -76,7 +77,9 @@ class CacheManager:
 
     def _loop(self):
         while not self.stop_event.is_set():
-            self.wake.wait(60)
+            # Producers wake this loop immediately. The slower fallback only
+            # discovers external changes when no generated files were written.
+            self.wake.wait(MAINTENANCE_INTERVAL_SECONDS)
             self.wake.clear()
             if self.stop_event.is_set():
                 break

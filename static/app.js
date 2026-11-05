@@ -13,6 +13,7 @@
   const Users = window.GravelleUsers;
   const Batch = window.GravelleBatchSelection;
   const Routes = window.GravellePageRouter;
+  const Catalog = window.GravelleCatalog;
   const routing = { current: Routes.parse(location.hash), ready: false, restoring: false, generation: 0 };
   let listPositions = null;
   let listRestoration = null;
@@ -29,8 +30,11 @@
   const avatarEdits = {};
   let modelMutationBusy = false;
   let renderedLibraryData = '';
+  let catalogSearch = null;
+  const catalogCards = Catalog.createKeyedList({ create: makeCatalogItem, update: updateCatalogItem });
+  const catalogLoader = Catalog.createLoader(api);
   const catalogPaging = { page: 0, signature: '', revealed: 0 };
-  const catalogFlow = { observer: null, epoch: 0, books: [], batchSize: 12 };
+  const catalogFlow = { observer: null, epoch: 0, books: [], batchSize: 12, layout: null, drawnLayout: null, drawnWindow: '', indices: new Map(), frame: 0, anchor: null, resizing: false, resizeAnchor: null };
   const chapterPaging = { page: 0, signature: '' };
   const modeLabels = { single: '单页', double: '双页', webtoon: '条漫' };
   const allowedPrefs = { mode: ['single', 'double', 'webtoon'], direction: ['ltr', 'rtl', 'ttb'], fit: ['height', 'width'], theme: ['dark', 'light'] };
@@ -59,6 +63,7 @@
   state.settingsTab = '';
   reader.pageCache = Performance.createCache(Performance.get().imageCacheLimit, entry => entry.cancel?.(), { byteLimit: Performance.get().imageCacheMemoryMB * 1024 * 1024 });
   reader.pdfUpgrades = new Map();
+  reader.scrollRetained = Catalog.createRetainedPages();
   const librarySorts = readLibrarySorts();
   reader.endOverlay = null;
   reader.endSequence = null;
@@ -87,6 +92,7 @@
     listPositions = user ? window.GravelleListState.createStore({ storage: sessionStore, accountId: user.id }) : null;
     routing.ready = false; routing.restoring = false; routing.generation += 1;
     authGeneration += 1;
+    catalogSearch?.cancel(); catalogLoader.reset();
     reader.pending = null; clearTimeout(reader.saveTimer);
     if (reader.open) closeReader(false);
     sharingUI?.reset();
@@ -105,6 +111,8 @@
     state.detailBook = null; state.editingBook = null; state.editingModel = null; state.editingLibrary = null; state.selectedModels.clear(); state.bookmarkTarget = null; state.directoryPath = '';
     $('#search').value = ''; $('#sort').value = 'added';
     ['book-grid', 'library-tiles', 'library-nav', 'continue-card', 'models-grid', 'bookmark-list', 'detail-content', 'metadata-models'].forEach(id => $('#' + id).replaceChildren());
+    catalogCards.clear();
+    Object.assign(catalogFlow, { books: [], indices: new Map(), layout: null, drawnLayout: null, drawnWindow: '', anchor: null });
     userManagement.generation += 1; Object.assign(userManagement, { users: [], libraries: [], loaded: false, loading: false, error: false, updatedAt: 0, request: 0, busy: false, editingId: null });
     $('#users-list').replaceChildren(); $('#users-status').textContent = ''; $('#user-form').reset();
     visibleLibraries.generation += 1; Object.assign(visibleLibraries, { libraries: [], selected: new Set(), loaded: false, loading: false, busy: false, dirty: false });
@@ -629,6 +637,7 @@
   }
   function navigate(view, options = {}) {
     if (!Object.hasOwn(viewLabels, view)) return;
+    catalogSearch?.cancel();
     saveListPosition();
     if (!options.fromRoute && state.loaded) {
       const candidate = Routes.resolve({ view, id: view === 'library' ? String(options.libraryId ?? state.libraryId) : String(options.modelId ?? state.modelId) }, state);
@@ -710,20 +719,48 @@
   }
   function makeBookCard(book) {
     const article = node('article', 'book-card'); const open = node('button', 'book-open'); open.type = 'button'; open.dataset.bookId = String(book.id);
-    open.setAttribute('aria-label', `查看《${book.title}》详情，共 ${book.page_count} 页`); open.addEventListener('click', () => selection.enabled && Batch.kind(state.view, isAdmin()) === 'books' ? toggleSelection(book.id) : showBookDetail(book));
-    const cover = makeCover(book, 'cover-wrap'); cover.append(node('span', 'book-pages', `${book.page_count} 页`));
-    if (book.progress) { const bar = node('span', 'cover-progress'); bar.style.width = Math.min(100, (book.progress.page + 1) / book.page_count * 100) + '%'; cover.append(bar); }
-    const title = node('span', 'book-title', book.title); title.title = book.title;
-    const subtitle = node('span', 'book-series', (book.models || []).map(model => model.name).join(' / ') || book.author || book.library_name || typeLabels[book.media_type] || '作品');
-    open.append(cover, title, subtitle);
-    const showAdded = state.view === 'home' || (state.view !== 'recent' && ['added', 'added_asc'].includes(state.sort));
-    const meta = node('span', 'book-date', state.view === 'recent' ? `第 ${book.progress.page + 1} 页 · ${formatDate(book.progress.updated_at, true)}` : showAdded ? `加入 ${formatAddedDate(book.added_at, false)}` : book.release_date || '');
-    if (showAdded) meta.title = `加入时间 · ${formatAddedDate(book.added_at)}${book.release_date ? ` / 发布日期 · ${book.release_date}` : ''}`;
-    if (meta.textContent) open.append(meta);
-    const favorite = node('button', 'favorite-button'); favorite.type = 'button'; favorite.dataset.bookId = String(book.id); favorite.setAttribute('aria-label', `${book.favorite ? '取消收藏' : '收藏'}《${book.title}》`); favorite.setAttribute('aria-pressed', String(Boolean(book.favorite))); favorite.append(icon('heart'));
-    favorite.addEventListener('click', async () => { favorite.disabled = true; try { await toggleFavorite(book); } catch (error) { if (error.status !== 401) toast(error.message); favorite.disabled = false; } }); article.append(open, favorite);
-    if (Batch.kind(state.view, isAdmin()) === 'books') { article.classList.toggle('is-selected', selection.enabled && selection.ids.has(String(book.id))); article.append(selectionCheckbox(book.id, book.title, 'book-select')); }
+    article.catalogBook = book;
+    open.addEventListener('click', () => selection.enabled && Batch.kind(state.view, isAdmin()) === 'books' ? toggleSelection(article.catalogBook.id) : showBookDetail(article.catalogBook));
+    const cover = makeCover(book, 'cover-wrap'); const pages = node('span', 'book-pages'); const progress = node('span', 'cover-progress'); cover.append(pages, progress);
+    const title = node('span', 'book-title'); const subtitle = node('span', 'book-series'); const meta = node('span', 'book-date');
+    open.append(cover, title, subtitle, meta);
+    const favorite = node('button', 'favorite-button'); favorite.type = 'button'; favorite.dataset.bookId = String(book.id); favorite.append(icon('heart'));
+    favorite.addEventListener('click', async () => {
+      article.favoriteBusy = favorite.disabled = true;
+      try { await toggleFavorite(article.catalogBook); } catch (error) { if (error.status !== 401) toast(error.message); }
+      finally { article.favoriteBusy = favorite.disabled = false; }
+    }); article.append(open, favorite);
+    article.catalogParts = { open, cover, pages, progress, title, subtitle, meta, favorite, select: null, coverKey: book.cover_version || book.cover_page || 0 };
     return article;
+  }
+  function makeCatalogItem(item) { return item.catalogSpacer ? node('div', 'catalog-grid-spacer') : makeBookCard(item); }
+  function updateCatalogItem(element, item) {
+    if (item.catalogSpacer) { element.style.height = Math.max(0, item.height) + 'px'; element.setAttribute('aria-hidden', 'true'); return; }
+    updateBookCard(element, item);
+  }
+  function updateBookCard(article, book) {
+    article.catalogBook = book;
+    const parts = article.catalogParts; const id = String(book.id); const coverKey = book.cover_version || book.cover_page || 0;
+    if (parts.coverKey !== coverKey) {
+      const replacement = makeCover(book, 'cover-wrap'); replacement.append(parts.pages, parts.progress);
+      parts.cover.replaceWith(replacement); parts.cover = replacement; parts.coverKey = coverKey;
+    }
+    const setText = (element, value) => { if (element.textContent !== value) element.textContent = value; };
+    parts.open.setAttribute('aria-label', `查看《${book.title}》详情，共 ${book.page_count} 页`);
+    setText(parts.pages, `${book.page_count} 页`); parts.progress.hidden = !book.progress;
+    if (book.progress) parts.progress.style.width = Math.min(100, (book.progress.page + 1) / book.page_count * 100) + '%';
+    setText(parts.title, book.title); parts.title.title = book.title;
+    setText(parts.subtitle, (book.models || []).map(model => model.name).join(' / ') || book.author || book.library_name || typeLabels[book.media_type] || '作品');
+    const showAdded = state.view === 'home' || (state.view !== 'recent' && ['added', 'added_asc'].includes(state.sort));
+    const meta = state.view === 'recent' && book.progress ? `第 ${book.progress.page + 1} 页 · ${formatDate(book.progress.updated_at, true)}` : showAdded ? `加入 ${formatAddedDate(book.added_at, false)}` : book.release_date || '';
+    setText(parts.meta, meta); parts.meta.hidden = !meta;
+    parts.meta.title = showAdded ? `加入时间 · ${formatAddedDate(book.added_at)}${book.release_date ? ` / 发布日期 · ${book.release_date}` : ''}` : '';
+    parts.favorite.setAttribute('aria-label', `${book.favorite ? '取消收藏' : '收藏'}《${book.title}》`); parts.favorite.setAttribute('aria-pressed', String(Boolean(book.favorite))); parts.favorite.disabled = Boolean(article.favoriteBusy);
+    if (Batch.kind(state.view, isAdmin()) === 'books') {
+      if (!parts.select) { parts.select = selectionCheckbox(book.id, book.title, 'book-select'); article.append(parts.select); }
+      parts.select.hidden = !selection.enabled; parts.select.checked = selection.enabled && selection.ids.has(id); parts.select.disabled = selection.busy; parts.select.setAttribute('aria-label', `选择 ${book.title}`);
+    } else if (parts.select) { parts.select.remove(); parts.select = null; }
+    article.classList.toggle('is-selected', Boolean(parts.select?.checked));
   }
   function renderContinue() {
     const candidates = state.view === 'library' ? scopedBooks() : state.books;
@@ -1055,6 +1092,7 @@
     imageSearchUI = window.GravelleImageSearchUI.create({ searchHost: $('#image-search-panel'), settingsHost: imageSearchSettings, api, post, openBook, isAdmin, toast, onManage: () => navigate('settings', { section: 'image-search' }), onOpenFailure: async (bookId, page) => { const generation = authGeneration; try { const book = await api(bookUrl(bookId)); if (generation === authGeneration && isAdmin()) await openBook(book, page); } catch (error) { if (generation === authGeneration && error.status !== 401) toast(error.message); } } });
   }
   function changeSearchMode(mode) {
+    catalogSearch?.cancel(); $('#search').value = state.query;
     if (selection.busy) return;
     navigate('search', { image: mode === 'image', query: state.query });
   }
@@ -1088,7 +1126,7 @@
     settingsLayout.items.cache.entry.hidden = !isAdmin();
     settingsLayout.items.network.entry.hidden = !isAdmin();
     renderOptimizationReminders();
-    const subtitles = { service: '版本、连接与访问地址', users: state.session?.user?.username || '当前账户与子账户', interface: (document.documentElement.dataset.interfaceSkin === 'board' ? 'Board' : '经典') + ' · ' + (interfaceTheme() === 'light' ? '亮色主题' : '暗色主题'), performance: '加载、缓存与列表', reading: '图片适配与阅读背景', transcoding: '规则、作品与后台任务', 'image-search': '图片索引与后台任务', cache: '空间占用与缓存清理', network: 'HTTPS、安全入口与分享设置' };
+    const subtitles = { service: '版本、连接与访问地址', users: state.session?.user?.username || '当前账户与子账户', interface: (document.documentElement.dataset.interfaceSkin === 'board' ? 'Board' : '经典') + ' · ' + (interfaceTheme() === 'light' ? '亮色主题' : '暗色主题'), performance: '后台任务、自动扫描与加载', reading: '图片适配与阅读背景', transcoding: '规则、作品与后台任务', 'image-search': '图片索引与后台任务', cache: '空间占用与缓存清理', network: 'HTTPS、安全入口与分享设置' };
     Object.entries(settingsLayout.items).forEach(([key, value]) => { value.detail.textContent = subtitles[key]; });
     $('#subaccounts-setting').hidden = !isAdmin();
     renderSubaccountSummary();
@@ -1253,6 +1291,57 @@
   }
   function stopCatalogFlow() {
     catalogFlow.observer?.disconnect(); catalogFlow.observer = null; catalogFlow.epoch += 1;
+    cancelAnimationFrame(catalogFlow.frame); catalogFlow.frame = 0;
+    catalogFlow.resizing = false; catalogFlow.resizeAnchor = null;
+  }
+
+  function currentCatalogAnchor() {
+    const card = $$('#book-grid .book-open').find(element => { const rect = element.getBoundingClientRect(); return rect.bottom > 0 && rect.top < innerHeight; });
+    return card ? { id: card.dataset.bookId, offset: card.getBoundingClientRect().top } : null;
+  }
+  function measureCatalogMetrics() {
+    const grid = $('#book-grid'); const columns = getComputedStyle(grid).gridTemplateColumns.split(' ').filter(value => parseFloat(value) > 0).length;
+    const sample = $('.book-card', grid); if (!columns || !sample?.catalogParts) return null;
+    const parts = sample.catalogParts; const original = { hidden: parts.meta.hidden, text: parts.meta.textContent };
+    // Measure the natural button, not the row-stretched article. Rows may have
+    // dates on only some cards; both heights are needed for exact spacers.
+    parts.meta.hidden = true; const compact = parts.open.getBoundingClientRect().height;
+    parts.meta.hidden = false; parts.meta.textContent = '日期'; const expanded = parts.open.getBoundingClientRect().height;
+    parts.meta.hidden = original.hidden; parts.meta.textContent = original.text;
+    return compact > 0 ? { columns, compact, date: Math.max(0, expanded - compact), gap: parseFloat(getComputedStyle(grid).rowGap) || 0 } : null;
+  }
+  function catalogBookHasDate(book) {
+    return state.view === 'recent' && book.progress || state.view === 'home' || state.view !== 'recent' && ['added', 'added_asc'].includes(state.sort) || Boolean(book.release_date);
+  }
+  function rebuildCatalogLayout() {
+    const metrics = measureCatalogMetrics();
+    if (!metrics) { catalogFlow.layout = null; return; }
+    const books = catalogFlow.books; const count = Math.min(books.length, catalogPaging.revealed);
+    catalogFlow.layout = Catalog.createGridLayout({ count, columns: metrics.columns, gap: metrics.gap,
+      rowHeight(row) { return metrics.compact + (books.slice(row * metrics.columns, Math.min(count, (row + 1) * metrics.columns)).some(catalogBookHasDate) ? metrics.date : 0); } });
+  }
+  function renderCatalogWindow({ anchor = null, focusIndex = null } = {}) {
+    const grid = $('#book-grid'); const layout = catalogFlow.layout;
+    if (!layout || reader.open || $('#catalog-section').hidden || Performance.get().bookPageSize !== 0) return;
+    const top = grid.getBoundingClientRect().top + window.scrollY;
+    const focused = document.activeElement?.closest?.('.book-card')?.catalogBook?.id;
+    const pinned = [catalogFlow.indices.get(String(focused)), focusIndex].filter(Number.isInteger);
+    const restoring = listRestoration?.key === Routes.hash(currentViewRoute()) ? listRestoration.saved : null;
+    const wanted = anchor || restoring?.anchor;
+    const anchorIndex = wanted ? catalogFlow.indices.get(String(wanted.id)) : null;
+    const viewportTop = Number.isInteger(anchorIndex) ? layout.offset(anchorIndex) : Math.max(0, (restoring?.y ?? window.scrollY) - top);
+    const segments = layout.window({ top: viewportTop, height: innerHeight, pinned });
+    const windowKey = segments.map(segment => `${segment.start}:${segment.end}:${segment.spacer ? 1 : 0}`).join(',');
+    if (catalogFlow.drawnLayout === layout && catalogFlow.drawnWindow === windowKey) { catalogFlow.anchor = currentCatalogAnchor(); return; }
+    const items = segments.flatMap(segment => segment.spacer ? [{ id: '__catalog-gap-' + segment.start + '-' + segment.end, catalogSpacer: true, height: segment.height }] : catalogFlow.books.slice(segment.start, segment.end));
+    grid.classList.add('catalog-windowed'); grid.setAttribute('role', 'list'); catalogCards.render(grid, items);
+    $$('.book-card', grid).forEach(card => { card.setAttribute('role', 'listitem'); card.setAttribute('aria-setsize', String(catalogFlow.books.length)); card.setAttribute('aria-posinset', String(catalogFlow.indices.get(String(card.catalogBook.id)) + 1)); });
+    catalogFlow.drawnLayout = layout; catalogFlow.drawnWindow = windowKey;
+    catalogFlow.anchor = currentCatalogAnchor();
+  }
+  function scheduleCatalogWindow() {
+    if (catalogFlow.frame || catalogFlow.resizing || reader.open || !catalogFlow.layout || $('#catalog-section').hidden || Performance.get().bookPageSize !== 0) return;
+    catalogFlow.frame = requestAnimationFrame(() => { catalogFlow.frame = 0; renderCatalogWindow(); });
   }
 
   function updateCatalogCount(books, page) {
@@ -1276,9 +1365,12 @@
 
   function updateCatalogFlowLayout() {
     if (reader.open || !state.session?.authenticated || Performance.get().bookPageSize !== 0 || $('#catalog-section').hidden) return;
-    // CSS reflows existing cards. Resizing only adjusts future load batches;
-    // recreating the list here would discard already decoded cover images.
+    const anchor = catalogFlow.resizeAnchor || catalogFlow.anchor || currentCatalogAnchor();
     catalogFlow.batchSize = catalogBatchSize();
+    rebuildCatalogLayout(); renderCatalogWindow({ anchor });
+    if (anchor) { const target = $$('#book-grid .book-open').find(element => element.dataset.bookId === String(anchor.id)); if (target) window.scrollTo({ top: Math.max(0, window.scrollY + target.getBoundingClientRect().top - anchor.offset), behavior: 'instant' }); }
+    catalogFlow.resizing = false; catalogFlow.resizeAnchor = null;
+    scheduleCatalogWindow();
     const sentinel = $('#book-flow-sentinel');
     if (sentinel && !sentinel.hidden) watchCatalogFlow(sentinel);
   }
@@ -1289,12 +1381,13 @@
     const start = catalogPaging.revealed;
     const page = Performance.catalogWindow(catalogFlow.books.length, 0, 0, start + catalogFlow.batchSize, catalogFlow.batchSize);
     if (page.end <= start) return;
-    const cards = catalogFlow.books.slice(start, page.end).map(makeBookCard);
-    $('#book-grid').append(...cards); catalogPaging.revealed = page.end;
+    catalogPaging.revealed = page.end; rebuildCatalogLayout();
+    if (catalogFlow.layout) renderCatalogWindow({ focusIndex: manual ? start : null });
+    else catalogCards.append($('#book-grid'), catalogFlow.books.slice(start, page.end));
     updateCatalogCount(catalogFlow.books, page);
     sentinel.hidden = !page.hasMore;
     if (sentinel.hidden) catalogFlow.observer?.disconnect(); else watchCatalogFlow(sentinel);
-    if (manual) $('.book-open', cards[0])?.focus({ preventScroll: true });
+    if (manual) $$('#book-grid .book-open').find(element => element.dataset.bookId === String(catalogFlow.books[start]?.id))?.focus({ preventScroll: true });
   }
 
   function renderLibrary() {
@@ -1325,13 +1418,22 @@
     const grid = $('#book-grid');
     const page = Performance.catalogWindow(books.length, catalogPaging.page, capacity, catalogPaging.revealed, catalogBatchSize());
     catalogPaging.page = page.page; catalogPaging.revealed = page.end;
-    grid.replaceChildren(...(catalog ? books.slice(page.start, page.end).map(makeBookCard) : [])); updateCatalogCount(books, page);
+    catalogFlow.books = books; catalogFlow.indices = new Map(books.map((book, index) => [String(book.id), index])); catalogFlow.batchSize = page.size;
+    if (catalog && page.flow && page.end) {
+      if (!$('.book-card', grid)) catalogCards.render(grid, books.slice(0, Math.min(page.end, page.size)));
+      rebuildCatalogLayout();
+      if (catalogFlow.layout) renderCatalogWindow();
+      else catalogCards.render(grid, books.slice(0, page.end));
+    } else {
+      catalogFlow.layout = catalogFlow.drawnLayout = null; grid.classList.remove('catalog-windowed'); grid.removeAttribute('role'); catalogCards.render(grid, catalog ? books.slice(page.start, page.end) : []);
+      $$('.book-card', grid).forEach(card => { card.removeAttribute('role'); card.removeAttribute('aria-posinset'); card.removeAttribute('aria-setsize'); });
+    }
+    updateCatalogCount(books, page);
     let pagination = $('#book-pagination'); if (!pagination) { pagination = node('nav', 'page-pagination'); pagination.id = 'book-pagination'; pagination.setAttribute('aria-label', '作品分页'); grid.after(pagination); }
     renderPagination(pagination, page, value => { catalogPaging.page = value; renderLibrary(); $('#catalog-section').scrollIntoView({ block: 'start', behavior: 'smooth' }); }); pagination.hidden = !catalog || page.flow || page.count < 2;
     let sentinel = $('#book-flow-sentinel');
     if (!sentinel) { sentinel = node('div', 'book-flow-sentinel'); sentinel.id = 'book-flow-sentinel'; const more = node('button', 'button button-secondary', '加载更多作品'); more.type = 'button'; more.addEventListener('click', () => loadMoreCatalogBooks(true)); sentinel.append(more); pagination.after(sentinel); }
     sentinel.hidden = !catalog || !page.flow || !page.hasMore;
-    catalogFlow.books = books; catalogFlow.batchSize = page.size;
     watchCatalogFlow(sentinel);
     if (state.view === 'bookmarks') renderBookmarks(); else $('#bookmark-list').replaceChildren();
     if (state.view === 'models') renderModels(); else $('#models-grid').replaceChildren();
@@ -1348,26 +1450,32 @@
     return JSON.stringify([libraries, state.books, state.models, state.bookmarks, state.rootPath,
       state.scanning, state.scanErrors, state.loading, state.loaded, state.libraryError, state.view, state.libraryId, state.modelId, state.session?.user]);
   }
-  async function refreshLibrary() {
+  async function refreshLibrary({ force = false } = {}) {
     if (state.refreshPromise) return state.refreshPromise; if (!state.session?.authenticated) return;
     const generation = authGeneration;
+    let unchanged = false; let pollingStatus = null;
     const operation = (async () => { try {
       const session = await api('/api/session');
       if (!session.authenticated) { handleUnauthorized(); return; }
       state.session = session;
       if (String(session.user?.id) !== String(activeUser?.id)) { showLibrary(); await refreshLibrary(); return; }
       activeUser = session.user;
-      const [libraries, data, models, bookmarks] = await Promise.all([api('/api/libraries'), api('/api/library'), api('/api/models'), api('/api/bookmarks')]);
+      const snapshot = await catalogLoader.load({ loaded: state.loaded && !state.libraryError, force });
       if (generation !== authGeneration) return;
+      if (snapshot.stale) return;
+      pollingStatus = snapshot.status;
+      if (snapshot.unchanged) { unchanged = true; state.scanning = snapshot.status.scanning; state.libraryError = null; return; }
+      const { libraries, data, models, bookmarks } = snapshot;
       state.libraries = libraries.libraries || []; state.rootPath = libraries.root_path || '/library'; if (state.libraryId && !currentLibrary()) { state.libraryId = ''; if (state.view === 'library') state.view = 'libraries'; }
       state.books = (data.books || []).filter(book => book.id !== undefined && book.page_count > 0); state.models = models.models || []; state.bookmarks = bookmarks.bookmarks || []; state.scanning = Boolean(data.scanning); state.lastScan = data.last_scan; state.scanErrors = data.errors || []; state.libraryError = null; state.loaded = true;
       if (isAdmin()) await readOptimizationSummary();
-    } catch (error) { if (error.status !== 401) state.libraryError = error.message; } finally {
+    } catch (error) { if (generation === authGeneration && error.status !== 401) state.libraryError = error.message; } finally {
       if (generation !== authGeneration) return;
       state.loading = false;
-      if (state.session?.authenticated && renderedLibraryData !== libraryDataSignature()) { renderLibraryNavigation(); renderSeries(); renderLibrary(); }
+      if (!unchanged && state.session?.authenticated && renderedLibraryData !== libraryDataSignature()) { renderLibraryNavigation(); renderSeries(); renderLibrary(); }
       if ($('#library-dialog').open) renderLibraryCoverEditor();
-      clearTimeout(state.poll); if ((state.scanning || ['home', 'libraries'].includes(state.view) && state.libraries.some(library => library.cover?.pending) || $('#library-dialog').open && state.libraries.some(library => library.id === state.editingLibrary && library.cover?.pending)) && state.session?.authenticated) state.poll = setTimeout(() => refreshLibrary(), 1500);
+      const coverPending = pollingStatus?.cover_pending ?? state.libraries.some(library => library.cover?.pending);
+      clearTimeout(state.poll); if ((state.scanning || ['home', 'libraries'].includes(state.view) && coverPending || $('#library-dialog').open && state.libraries.some(library => library.id === state.editingLibrary && library.cover?.pending)) && state.session?.authenticated) state.poll = setTimeout(() => refreshLibrary(), 1500);
     } })();
     state.refreshPromise = operation; try { await operation; } finally { if (state.refreshPromise === operation) state.refreshPromise = null; }
     if (state.session?.authenticated && state.loaded && !routing.restoring) {
@@ -1500,6 +1608,7 @@
     await restoreLocation(); toast('作品不存在，或当前账号无权访问。'); return true;
   }
   async function showBookDetail(book, options = {}) {
+    catalogSearch?.flush();
     if (!book) return;
     if (!options.fromRoute && routing.ready) {
       routing.generation += 1; routing.restoring = false;
@@ -1890,6 +1999,7 @@
   }
 
   async function openBook(book, startPage = null, sequence = null, options = {}) {
+    catalogSearch?.flush();
     if (!book) return;
     if (!options.fromRoute && routing.ready) {
       routing.generation += 1; routing.restoring = false;
@@ -2132,7 +2242,7 @@
   function clearReaderImages() {
     reader.pdfUpgrades.forEach(entry => entry.cancel?.()); reader.pdfUpgrades.clear();
     reader.pageCache.clear(); reader.preloads = [];
-    reader.rows.forEach(row => row.cancel?.());
+    reader.scrollRetained.keys().forEach(index => reader.rows[index]?.cancel?.()); reader.scrollRetained.clear();
   }
 
   function loadReaderImage(index) {
@@ -2187,11 +2297,11 @@
   }
 
   function scrollRetainedBytes() {
-    return reader.rows.reduce((sum, row, index) => sum + (row.loaded || row.loading ? row.bytes || pageMemoryEstimate(index) : 0), 0);
+    return reader.scrollRetained.bytes;
   }
   function trimScrollImages(reserveBytes = 0, reserveCount = 0, additionalProtected = []) {
     const limit = Performance.get().imageCacheLimit; const budget = readerMemoryBudget(); if (!limit && !budget) return;
-    const protectedPages = new Set([...scrollProtectedPages(), ...additionalProtected]); const retained = reader.rows.map((row, index) => ({ row, index })).filter(item => item.row.loaded || item.row.loading);
+    const protectedPages = new Set([...scrollProtectedPages(), ...additionalProtected]); const retained = reader.scrollRetained.keys().map(index => ({ row: reader.rows[index], index }));
     let count = retained.length; let bytes = scrollRetainedBytes();
     retained.sort((a, b) => Math.abs(b.index - reader.index) - Math.abs(a.index - reader.index)).forEach(({ row, index }) => {
       if ((!limit || count + reserveCount <= limit) && (!budget || bytes + reserveBytes <= budget) || protectedPages.has(index)) return;
@@ -2199,6 +2309,7 @@
       if (image?.naturalWidth && image.naturalHeight) row.ratio = image.naturalWidth / image.naturalHeight;
       bytes -= row.bytes || pageMemoryEstimate(index); row.bytes = 0;
       row.cancel?.(); row.loaded = false; row.loading = false; row.failed = false; row.element.classList.remove('loaded');
+      reader.scrollRetained.delete(index);
       if (row.ratio) row.element.style.aspectRatio = String(row.ratio);
       row.element.replaceChildren(node('span', 'scroll-placeholder', `第 ${index + 1} 页`)); count -= 1;
     });
@@ -2225,6 +2336,7 @@
     container.replaceChildren();
     const fragment = document.createDocumentFragment();
     reader.rows = [];
+    reader.scrollRetained.clear();
     const token = reader.token;
     const epoch = reader.epoch;
     for (let index = 0; index < reader.book.page_count; index += 1) {
@@ -2266,8 +2378,10 @@
     const token = reader.token;
     const epoch = reader.epoch;
     const book = reader.book;
+    const previousBytes = row.bytes || 0;
     row.loading = true;
     row.bytes = pageMemoryEstimate(index);
+    reader.scrollRetained.set(index, row.bytes);
     row.failed = false;
     if (!upgrade) row.element.replaceChildren(node('span', 'scroll-placeholder', `正在加载第 ${index + 1} 页…`));
     const image = node('img');
@@ -2280,6 +2394,7 @@
       row.loading = false;
       row.width = width;
       row.bytes = Performance.decodedImageBytes({ width: image.naturalWidth, height: image.naturalHeight });
+      reader.scrollRetained.set(index, row.bytes);
       reader.sizes[index] = { width: image.naturalWidth, height: image.naturalHeight };
       row.ratio = image.naturalWidth / image.naturalHeight;
       row.element.style.aspectRatio = '';
@@ -2298,14 +2413,21 @@
     const onError = () => {
       if (!reader.open || token !== reader.token || epoch !== reader.epoch || reader.rows[index] !== row || !row.loading) return;
       row.loading = false;
-      if (upgrade) { row.failed = false; return; }
+      if (upgrade) { row.failed = false; row.bytes = previousBytes; reader.scrollRetained.set(index, row.bytes); return; }
       row.bytes = 0;
+      reader.scrollRetained.delete(index);
       row.failed = true;
       row.element.replaceChildren(makePageError(`第 ${index + 1} 页加载失败`, () => loadScrollPage(index, true)));
     };
     image.addEventListener('load', onLoad, { once: true });
     image.addEventListener('error', onError, { once: true });
-    row.cancel = () => { image.removeEventListener('load', onLoad); image.removeEventListener('error', onError); image.removeAttribute('src'); row.loading = false; };
+    row.cancel = () => {
+      image.removeEventListener('load', onLoad); image.removeEventListener('error', onError); image.removeAttribute('src');
+      const wasLoading = row.loading; row.loading = false;
+      if (reader.rows[index] !== row) return;
+      if (!row.loaded) { row.bytes = 0; reader.scrollRetained.delete(index); }
+      else if (wasLoading && upgrade) { row.bytes = previousBytes; reader.scrollRetained.set(index, row.bytes); }
+    };
     image.src = pageUrl(book, index, width || 1600);
   }
 
@@ -2846,11 +2968,15 @@
     finally { button.disabled = false; }
   });
   $$('.scan-trigger').forEach(button => button.addEventListener('click', scanLibrary));
-  $('#search').addEventListener('input', event => { state.query = event.target.value; renderLibrary(); syncViewRoute(true); });
+  catalogSearch = Catalog.createSearchInput(value => { state.query = value; renderLibrary(); syncViewRoute(true); });
+  $('#search').addEventListener('input', event => catalogSearch.input(event.target.value, event.isComposing));
+  $('#search').addEventListener('compositionstart', () => catalogSearch.compositionStart());
+  $('#search').addEventListener('compositionend', event => catalogSearch.compositionEnd(event.target.value));
+  $('#search').addEventListener('keydown', event => { if (event.key === 'Enter' && !event.isComposing) catalogSearch.flush(); });
   ['text', 'image'].forEach(mode => $('#search-tab-' + mode).addEventListener('click', () => changeSearchMode(mode)));
   $('#search-tabs').addEventListener('keydown', event => { if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return; event.preventDefault(); changeSearchMode(event.key === 'Home' ? 'text' : event.key === 'End' ? 'image' : searchMode === 'text' ? 'image' : 'text'); });
-  $('#series-filter').addEventListener('change', event => { state.series = event.target.value; renderLibrary(); syncViewRoute(true); });
-  $('#sort').addEventListener('change', event => { state.sort = End.normalizeSort(event.target.value); if (state.view === 'library') saveLibrarySort(state.libraryId, state.sort); renderLibrary(); syncViewRoute(true); });
+  $('#series-filter').addEventListener('change', event => { catalogSearch.flush(); state.series = event.target.value; renderLibrary(); syncViewRoute(true); });
+  $('#sort').addEventListener('change', event => { catalogSearch.flush(); state.sort = End.normalizeSort(event.target.value); if (state.view === 'library') saveLibrarySort(state.libraryId, state.sort); renderLibrary(); syncViewRoute(true); });
   Object.keys(defaultPrefs).forEach(key => $('#pref-' + key).addEventListener('change', event => savePref(key, event.target.value)));
   $('#detail-close').addEventListener('click', () => { state.detailBook = null; $('#book-detail').close(); });
   $('#book-detail').addEventListener('close', () => {
@@ -3121,6 +3247,20 @@
   window.addEventListener('focus', refreshOnReturn);
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flushProgress(true); else refreshOnReturn(); });
   window.addEventListener('scroll', () => { clearTimeout(listPositionTimer); listPositionTimer = setTimeout(saveListPosition, 150); }, { passive: true });
+  window.addEventListener('scroll', scheduleCatalogWindow, { passive: true });
+  $('#book-grid').addEventListener('keydown', event => {
+    if (event.key !== 'Tab' || event.altKey || event.ctrlKey || event.metaKey || !catalogFlow.layout || Performance.get().bookPageSize !== 0) return;
+    const card = document.activeElement?.closest?.('.book-card'); if (!card?.catalogBook) return;
+    const controls = $$('button,input', card).filter(element => !element.disabled && !element.hidden);
+    const boundary = event.shiftKey ? controls[0] : controls.at(-1); if (document.activeElement !== boundary) return;
+    const next = catalogFlow.indices.get(String(card.catalogBook.id)) + (event.shiftKey ? -1 : 1);
+    if (next < 0 || next >= catalogFlow.books.length) return;
+    if (next >= catalogPaging.revealed) loadMoreCatalogBooks();
+    event.preventDefault(); renderCatalogWindow({ focusIndex: next });
+    const target = $$('.book-card', $('#book-grid')).find(element => String(element.catalogBook.id) === String(catalogFlow.books[next].id));
+    const choices = target ? $$('button,input', target).filter(element => !element.disabled && !element.hidden) : [];
+    (event.shiftKey ? choices.at(-1) : choices[0])?.focus();
+  });
   ['wheel', 'touchstart', 'pointerdown', 'keydown'].forEach(type => window.addEventListener(type, () => { if (!reader.open) cancelListRestoration(); }, { passive: true, capture: true }));
   window.addEventListener('pagehide', () => { saveListPosition(); flushProgress(true); });
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') saveListPosition(); });
@@ -3128,6 +3268,7 @@
 
   let performanceResizeTimer;
   window.addEventListener('resize', () => {
+    if (!catalogFlow.resizing && !reader.open && catalogFlow.layout) { catalogFlow.resizeAnchor = catalogFlow.anchor || currentCatalogAnchor(); catalogFlow.resizing = true; }
     clearTimeout(performanceResizeTimer);
     performanceResizeTimer = setTimeout(() => {
       if (!state.session?.authenticated) return;

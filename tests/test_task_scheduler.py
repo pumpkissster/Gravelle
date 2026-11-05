@@ -21,6 +21,10 @@ class FakeLibrary:
     def __init__(self, path):
         self.path = path
         self.admin = True
+        self.scan_interval = 300
+
+    def set_scan_interval(self, seconds):
+        self.scan_interval = seconds
 
     def connect(self):
         return sqlite3.connect(self.path, timeout=2)
@@ -84,7 +88,8 @@ class SharedTaskSchedulerTests(unittest.TestCase):
         return release
 
     def test_default_validation_permission_and_persistence(self):
-        self.assertEqual(self.scheduler.snapshot(), {"taskConcurrency": 1, "maxTaskConcurrency": 8})
+        self.assertEqual(self.scheduler.snapshot(), {"taskConcurrency": 1, "maxTaskConcurrency": 8,
+                                                   "scanIntervalSeconds": 300, "maxScanIntervalSeconds": 604800})
         for body in ({}, None, [], {"taskConcurrency": True}, {"taskConcurrency": 1.0},
                      {"taskConcurrency": "2"}, {"taskConcurrency": 0}, {"taskConcurrency": 9},
                      {"taskConcurrency": 2, "other": 1}):

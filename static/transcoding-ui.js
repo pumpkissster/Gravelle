@@ -8,6 +8,9 @@
   const statusLabels = Object.freeze({ pending: '待选择', original: '使用原图', queued: '等待优化', running: '优化中', paused: '已暂停', failed: '失败', cancelled: '已取消', ready: '已完成' });
   const actionLabels = Object.freeze({ original: '使用原图', transcode: '开始优化', pause: '暂停', resume: '继续', cancel: '取消任务', retry: '重试' });
   const defaultRules = Object.freeze({ enabled: false, file_size_mb: 10, max_source_pixels: 40000000, max_source_side: 10000, output_format: 'webp', quality: 88, max_output_side: 3840, workers: 1, memory_limit_mb: 1024, timeout_seconds: 120, storage_limit_mb: 10240, min_free_space_mb: 512 });
+  function refreshDelay(snapshot) {
+    return !snapshot || Number(snapshot.summary?.processing_books) > 0 || snapshot.books?.some(book => ['queued', 'running'].includes(book.status)) ? 5000 : 15000;
+  }
   function normalizeFilters(value) {
     const input = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
     return {
@@ -327,22 +330,27 @@
       if (changed) Promise.resolve(onCatalogChange()).catch(() => {});
     }
     async function load(force = false) {
-      if (!state.active || state.loading || state.busy || document.hidden && !force) return;
+      if (!state.active || state.loading || state.busy || document.hidden && !force) { scheduleLoad(); return; }
+      stopLoad();
       const generation = state.generation; state.loading = true; state.manualLoading = force; updateBusy(); if (!state.snapshot) renderBooks();
       try { const snapshot = await api('/api/transcoding'); if (generation !== state.generation) return; accept(snapshot); setError(''); controls.retryLoad.hidden = true; }
       catch (error) { if (generation === state.generation && error.status !== 401) { setError(error.message); controls.retryLoad.hidden = false; } }
-      finally { if (generation === state.generation) { state.loading = state.manualLoading = false; updateBusy(); if (!state.snapshot) renderBooks(); } }
+      finally { if (generation === state.generation) { state.loading = state.manualLoading = false; updateBusy(); if (!state.snapshot) renderBooks(); scheduleLoad(); } }
     }
+    function stopLoad() { clearTimeout(state.timer); state.timer = null; }
+    function scheduleLoad() { stopLoad(); if (state.active && !document.hidden && state.tab === 'tasks') state.timer = setTimeout(() => load(), refreshDelay(state.snapshot)); }
     function switchTab(tab, updateRoute = true) {
+      const previous = state.tab;
       state.tab = tab === 'rules' ? 'rules' : 'tasks'; tasks.hidden = state.tab !== 'tasks'; rules.hidden = state.tab !== 'rules';
       [controls.tasksTab, controls.rulesTab].forEach((item, index) => { const selected = (index ? 'rules' : 'tasks') === state.tab; item.setAttribute('aria-selected', String(selected)); item.tabIndex = selected ? 0 : -1; });
       if (updateRoute) onTabChange(state.tab);
+      if (previous !== state.tab && state.tab === 'tasks' && state.active) load(); else scheduleLoad();
     }
     async function mutate(url, payload, success, { saveRules = false } = {}) {
-      const generation = state.generation; state.busy = true; dialogError.hidden = true; updateBusy();
+      stopLoad(); const generation = state.generation; state.busy = true; dialogError.hidden = true; updateBusy();
       try { const snapshot = await post(url, payload); if (generation !== state.generation) return; if (saveRules) { state.dirty = false; state.draft = null; } accept(snapshot); setError(''); dialog.close(); toast(typeof success === 'function' ? success(snapshot) : success); Promise.resolve(onCatalogChange()).catch(() => {}); }
       catch (error) { if (generation === state.generation && error.status !== 401) { dialogError.textContent = error.message; dialogError.hidden = false; } }
-      finally { if (generation === state.generation) { state.busy = false; updateBusy(); renderBooks(); } }
+      finally { if (generation === state.generation) { state.busy = false; updateBusy(); renderBooks(); scheduleLoad(); } }
     }
     function confirmAction(action) {
       const selected = (state.snapshot?.books || []).filter(book => state.selected.has(String(book.id)) && eligible(book, action)); if (!selected.length || state.busy) return;
@@ -373,13 +381,14 @@
       } catch (error) { if (generation === state.generation && error.status !== 401) setError(error.message); }
       finally { if (generation === state.generation) { state.busy = false; updateBusy(); } }
     }
+    document.addEventListener?.('visibilitychange', () => { if (document.hidden) stopLoad(); else if (state.active && state.tab === 'tasks') load(); });
     fillRules(defaultRules); switchTab('tasks', false); renderBooks();
     return {
-      show(tab = 'tasks') { state.active = true; host.hidden = false; switchTab(tab, false); load(); clearInterval(state.timer); state.timer = setInterval(() => { if (state.tab === 'tasks') load(); }, 5000); },
-      hide() { state.active = false; host.hidden = true; clearInterval(state.timer); state.timer = null; if (dialog.open && !state.busy) dialog.close(); if (previewDialog.open) previewDialog.close(); if (detailDialog.open) detailDialog.close(); },
-      reset() { state.generation += 1; state.active = false; clearInterval(state.timer); state.timer = null; state.snapshot = null; state.loading = state.manualLoading = state.busy = state.dirty = false; state.draft = null; state.selected.clear(); state.rows.clear(); state.filter = state.library = state.query = state.signature = state.published = state.librarySignature = ''; controls.query.value = ''; controls.status.value = ''; controls.library.value = ''; if (dialog.open) dialog.close(); if (previewDialog.open) previewDialog.close(); if (detailDialog.open) detailDialog.close(); detailRequest += 1; setError(''); controls.retryLoad.hidden = true; fillRules(defaultRules); renderBooks(); host.hidden = true; },
+      show(tab = 'tasks') { state.active = true; host.hidden = false; switchTab(tab, false); load(); },
+      hide() { state.active = false; host.hidden = true; stopLoad(); if (dialog.open && !state.busy) dialog.close(); if (previewDialog.open) previewDialog.close(); if (detailDialog.open) detailDialog.close(); },
+      reset() { state.generation += 1; state.active = false; stopLoad(); state.snapshot = null; state.loading = state.manualLoading = state.busy = state.dirty = false; state.draft = null; state.selected.clear(); state.rows.clear(); state.filter = state.library = state.query = state.signature = state.published = state.librarySignature = ''; controls.query.value = ''; controls.status.value = ''; controls.library.value = ''; if (dialog.open) dialog.close(); if (previewDialog.open) previewDialog.close(); if (detailDialog.open) detailDialog.close(); detailRequest += 1; setError(''); controls.retryLoad.hidden = true; fillRules(defaultRules); renderBooks(); host.hidden = true; },
       refresh: () => load(true), getFilters, restoreFilters, isLoaded: () => Boolean(state.snapshot)
     };
   }
-  return { create, bytes, progress, eligible, statusLabels, defaultRules, createPendingTracker, bookDisplaySignature, normalizeFilters, formatParameters, formatTime };
+  return { create, bytes, progress, eligible, statusLabels, defaultRules, createPendingTracker, bookDisplaySignature, normalizeFilters, formatParameters, formatTime, refreshDelay };
 });

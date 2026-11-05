@@ -3,7 +3,6 @@
 
   const HEADER_BYTES = 17;
   const TAG_BYTES = 16;
-  const MAX_IMAGE_BYTES = 64 * 1024 * 1024;
   const MIME_TYPES = Object.freeze({
     1: 'image/jpeg', 2: 'image/png', 3: 'image/webp', 4: 'image/gif',
     5: 'image/avif', 6: 'image/bmp', 7: 'image/tiff',
@@ -39,7 +38,7 @@
     let key;
     try {
       const payload = bytes(packet);
-      if (payload.length <= HEADER_BYTES + TAG_BYTES || payload.length > MAX_IMAGE_BYTES + HEADER_BYTES + TAG_BYTES) throw invalid();
+      if (payload.length <= HEADER_BYTES + TAG_BYTES) throw invalid();
       if (payload[0] !== 71 || payload[1] !== 83 || payload[2] !== 72 || payload[3] !== 49) throw invalid();
       const mime = MIME_TYPES[payload[16]];
       if (!mime) throw invalid();

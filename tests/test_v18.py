@@ -253,6 +253,10 @@ class V18Tests(unittest.TestCase):
         with closing(sqlite3.connect(self.app.data / 'library.sqlite3')) as db, db:
             owner = db.execute('SELECT username,password_hash FROM owner_account').fetchone()
             sessions = db.execute('SELECT * FROM auth_sessions').fetchall()
+            # A genuine v1.7 database predates the catalogue invalidation
+            # triggers; remove them before simulating its missing columns.
+            for row in db.execute("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'catalog_revision_%'").fetchall():
+                db.execute('DROP TRIGGER "' + row[0].replace('"', '""') + '"')
             for table in ('owner_account', 'models'):
                 db.execute(f'ALTER TABLE {table} DROP COLUMN avatar_file')
                 db.execute(f'ALTER TABLE {table} DROP COLUMN avatar_revision')

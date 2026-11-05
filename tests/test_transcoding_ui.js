@@ -31,12 +31,36 @@ function optimizationFixture() {
     close() { this.open = false; }
     showModal() { this.open = true; }
   }
-  const document = { activeElement: null, hidden: false, createElement: tag => new Element(tag, document) };
+  const document = { activeElement: null, hidden: false, listeners: {}, createElement: tag => new Element(tag, document), addEventListener(type, handler) { this.listeners[type] = handler; } };
   document.body = new Element('body', document); const host = new Element('section', document); document.body.append(host);
   function find(root, predicate) { if (predicate(root)) return root; for (const child of root.children) { const result = find(child, predicate); if (result) return result; } return null; }
   return { document, host, find };
 }
 const optimizationFlush = () => new Promise(resolve => setImmediate(resolve));
+
+test('optimization refreshes active jobs promptly and backs off when the queue is idle', () => {
+  assert.equal(Transcoding.refreshDelay(null), 5000);
+  assert.equal(Transcoding.refreshDelay({ summary: { processing_books: 2 }, books: [] }), 5000);
+  assert.equal(Transcoding.refreshDelay({ books: [{ status: 'queued' }] }), 5000);
+  assert.equal(Transcoding.refreshDelay({ books: [{ status: 'running' }] }), 5000);
+  for (const status of ['pending', 'original', 'ready', 'failed', 'paused', 'cancelled']) assert.equal(Transcoding.refreshDelay({ summary: { processing_books: 0 }, books: [{ status }] }), 15000);
+});
+
+test('optimization polling pauses while hidden and resumes immediately with the latest task state', async () => {
+  const fixture = optimizationFixture(); const timer = new Map(); let next = 0; let reads = 0;
+  const originalSet = global.setTimeout, originalClear = global.clearTimeout;
+  global.setTimeout = (fn, delay) => { const id = ++next; timer.set(id, { fn, delay }); return id; };
+  global.clearTimeout = id => timer.delete(id);
+  const ui = Transcoding.create({ ...fixture, api: async () => ({ rules: Transcoding.defaultRules, books: [], summary: { processing_books: ++reads === 1 ? 1 : 0 } }), post: async () => ({}), toast() {} });
+  try {
+    ui.show(); await optimizationFlush(); assert.equal(reads, 1); assert.equal([...timer.values()][0].delay, 5000);
+    const callback = [...timer.values()][0].fn; timer.clear(); callback(); await optimizationFlush(); assert.equal(reads, 2); assert.equal([...timer.values()][0].delay, 15000);
+    fixture.document.hidden = true; fixture.document.listeners.visibilitychange(); assert.equal(timer.size, 0);
+    fixture.document.hidden = false; fixture.document.listeners.visibilitychange(); await optimizationFlush(); assert.equal(reads, 3); assert.equal(timer.size, 1);
+    ui.show('rules'); await optimizationFlush(); assert.equal(timer.size, 0);
+    fixture.find(fixture.host, item => item.textContent === '作品与任务').dispatch('click'); await optimizationFlush(); assert.equal(reads, 5);
+  } finally { ui.reset(); global.setTimeout = originalSet; global.clearTimeout = originalClear; }
+});
 
 test('restored optimization filters wait for available libraries and render only matching works', async () => {
   const fixture = optimizationFixture(); let resolveSnapshot; let renders = 0;

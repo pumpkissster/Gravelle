@@ -94,12 +94,14 @@
   let currentUser = null;
   let serverAPI = null;
   let serverEpoch = 0;
-  let serverState = { value: 1, loaded: false, loading: false, saving: false, error: '', message: '', request: null };
+  const MAX_SCAN_INTERVAL_SECONDS = 604800;
+  const initialServerState = () => ({ value: 1, scanValue: 300, scanSupported: false, loaded: false, loading: false, saving: false, error: '', message: '', scanError: '', scanMessage: '', request: null });
+  let serverState = initialServerState();
   let renderedPanel = null;
   let serverControls = null;
   function resetServer() {
     serverEpoch += 1;
-    serverState = { value: 1, loaded: false, loading: false, saving: false, error: '', message: '', request: null };
+    serverState = initialServerState();
     renderedPanel?.replaceChildren();
     renderedPanel = null; serverControls = null;
   }
@@ -112,20 +114,46 @@
   }
   function serverValue(payload) {
     if (!Number.isInteger(payload?.taskConcurrency) || payload.taskConcurrency < 1 || payload.taskConcurrency > 8 || payload?.maxTaskConcurrency !== 8) throw new Error('服务端返回的任务设置无效。');
-    return payload.taskConcurrency;
+    const hasInterval = Object.prototype.hasOwnProperty.call(payload, 'scanIntervalSeconds');
+    const hasMaximum = Object.prototype.hasOwnProperty.call(payload, 'maxScanIntervalSeconds');
+    if (hasInterval || hasMaximum) {
+      if (!hasInterval || !hasMaximum || !Number.isInteger(payload.scanIntervalSeconds) || payload.scanIntervalSeconds < 0 || payload.scanIntervalSeconds > MAX_SCAN_INTERVAL_SECONDS || payload.maxScanIntervalSeconds !== MAX_SCAN_INTERVAL_SECONDS) throw new Error('服务端返回的自动扫描设置无效。');
+    }
+    return { task: payload.taskConcurrency, scan: hasInterval ? payload.scanIntervalSeconds : null };
+  }
+  function applyServerValue(values, saved) {
+    // A full response can include a newer value for the other server option.
+    // Keep an unfinished edit in that field until its own explicit save.
+    const taskEdited = serverControls && String(serverControls.input.value) !== String(serverState.value);
+    const scanEdited = serverControls && String(serverControls.scan.input.value) !== String(serverState.scanValue);
+    serverState.value = values.task;
+    serverState.scanSupported = values.scan !== null;
+    if (values.scan !== null) serverState.scanValue = values.scan;
+    if (serverControls) {
+      if (saved === 'task' || !taskEdited) serverControls.input.value = serverState.value;
+      if (saved === 'scan' || !scanEdited) serverControls.scan.input.value = serverState.scanValue;
+    }
   }
   function renderServerState() {
     if (!serverControls) return;
     const allowed = isServerAdmin();
     serverControls.group.hidden = !allowed;
-    serverControls.input.disabled = !allowed || !serverState.loaded || serverState.loading || serverState.saving;
+    serverControls.input.disabled = Boolean(!allowed || !serverState.loaded || serverState.loading || serverState.saving);
     serverControls.save.disabled = serverControls.input.disabled;
-    serverControls.save.textContent = serverState.saving ? '保存中…' : '保存';
+    serverControls.save.textContent = serverState.saving === 'task' ? '保存中…' : '保存';
     serverControls.status.textContent = serverState.loading ? '正在读取…' : serverState.error || serverState.message;
     serverControls.status.className = serverState.error ? 'performance-server-status form-error' : 'performance-server-status';
     serverControls.status.hidden = !serverControls.status.textContent;
     serverControls.retry.hidden = !allowed || serverState.loaded || !serverState.error;
-    serverControls.retry.disabled = serverState.loading || serverState.saving;
+    serverControls.retry.disabled = Boolean(serverState.loading || serverState.saving);
+    const scan = serverControls.scan;
+    scan.group.hidden = !allowed || !serverState.scanSupported;
+    scan.input.disabled = serverControls.input.disabled || !serverState.scanSupported;
+    scan.save.disabled = scan.input.disabled;
+    scan.save.textContent = serverState.saving === 'scan' ? '保存中…' : '保存';
+    scan.status.textContent = serverState.scanError || serverState.scanMessage;
+    scan.status.className = serverState.scanError ? 'performance-server-status form-error' : 'performance-server-status';
+    scan.status.hidden = !scan.status.textContent;
   }
   function loadServer() {
     if (!isServerAdmin() || serverState.loaded) return Promise.resolve();
@@ -138,8 +166,7 @@
       return read('/api/performance');
     }).then(payload => {
       if (epoch !== serverEpoch || !isServerAdmin()) return;
-      serverState.value = serverValue(payload); serverState.loaded = true;
-      if (serverControls) serverControls.input.value = serverState.value;
+      applyServerValue(serverValue(payload)); serverState.loaded = true;
     }).catch(error => {
       if (epoch !== serverEpoch || !isServerAdmin()) return;
       serverState.error = '读取后台任务设置失败：' + (error.message || '请稍后重试。');
@@ -150,25 +177,33 @@
     serverState.request = request;
     return request;
   }
-  async function saveServer(event) {
+  async function saveServer(event, kind = 'task') {
     event.preventDefault();
     if (!isServerAdmin() || !serverState.loaded || serverState.loading || serverState.saving) return;
-    const input = serverControls.input; const value = Number(input.value);
-    serverState.error = ''; serverState.message = '';
-    if (String(input.value).trim() === '' || !input.checkValidity() || !Number.isInteger(value) || value < 1 || value > 8) {
-      input.reportValidity(); input.value = serverState.value;
-      serverState.error = '后台任务并发数需要填写 1～8 的整数。'; renderServerState(); return;
+    const scanning = kind === 'scan';
+    if (scanning && !serverState.scanSupported) return;
+    const controls = scanning ? serverControls.scan : serverControls;
+    const input = controls.input; const value = Number(input.value);
+    const valueKey = scanning ? 'scanValue' : 'value';
+    const errorKey = scanning ? 'scanError' : 'error';
+    const messageKey = scanning ? 'scanMessage' : 'message';
+    serverState[errorKey] = ''; serverState[messageKey] = '';
+    if (String(input.value).trim() === '' || !input.checkValidity() || !Number.isInteger(value) || value < (scanning ? 0 : 1) || value > (scanning ? MAX_SCAN_INTERVAL_SECONDS : 8)) {
+      input.reportValidity(); input.value = serverState[valueKey];
+      serverState[errorKey] = scanning ? '自动扫描间隔需要填写 0～604800 的整数，单位为秒。' : '后台任务并发数需要填写 1～8 的整数。'; renderServerState(); return;
     }
     const epoch = serverEpoch;
-    serverState.saving = true; renderServerState();
+    serverState.saving = kind; renderServerState();
     try {
-      const payload = await serverAPI.post('/api/performance', { taskConcurrency: value });
+      const payload = await serverAPI.post('/api/performance', { [scanning ? 'scanIntervalSeconds' : 'taskConcurrency']: value });
       if (epoch !== serverEpoch || !isServerAdmin()) return;
-      serverState.value = serverValue(payload); input.value = serverState.value; serverState.message = '已保存';
+      const values = serverValue(payload);
+      if (scanning && values.scan === null) throw new Error('服务端未返回自动扫描设置，请刷新页面核对。');
+      applyServerValue(values, kind); serverState[messageKey] = '已保存';
     } catch (error) {
       if (epoch !== serverEpoch || !isServerAdmin()) return;
-      input.value = serverState.value;
-      serverState.error = '保存后台任务设置失败：' + (error.message || '请稍后重试。');
+      input.value = serverState[valueKey];
+      serverState[errorKey] = (scanning ? '保存自动扫描设置失败：' : '保存后台任务设置失败：') + (error.message || '请稍后重试。');
     } finally {
       if (epoch === serverEpoch && isServerAdmin()) { serverState.saving = false; renderServerState(); }
     }
@@ -228,6 +263,7 @@
       const group = make('section', '', 'settings-panel performance-server-settings');
       group.append(make('h2', '后台任务'));
       const form = make('form', '', 'setting-row performance-row performance-task-row');
+      form.id = 'performance-task-form';
       const label = make('label'); label.htmlFor = 'performance-taskConcurrency'; label.append(make('strong', '后台任务并发数'), make('small', '图片优化与图片索引共用；默认 1，其他任务排队'));
       const actions = make('div', '', 'performance-task-actions');
       const taskInput = make('input'); taskInput.type = 'number'; taskInput.id = 'performance-taskConcurrency'; taskInput.min = 1; taskInput.max = 8; taskInput.step = 1; taskInput.required = true; taskInput.value = serverState.value; taskInput.setAttribute('aria-label', '后台任务并发数');
@@ -241,7 +277,21 @@
       const status = make('p', '', 'performance-server-status'); status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite'); status.hidden = true;
       const retry = make('button', '重试', 'button button-secondary'); retry.type = 'button'; retry.hidden = true; retry.addEventListener('click', loadServer);
       feedback.append(status, retry); group.append(form, feedback); panel.append(group);
-      serverControls = { group, input: taskInput, save, status, retry };
+      const scanGroup = make('section', '', 'settings-panel performance-server-settings');
+      scanGroup.hidden = true; scanGroup.append(make('h2', '自动扫描'));
+      const scanForm = make('form', '', 'setting-row performance-row performance-task-row'); scanForm.id = 'performance-scan-form';
+      const scanLabel = make('label'); scanLabel.htmlFor = 'performance-scanIntervalSeconds'; scanLabel.append(make('strong', '自动扫描间隔（秒）'), make('small', '0 关闭定时扫描，保存后生效'));
+      const scanActions = make('div', '', 'performance-task-actions');
+      const scanInput = make('input'); scanInput.type = 'number'; scanInput.id = 'performance-scanIntervalSeconds'; scanInput.min = 0; scanInput.max = MAX_SCAN_INTERVAL_SECONDS; scanInput.step = 1; scanInput.required = true; scanInput.value = serverState.scanValue; scanInput.setAttribute('aria-label', '自动扫描间隔（秒）');
+      const scanSave = make('button', '保存', 'button button-primary'); scanSave.type = 'submit';
+      scanActions.append(scanInput, scanSave); scanForm.append(scanLabel, scanActions); scanForm.addEventListener('submit', event => {
+        if (formEpoch !== serverEpoch) { event.preventDefault(); return; }
+        return saveServer(event, 'scan');
+      });
+      const scanFeedback = make('div', '', 'performance-server-feedback');
+      const scanStatus = make('p', '', 'performance-server-status'); scanStatus.setAttribute('role', 'status'); scanStatus.setAttribute('aria-live', 'polite'); scanStatus.hidden = true;
+      scanFeedback.append(scanStatus); scanGroup.append(scanForm, scanFeedback); panel.append(scanGroup);
+      serverControls = { group, input: taskInput, save, status, retry, scan: { group: scanGroup, input: scanInput, save: scanSave, status: scanStatus } };
     }
     const device = make('section', '', 'settings-panel performance-device-settings');
     device.append(make('h2', '加载与列表'), make('p', '按当前账号保存在此设备。', 'settings-intro'));

@@ -31,6 +31,7 @@ from PIL import Image, ImageCms, ImageOps
 
 MIB = 1024 * 1024
 ALGORITHM_VERSION = 2
+OPTIMIZATION_IDLE_POLL_SECONDS = 30
 DEFAULT_RULES = {
     "enabled": False, "file_size_mb": 10, "max_source_pixels": 40_000_000,
     "max_source_side": 10_000, "output_format": "webp", "quality": 88,
@@ -383,6 +384,7 @@ class TranscodingManager:
                     published INTEGER NOT NULL DEFAULT 0, rule_revision INTEGER NOT NULL,
                     source_signature TEXT NOT NULL, error TEXT NOT NULL DEFAULT '',
                     generation INTEGER NOT NULL DEFAULT 1, updated_at REAL NOT NULL,
+                    queue_order INTEGER NOT NULL DEFAULT 0,
                     completed_at REAL);
                 CREATE TABLE IF NOT EXISTS tc_pages (
                     book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE ON UPDATE CASCADE,
@@ -412,6 +414,11 @@ class TranscodingManager:
             if "output_parameters" not in columns:
                 connection.execute("ALTER TABLE tc_outputs ADD COLUMN output_parameters TEXT NOT NULL DEFAULT ''")
             columns = {row["name"] for row in connection.execute("PRAGMA table_info(tc_books)")}
+            if "queue_order" not in columns:
+                connection.execute("ALTER TABLE tc_books ADD COLUMN queue_order INTEGER NOT NULL DEFAULT 0")
+            connection.execute("CREATE INDEX IF NOT EXISTS tc_books_queue_order ON tc_books(queue_order)")
+            connection.execute("""CREATE INDEX IF NOT EXISTS tc_books_work_state
+                ON tc_books(status,decision,queue_order,book_id)""")
             if "completed_fingerprint" not in columns:
                 connection.execute("ALTER TABLE tc_books ADD COLUMN completed_fingerprint TEXT NOT NULL DEFAULT ''")
             for row in connection.execute("SELECT book_id FROM tc_books WHERE completed_at IS NOT NULL AND completed_fingerprint=''").fetchall():
@@ -422,6 +429,9 @@ class TranscodingManager:
                 connection.execute("UPDATE tc_books SET completed_fingerprint=? WHERE book_id=?", (marker, row["book_id"]))
             connection.execute("INSERT OR IGNORE INTO tc_settings(id,enabled,revision,rules) VALUES(1,0,1,?)",
                                (json.dumps(DEFAULT_RULES),))
+            # Recover the existing head before normalizing its running state.
+            # A page timestamp changes after every image, never queue priority.
+            self._fill_queue_order(connection)
             # Process termination never means a partially converted book is ready.
             connection.execute("UPDATE tc_books SET status='queued' WHERE status='running'")
             connection.execute("UPDATE tc_pages SET status='pending' WHERE status='running'")
@@ -429,6 +439,19 @@ class TranscodingManager:
         # manager. No worker has started yet, so abandoned jobs can be recovered
         # without racing a live writer or removing a registered generation.
         self._recover_abandoned_files()
+
+    @staticmethod
+    def _fill_queue_order(connection):
+        """Give pre-upgrade/resumed queue rows a persistent, deterministic place."""
+        missing = connection.execute("""SELECT book_id FROM tc_books
+            WHERE decision='transcode' AND status IN ('queued','running') AND queue_order=0
+            ORDER BY CASE WHEN status='running' THEN 0 ELSE 1 END,updated_at,book_id""").fetchall()
+        if not missing:
+            return
+        order = connection.execute("SELECT COALESCE(MAX(queue_order),0) FROM tc_books").fetchone()[0]
+        for row in missing:
+            order += 1
+            connection.execute("UPDATE tc_books SET queue_order=? WHERE book_id=?", (order, row["book_id"]))
 
     def _recover_abandoned_files(self):
         if not self.root.exists():
@@ -541,6 +564,10 @@ class TranscodingManager:
 
     def _loop(self):
         while not self.stop_event.is_set() and not self.library.stop_event.is_set():
+            # Clear before checking persisted work: commits during the check
+            # leave a signal for the following wait rather than being lost.
+            self.wake.clear()
+            delay = OPTIMIZATION_IDLE_POLL_SECONDS
             try:
                 while not self.stop_event.is_set() and not self.library.stop_event.is_set():
                     with self.lock:
@@ -561,10 +588,12 @@ class TranscodingManager:
                             self.active_books.discard(selected[0]["id"])
                         raise
             except Exception:
+                delay = 2
                 import logging
                 logging.getLogger("sumi").exception("Transcoding task failed")
-            self.wake.wait(.25)
-            self.wake.clear()
+            if self.stop_event.is_set() or self.library.stop_event.is_set():
+                break
+            self.wake.wait(delay)
 
     def _background_job(self, job, rules):
         try:
@@ -879,32 +908,59 @@ class TranscodingManager:
     def snapshot(self):
         self.library.require_admin()
         with closing(self.library.connect()) as connection:
+            # One read snapshot keeps aggregates consistent while a worker
+            # finishes an image. List rows never materialize full page records.
+            connection.execute("BEGIN")
             rules, revision = self.settings(connection)
-            records = connection.execute("""SELECT t.*,b.title,b.library_id,b.page_count,l.name AS library_name,
-                COALESCE(m.title,b.title) AS display_title FROM tc_books t JOIN books b ON b.id=t.book_id
+            records = connection.execute("""WITH page_totals AS (
+                    SELECT p.book_id,COUNT(*) AS matched_count,
+                        SUM(p.status='success') AS success_count,
+                        SUM(p.status='failed') AS failed_count,
+                        SUM(p.status='running') AS running_count,
+                        MAX(p.active_file<>'' AND (p.active_profile<>p.desired_profile
+                            OR p.active_source<>p.source_version)) AS stale_output
+                    FROM tc_pages p JOIN books b ON b.id=p.book_id
+                    WHERE p.matched=1 AND b.active=1 AND b.removed=0 GROUP BY p.book_id
+                ), active_outputs AS (
+                    SELECT DISTINCT p.book_id,o.file,o.size FROM tc_pages p
+                    JOIN tc_outputs o ON o.file=p.active_file
+                    JOIN books b ON b.id=p.book_id WHERE b.active=1 AND b.removed=0
+                ), output_totals AS (
+                    SELECT book_id,COUNT(*) AS output_count,SUM(size) AS actual_bytes
+                    FROM active_outputs GROUP BY book_id
+                ) SELECT t.*,b.title,b.library_id,b.page_count,l.name AS library_name,
+                    COALESCE(m.title,b.title) AS display_title,
+                    p.matched_count,p.success_count,p.failed_count,p.running_count,p.stale_output,
+                    COALESCE(o.output_count,0) AS output_count,COALESCE(o.actual_bytes,0) AS actual_bytes
+                FROM tc_books t JOIN books b ON b.id=t.book_id
                 JOIN media_libraries l ON l.id=b.library_id LEFT JOIN book_metadata m ON m.book_id=b.id
-                WHERE b.active=1 AND b.removed=0 AND EXISTS(SELECT 1 FROM tc_pages p WHERE p.book_id=b.id AND matched=1)
-                ORDER BY t.updated_at DESC,b.id""").fetchall()
+                JOIN page_totals p ON p.book_id=b.id LEFT JOIN output_totals o ON o.book_id=b.id
+                WHERE b.active=1 AND b.removed=0 ORDER BY t.updated_at DESC,b.id""").fetchall()
+            # Rule reasons have only a few combinations. Deduplicate in SQL
+            # before decoding them instead of parsing JSON once for every page.
+            reasons = {}
+            for row in connection.execute("""SELECT DISTINCT p.book_id,p.reasons FROM tc_pages p
+                    JOIN tc_books t ON t.book_id=p.book_id JOIN books b ON b.id=p.book_id
+                    WHERE p.matched=1 AND b.active=1 AND b.removed=0"""):
+                reasons.setdefault(row["book_id"], set()).update(json.loads(row["reasons"]))
             books = []
             for row in records:
-                pages = list(connection.execute("SELECT * FROM tc_pages WHERE book_id=? AND matched=1", (row["book_id"],)))
-                successful = sum(page["status"] == "success" for page in pages)
-                failed = sum(page["status"] == "failed" for page in pages)
-                running = sum(page["status"] == "running" for page in pages)
-                active = list(connection.execute("""SELECT DISTINCT o.file,o.size FROM tc_pages p JOIN tc_outputs o
-                    ON o.file=p.active_file WHERE p.book_id=?""", (row["book_id"],)))
-                needs = any(page["active_file"] and (page["active_profile"] != page["desired_profile"] or page["active_source"] != page["source_version"]) for page in pages)
-                needs = needs or (row["decision"] == "transcode" and successful < len(pages))
+                matched, successful = row["matched_count"], row["success_count"]
+                failed, running = row["failed_count"], row["running_count"]
+                needs = row["stale_output"] or (row["decision"] == "transcode" and successful < matched)
                 output = dict(id=row["book_id"], title=row["display_title"], library_id=row["library_id"],
                               library_name=row["library_name"], status=row["status"], decision=row["decision"],
-                              matched_count=len(pages), success_count=successful, failed_count=failed,
-                              pending_count=len(pages) - successful - failed - running, running_count=running, page_count=row["page_count"],
-                              reasons=sorted({reason for page in pages for reason in json.loads(page["reasons"])}),
-                              actual_bytes=sum(item["size"] for item in active), output_count=len(active),
-                              output_path=str(self.root / row["book_id"]) if active else "",
+                              matched_count=matched, success_count=successful, failed_count=failed,
+                              pending_count=matched - successful - failed - running, running_count=running, page_count=row["page_count"],
+                              reasons=sorted(reasons.get(row["book_id"], ())),
+                              actual_bytes=row["actual_bytes"], output_count=row["output_count"],
+                              output_path=str(self.root / row["book_id"]) if row["output_count"] else "",
                               error=row["error"], needs_retranscode=bool(needs), published=bool(row["published"]),
                               rule_revision=row["rule_revision"], updated_at=row["updated_at"], completed_at=row["completed_at"])
                 books.append(output)
+            stored_bytes = connection.execute("SELECT COALESCE(SUM(size),0) FROM tc_outputs").fetchone()[0]
+            reclaimable = connection.execute("""SELECT COUNT(*),COALESCE(SUM(o.size),0) FROM tc_outputs o
+                WHERE NOT EXISTS(SELECT 1 FROM tc_pages p WHERE p.active_file=o.file OR p.desired_file=o.file)""").fetchone()
         summary = dict(total_books=len(books), pending_books=sum(item["status"] == "pending" for item in books),
                        processing_books=sum(item["status"] in ("queued", "running") for item in books),
                        queued_books=sum(item["status"] == "queued" for item in books),
@@ -914,11 +970,8 @@ class TranscodingManager:
                        paused_books=sum(item["status"] in ("paused", "cancelled") for item in books),
                        matched_images=sum(item["matched_count"] for item in books), actual_bytes=sum(item["actual_bytes"] for item in books))
         summary["pending_decision_books"] = summary["pending_books"]
-        with closing(self.library.connect()) as connection:
-            summary["stored_bytes"] = connection.execute("SELECT COALESCE(SUM(size),0) FROM tc_outputs").fetchone()[0]
-            reclaimable = connection.execute("""SELECT COUNT(*),COALESCE(SUM(o.size),0) FROM tc_outputs o
-                WHERE NOT EXISTS(SELECT 1 FROM tc_pages p WHERE p.active_file=o.file OR p.desired_file=o.file)""").fetchone()
-            summary["reclaimable_files"], summary["reclaimable_bytes"] = reclaimable[0], reclaimable[1]
+        summary["stored_bytes"] = stored_bytes
+        summary["reclaimable_files"], summary["reclaimable_bytes"] = reclaimable[0], reclaimable[1]
         return dict(rules=rules, revision=revision, summary=summary, books=books)
 
     @staticmethod
@@ -1123,12 +1176,15 @@ class TranscodingManager:
             rules, revision = self.settings(connection)
             if not rules["enabled"]:
                 raise self._error("请先启用图片优化规则。")
+            records = {}
             for book_id in ids:
                 record = connection.execute("""SELECT t.* FROM tc_books t JOIN books b ON b.id=t.book_id
                     WHERE t.book_id=? AND b.active=1 AND b.removed=0 AND
                     EXISTS(SELECT 1 FROM tc_pages p WHERE p.book_id=b.id AND p.matched=1)""", (book_id,)).fetchone()
                 if record is None:
                     raise self._error("部分所选作品不在优化名单中，请刷新后重试。", 404)
+                records[book_id] = record
+            next_order = connection.execute("SELECT COALESCE(MAX(queue_order),0) FROM tc_books").fetchone()[0]
             for book_id in ids:
                 if action == "original":
                     connection.execute("UPDATE tc_books SET decision='original',status='original',published=1,error='',generation=generation+1,updated_at=? WHERE book_id=?", (time.time(), book_id))
@@ -1138,7 +1194,12 @@ class TranscodingManager:
                                        ("paused" if action == "pause" else "cancelled", time.time(), book_id))
                     connection.execute("UPDATE tc_pages SET status='pending' WHERE book_id=? AND status='running'", (book_id,))
                 else:
-                    connection.execute("UPDATE tc_books SET decision='transcode',status='queued',error='',generation=generation+1,updated_at=? WHERE book_id=?", (time.time(), book_id))
+                    record = records[book_id]
+                    order = record["queue_order"]
+                    if record["status"] not in ("queued", "running") or not order:
+                        next_order += 1
+                        order = next_order
+                    connection.execute("UPDATE tc_books SET decision='transcode',status='queued',error='',generation=generation+1,updated_at=?,queue_order=? WHERE book_id=?", (time.time(), order, book_id))
                     for page in connection.execute("SELECT page_key,desired_file FROM tc_pages WHERE book_id=? AND matched=1 AND status='success'", (book_id,)).fetchall():
                         if not page["desired_file"] or not self._output_exists(page["desired_file"]):
                             connection.execute("UPDATE tc_pages SET status='pending',desired_file='',desired_bytes=0 WHERE book_id=? AND page_key=?", (book_id, page["page_key"]))
@@ -1267,12 +1328,21 @@ class TranscodingManager:
                 rules, revision = self.settings(connection)
                 if not rules["enabled"] or self.stop_event.is_set() or self.library.stop_event.is_set():
                     return None
+                # Normal selection is read-only. Only legacy/unordered jobs
+                # need a short write transaction to persist their priority.
+                missing = connection.execute("""SELECT 1 FROM tc_books
+                    WHERE status IN ('queued','running') AND decision='transcode'
+                        AND queue_order=0 LIMIT 1""").fetchone()
+                if missing:
+                    with connection:
+                        connection.execute("BEGIN IMMEDIATE")
+                        self._fill_queue_order(connection)
                 excluded = sorted(self.active_books)
                 extra = " AND b.id NOT IN (" + ",".join("?" for _ in excluded) + ")" if excluded else ""
                 job = connection.execute("""SELECT t.generation,t.rule_revision,b.*,p.page_key,p.source_version,p.desired_profile,p.inspect_error
                     FROM tc_books t JOIN books b ON b.id=t.book_id JOIN tc_pages p ON p.book_id=b.id
                     WHERE t.status IN ('queued','running') AND t.decision='transcode' AND b.active=1 AND b.removed=0
-                    AND p.matched=1 AND p.status='pending'""" + extra + " ORDER BY t.updated_at,b.id,p.page_index LIMIT 1", excluded).fetchone()
+                    AND p.matched=1 AND p.status='pending'""" + extra + " ORDER BY t.queue_order,b.id,p.page_index LIMIT 1", excluded).fetchone()
                 if not job:
                     return None
                 job = dict(job)
@@ -1392,7 +1462,6 @@ class TranscodingManager:
                 continue
 
     def _convert(self, job, rules):
-        from server import MAX_PAGE_BYTES
         if job["inspect_error"]:
             raise self._error(job["inspect_error"], 422)
         folder = self._storage_directory(job["id"])
@@ -1416,11 +1485,11 @@ class TranscodingManager:
                     total = 0
                     while chunk := source.read(MIB):
                         total += len(chunk)
-                        if total > MAX_PAGE_BYTES:
-                            raise self._error("图片超过单任务读取上限。", 422)
                         if not self._job_current(job["id"], job["generation"]):
                             raise self._error("任务已暂停或取消。", 409)
                         sink.write(chunk)
+                    if total == 0:
+                        raise self._error("图片文件为空，无法优化。", 422)
             if getattr(sys, "frozen", False):
                 prefix = [sys.executable, "--transcode-worker"]
             else:

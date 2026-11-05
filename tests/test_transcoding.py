@@ -113,6 +113,30 @@ class TranscodingFixture(unittest.TestCase):
 
 
 class TranscodingTests(TranscodingFixture):
+    def test_image_above_64_mib_reaches_and_completes_real_optimization(self):
+        target = self.album / "1.png"
+        with target.open("r+b") as source:
+            source.truncate(64 * 1024 * 1024 + 137)
+        with target.open("rb") as source:
+            expected_digest = hashlib.file_digest(source, "sha256").hexdigest()
+        self.scan()
+        self.enable(file_size_mb=64, max_source_pixels=0)
+        row = next(row for row in self.rows("tc_pages") if row["page_key"].endswith("/1.png"))
+        self.assertGreater(row["size"], 64 * 1024 * 1024)
+        self.assertEqual(row["inspect_error"], "")
+        self.assertTrue(row["matched"])
+        self.action("transcode")
+        self.finish()
+        outputs = self.rows("tc_outputs")
+        self.assertEqual(len(outputs), 1)
+        self.assertLess(outputs[0]["size"], target.stat().st_size)
+        data, mime, _ = self.app.image(self.book_id, 0)
+        self.assertEqual(mime, "image/webp")
+        with Image.open(BytesIO(data)) as decoded:
+            self.assertEqual(decoded.size, (64, 96))
+        with target.open("rb") as source:
+            self.assertEqual(hashlib.file_digest(source, "sha256").hexdigest(), expected_digest)
+
     def test_notification_summary_reads_metadata_only_and_reports_scan_completion(self):
         self.enable()
         detailed = self.manager.snapshot()["summary"]

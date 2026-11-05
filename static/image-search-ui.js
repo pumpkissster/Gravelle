@@ -84,7 +84,7 @@
     function cancelQuery() { queryGate.cancel(); state.searching = false; renderSearch(); }
     function clearResults() { state.results = []; state.searched = false; renderResults(); }
     function stopStatus() { clearTimeout(state.timer); state.timer = null; }
-    function scheduleStatus() { stopStatus(); if (state.active || state.managing) state.timer = setTimeout(() => loadStatus(), state.status?.indexing ? 2500 : 7000); }
+    function scheduleStatus() { stopStatus(); if (!document.hidden && (state.active || state.managing)) state.timer = setTimeout(() => loadStatus(), state.status?.indexing ? 2500 : 7000); }
     function renderSearch() {
       search.message.textContent = statusMessage(state.status, isAdmin());
       search.manage.hidden = !isAdmin() || Boolean(state.status?.enabled && state.status?.available);
@@ -277,6 +277,7 @@
       updateFailureControls();
     }
     async function loadStatus(manual = false) {
+      if (document.hidden) { stopStatus(); return; }
       if (!(state.active || state.managing) || state.statusRequest || state.busy || failures.busy) { scheduleStatus(); return; }
       const generation = state.generation; const request = new AbortController(); state.statusRequest = request;
       try {
@@ -297,6 +298,10 @@
       catch (failure) { if (generation === state.generation && failure.status !== 401) error(settings.error, failure.message || '操作失败，请重试。'); }
       finally { if (generation === state.generation) { state.busy = false; renderSearch(); renderSettings(); if (state.managing && Number(state.status?.summary?.failed)) loadFailures(1); scheduleStatus(); } }
     }
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) { stopStatus(); state.statusRequest?.abort(); state.statusRequest = null; }
+      else if (state.active || state.managing) loadStatus(true);
+    });
     renderSearch(); renderSettings();
     return {
       showSearch() { if (state.active) return; state.active = true; loadStatus(true); },

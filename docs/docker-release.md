@@ -6,16 +6,16 @@
 
 ## 从 Docker Hub 安装
 
-镜像仓库为 [pumpkissster/gravelle](https://hub.docker.com/r/pumpkissster/gravelle)，当前版本为 `0.9.2`，也提供 `latest` 标签。Docker 会按宿主机选择 amd64 或 arm64 镜像。
+镜像仓库为 [pumpkissster/gravelle](https://hub.docker.com/r/pumpkissster/gravelle)，当前版本为 `0.9.4`，也提供 `latest` 标签。Docker 会按宿主机选择 amd64 或 arm64 镜像。
 
-可从 [GitHub Releases](https://github.com/pumpkissster/Gravelle/releases/latest) 下载 `Gravelle-Docker-0.9.2.zip` 配置包，更新内容见 [0.9.2 发行页](https://github.com/pumpkissster/Gravelle/releases/tag/v0.9.2)。
+可从 [GitHub Releases](https://github.com/pumpkissster/Gravelle/releases/latest) 下载 `Gravelle-Docker-0.9.4.zip` 配置包，更新内容见 [0.9.4 发行页](https://github.com/pumpkissster/Gravelle/releases/tag/v0.9.4)。
 
 1. 将仓库中的 [compose.yaml](../compose.yaml) 和 [.env.example](../.env.example) 保存到同一固定项目目录，或继续使用已下载的配置包。
 2. 将 `.env.example` 复制为 `.env`，填写以下项目：
 
 | 配置 | 内容 |
 | --- | --- |
-| `GRAVELLE_IMAGE` | `pumpkissster/gravelle:0.9.2` |
+| `GRAVELLE_IMAGE` | `pumpkissster/gravelle:0.9.4` |
 | `COMICS_PATH` | 宿主机写真根目录，例如 `/path/to/photos` |
 | `DATA_PATH` | 宿主机资料目录，例如 `/path/to/data`；已有安装保留原值 |
 | `PUID` / `PGID` | 对作品目录有读取权限、对资料目录有读写权限的用户 UID / GID |
@@ -70,7 +70,7 @@ docker compose -f compose.build.yaml -f compose.optimization.yaml up -d --build
 docker compose -f compose.build.yaml -f compose.optimization.yaml ps
 ```
 
-使用 Docker Hub 镜像时，将 `.env` 的 `GRAVELLE_IMAGE` 设为 `pumpkissster/gravelle:0.9.2`，再使用：
+使用 Docker Hub 镜像时，将 `.env` 的 `GRAVELLE_IMAGE` 设为 `pumpkissster/gravelle:0.9.4`，再使用：
 
 ```sh
 docker compose -f compose.yaml -f compose.optimization.yaml config

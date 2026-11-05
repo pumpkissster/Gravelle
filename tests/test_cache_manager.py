@@ -68,6 +68,21 @@ class CacheManagerTests(TranscodingFixture):
                 self.cache.clear(body)
         self.assertNotIn("pdf", [row["kind"] for row in self.cache.snapshot()["categories"]])
 
+    def test_idle_maintenance_has_a_long_fallback_and_producers_wake_it(self):
+        waits = []
+        def wait(seconds):
+            waits.append(seconds)
+            self.cache.stop_event.set()
+            return False
+        with patch.object(self.cache.wake, "wait", side_effect=wait), patch.object(self.cache, "maintain") as maintain:
+            self.cache._loop()
+        self.assertEqual(waits, [300])
+        maintain.assert_not_called()
+        self.cache.stop_event.clear()
+        self.cache.wake.clear()
+        self.cache.enforce_cover_limit()
+        self.assertTrue(self.cache.wake.is_set())
+
     def test_capacity_combines_two_generated_cover_types_and_protects_upload_and_optimized(self):
         self.enable()
         self.action("transcode")

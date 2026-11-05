@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const { defaults, normalize, paginate, catalogWindow, createQueue, createCache } = require('../static/performance-settings.js');
 const Performance = require('../static/performance-settings.js');
 const tick = () => new Promise(resolve => setImmediate(resolve));
+const serverSettings = (task = 1, scan = 300) => ({ taskConcurrency: task, maxTaskConcurrency: 8, scanIntervalSeconds: scan, maxScanIntervalSeconds: 604800 });
 
 test('device preferences accept bounded integers and reject invalid saved values', () => {
   assert.deepEqual(normalize(), defaults);
@@ -122,14 +123,16 @@ test('administrator task controls load once, preserve unfinished edits, save exp
     post: (path, body) => { writes.push({ path, body }); return new Promise(resolve => { resolveSave = resolve; }); }, isAdmin: () => true
   });
   Performance.setUser({ id: 1, role: 'admin' }); Performance.render(); Performance.render(); await tick();
-  assert.equal(fixture.panel.children.length, 2);
-  assert.deepEqual(fixture.panel.children.map(card => card.children[0].textContent), ['后台任务', '加载与列表']);
+  assert.equal(fixture.panel.children.length, 3);
+  assert.deepEqual(fixture.panel.children.map(card => card.children[0].textContent), ['后台任务', '自动扫描', '加载与列表']);
   const input = fixture.find(item => item.id === 'performance-taskConcurrency');
   const form = fixture.find(item => item.tag === 'form');
   const save = fixture.find(item => item.type === 'submit');
   assert.equal(reads, 1); assert.equal(input.disabled, true); assert.equal(save.disabled, true); assert.equal(input.max, 8);
   resolveRead({ taskConcurrency: 3, maxTaskConcurrency: 8 }); await tick();
   assert.equal(input.value, 3); assert.equal(input.disabled, false);
+  assert.equal(fixture.panel.children[1].hidden, true, 'legacy servers hide unsupported automatic scanning');
+  assert.equal(fixture.find(item => item.id === 'performance-scanIntervalSeconds').disabled, true);
   input.value = '4'; const originalChildren = fixture.panel.children.slice(); Performance.render();
   assert.deepEqual(fixture.panel.children, originalChildren); assert.equal(input.value, '4'); assert.equal(reads, 1); assert.equal(writes.length, 0);
   const saving = form.handlers.submit({ preventDefault() {} });
@@ -191,6 +194,118 @@ test('a save response from the previous administrator cannot replace the next ac
   resolveSave({ taskConcurrency: 8, maxTaskConcurrency: 8 }); await saving;
   assert.equal(currentInput.value, 4); assert.equal(currentInput.disabled, false);
   assert.equal(fixture.find(item => item.className === 'performance-server-status').textContent, '');
+}));
+
+test('automatic scanning is a separate administrator card with explicit partial save and a zero interval', async () => withPerformanceFixture(async (fixture, records) => {
+  let resolveSave; const writes = []; let reads = 0;
+  Performance.configureServer({ api: async () => { reads++; return serverSettings(2, 300); }, post: (path, body) => { writes.push({ path, body }); return new Promise(resolve => { resolveSave = resolve; }); }, isAdmin: () => true });
+  Performance.setUser({ id: 1, role: 'admin' }); Performance.render(); await tick();
+  const group = fixture.panel.children.find(card => card.children[0].textContent === '自动扫描');
+  const input = fixture.find(item => item.id === 'performance-scanIntervalSeconds');
+  const form = fixture.find(item => item.id === 'performance-scan-form');
+  const taskForm = fixture.find(item => item.id === 'performance-task-form');
+  const save = fixture.find(item => item.type === 'submit', group);
+  assert.equal(group.hidden, false); assert.equal(input.value, 300); assert.equal(input.min, 0); assert.equal(input.max, 604800);
+  assert.equal(input.disabled, false); assert.equal(save.className, 'button button-primary');
+  assert.ok(fixture.find(item => item.textContent === '自动扫描间隔（秒）'));
+  assert.ok(fixture.find(item => item.textContent === '0 关闭定时扫描，保存后生效'));
+  input.value = '0'; const originalCards = fixture.panel.children.slice(); Performance.render();
+  assert.equal(input.value, '0'); assert.deepEqual(fixture.panel.children, originalCards); assert.equal(reads, 1); assert.equal(writes.length, 0);
+  const saving = form.handlers.submit({ preventDefault() {} });
+  await form.handlers.submit({ preventDefault() {} }); await taskForm.handlers.submit({ preventDefault() {} });
+  assert.equal(input.disabled, true); assert.equal(save.textContent, '保存中…');
+  assert.equal(fixture.find(item => item.id === 'performance-taskConcurrency').disabled, true);
+  assert.deepEqual(writes, [{ path: '/api/performance', body: { scanIntervalSeconds: 0 } }]);
+  resolveSave(serverSettings(2, 0)); await saving;
+  assert.equal(input.value, 0); assert.equal(input.disabled, false);
+  assert.equal(fixture.find(item => item.className === 'performance-server-status', group).textContent, '已保存');
+  Performance.update({ bookPageSize: 20 });
+  assert.equal(Object.hasOwn(Performance.get(), 'scanIntervalSeconds'), false);
+  for (const value of records.values()) {
+    assert.equal(Object.hasOwn(JSON.parse(value), 'scanIntervalSeconds'), false);
+    assert.equal(Object.hasOwn(JSON.parse(value), 'taskConcurrency'), false);
+  }
+}));
+
+test('saving either server option preserves an unfinished edit in the other option', async () => withPerformanceFixture(async fixture => {
+  const writes = [];
+  Performance.configureServer({ api: async () => serverSettings(2, 300), post: async (_path, body) => { writes.push(body); return writes.length === 1 ? serverSettings(body.taskConcurrency, 1200) : serverSettings(6, body.scanIntervalSeconds); }, isAdmin: () => true });
+  Performance.setUser({ id: 1, role: 'admin' }); Performance.render(); await tick();
+  const task = fixture.find(item => item.id === 'performance-taskConcurrency');
+  const scan = fixture.find(item => item.id === 'performance-scanIntervalSeconds');
+  task.value = '3'; scan.value = '600';
+  await fixture.find(item => item.id === 'performance-task-form').handlers.submit({ preventDefault() {} });
+  assert.equal(task.value, 3); assert.equal(scan.value, '600', 'full response must not overwrite the scan draft');
+  task.value = '5';
+  await fixture.find(item => item.id === 'performance-scan-form').handlers.submit({ preventDefault() {} });
+  assert.equal(task.value, '5', 'full response must not overwrite the task draft'); assert.equal(scan.value, 600);
+  assert.deepEqual(writes, [{ taskConcurrency: 3 }, { scanIntervalSeconds: 600 }]);
+  Performance.render(); assert.equal(task.value, '5'); assert.equal(scan.value, 600);
+}));
+
+test('automatic scanning validates interval bounds and rolls back failed or incomplete saves', async () => withPerformanceFixture(async fixture => {
+  let mode = 'failure'; const writes = [];
+  Performance.configureServer({ api: async () => serverSettings(2, 300), post: async (_path, body) => { writes.push(body); if (mode === 'failure') throw new Error('服务暂时不可用'); if (mode === 'incomplete') return { taskConcurrency: 2, maxTaskConcurrency: 8 }; return serverSettings(2, body.scanIntervalSeconds); }, isAdmin: () => true });
+  Performance.setUser({ id: 1, role: 'admin' }); Performance.render(); await tick();
+  const group = fixture.panel.children.find(card => card.children[0].textContent === '自动扫描');
+  const input = fixture.find(item => item.id === 'performance-scanIntervalSeconds');
+  const form = fixture.find(item => item.id === 'performance-scan-form');
+  for (const value of ['', ' ', '-1', '1.5', '604801', 'NaN', 'Infinity']) {
+    input.value = value; await form.handlers.submit({ preventDefault() {} }); assert.equal(input.value, 300);
+  }
+  assert.equal(writes.length, 0);
+  input.value = '600'; await form.handlers.submit({ preventDefault() {} });
+  assert.equal(input.value, 300); assert.equal(input.disabled, false);
+  assert.match(fixture.find(item => item.className?.includes('performance-server-status'), group).textContent, /保存自动扫描设置失败：服务暂时不可用/);
+  mode = 'incomplete'; input.value = '600'; await form.handlers.submit({ preventDefault() {} });
+  assert.equal(input.value, 300); assert.equal(group.hidden, false);
+  assert.match(fixture.find(item => item.className?.includes('performance-server-status'), group).textContent, /未返回自动扫描设置/);
+  mode = 'success'; input.value = '604800'; await form.handlers.submit({ preventDefault() {} }); assert.equal(input.value, 604800);
+  input.value = '0'; await form.handlers.submit({ preventDefault() {} }); assert.equal(input.value, 0);
+}));
+
+test('legacy servers keep concurrency usable and never send unsupported automatic scanning changes', async () => withPerformanceFixture(async fixture => {
+  const writes = [];
+  Performance.configureServer({ api: async () => ({ taskConcurrency: 2, maxTaskConcurrency: 8 }), post: async (_path, body) => { writes.push(body); return { ...body, maxTaskConcurrency: 8 }; }, isAdmin: () => true });
+  Performance.setUser({ id: 1, role: 'admin' }); Performance.render(); await tick();
+  const scanGroup = fixture.panel.children.find(card => card.children[0].textContent === '自动扫描');
+  const scan = fixture.find(item => item.id === 'performance-scanIntervalSeconds');
+  assert.equal(scanGroup.hidden, true); assert.equal(scan.disabled, true);
+  scan.value = '100'; await fixture.find(item => item.id === 'performance-scan-form').handlers.submit({ preventDefault() {} });
+  assert.equal(writes.length, 0);
+  fixture.find(item => item.id === 'performance-taskConcurrency').value = '4';
+  await fixture.find(item => item.id === 'performance-task-form').handlers.submit({ preventDefault() {} });
+  assert.deepEqual(writes, [{ taskConcurrency: 4 }]);
+}));
+
+test('automatic scanning rejects malformed capability data without enabling editable server controls', async () => withPerformanceFixture(async fixture => {
+  const malformed = [serverSettings(2, -1), serverSettings(2, 604801), serverSettings(2, 1.5), serverSettings(2, true), serverSettings(2, '300'), { ...serverSettings(), maxScanIntervalSeconds: '604800' }, { taskConcurrency: 2, maxTaskConcurrency: 8, scanIntervalSeconds: 300 }, { taskConcurrency: 2, maxTaskConcurrency: 8, maxScanIntervalSeconds: 604800 }];
+  for (const value of malformed) {
+    Performance.configureServer({ api: async () => value, post: async () => { assert.fail('Malformed state must not save'); }, isAdmin: () => true });
+    Performance.setUser({ id: 1, role: 'admin' }); Performance.render(); await tick();
+    assert.equal(fixture.find(item => item.id === 'performance-taskConcurrency').disabled, true);
+    assert.equal(fixture.find(item => item.id === 'performance-scanIntervalSeconds').disabled, true);
+    assert.match(fixture.find(item => item.className?.includes('performance-server-status')).textContent, /自动扫描设置无效/);
+  }
+}));
+
+test('late scan reads and saves cannot populate a child account or replace a different administrator', async () => withPerformanceFixture(async fixture => {
+  let resolveRead; let resolveSave; let reads = 0;
+  Performance.configureServer({ api: () => ++reads === 1 ? new Promise(resolve => { resolveRead = resolve; }) : Promise.resolve(serverSettings(3, reads === 2 ? 600 : 1200)), post: () => new Promise(resolve => { resolveSave = resolve; }), isAdmin: () => true });
+  Performance.setUser({ id: 1, role: 'admin' }); Performance.render(); await tick();
+  Performance.setUser({ id: 2, role: 'user' }); Performance.render();
+  resolveRead(serverSettings(8, 86400)); await tick();
+  assert.equal(fixture.find(item => item.id === 'performance-scanIntervalSeconds'), null);
+  Performance.setUser({ id: 1, role: 'admin' }); Performance.render(); await tick();
+  fixture.find(item => item.id === 'performance-scanIntervalSeconds').value = '900';
+  const oldForm = fixture.find(item => item.id === 'performance-scan-form');
+  const saving = oldForm.handlers.submit({ preventDefault() {} });
+  Performance.setUser({ id: 3, role: 'admin' }); Performance.render(); await tick();
+  const current = fixture.find(item => item.id === 'performance-scanIntervalSeconds'); assert.equal(current.value, 1200);
+  resolveSave(serverSettings(8, 86400)); await saving;
+  assert.equal(current.value, 1200); assert.equal(current.disabled, false);
+  await oldForm.handlers.submit({ preventDefault() {} });
+  assert.equal(current.value, 1200, 'detached forms from another account stay inert');
 }));
 
 test('pagination clamps after filtering and handles empty catalogs without invalid pages', () => {

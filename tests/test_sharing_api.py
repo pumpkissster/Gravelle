@@ -1,5 +1,5 @@
 """Real HTTP boundaries for password protected encrypted guest reading."""
-from contextlib import closing
+from contextlib import closing, contextmanager
 import base64
 import hashlib
 import http.client
@@ -367,13 +367,14 @@ class SharingAPITests(unittest.TestCase):
     def test_expiry_or_closure_during_image_read_does_not_release_ciphertext(self):
         result = self.create()
         _, _, _, cookie = self.unlock(result)
-        original = self.app.image
+        original = self.app.open_image
+        @contextmanager
         def expire(*args,**kwargs):
-            data = original(*args,**kwargs)
-            with closing(self.app.connect()) as c,c:
-                c.execute('UPDATE shares SET expires_at=? WHERE id=?',(time.time()-1,result['share']['id']))
-            return data
-        with patch.object(self.app,'image',side_effect=expire):
+            with original(*args,**kwargs) as source:
+                with closing(self.app.connect()) as c,c:
+                    c.execute('UPDATE shares SET expires_at=? WHERE id=?',(time.time()-1,result['share']['id']))
+                yield source
+        with patch.object(self.app,'open_image',side_effect=expire):
             status, body, _ = self.request('/api/share/'+result['share']['token']+'/pages/0',cookie=cookie)
         self.assertEqual(status,410,body)
         self.assertIsInstance(body,dict)
