@@ -38,6 +38,77 @@ function optimizationFixture() {
 }
 const optimizationFlush = () => new Promise(resolve => setImmediate(resolve));
 
+test('an older optimization server shows the restart hint and keeps existing actions available', async () => {
+  const fixture = optimizationFixture();
+  const snapshot = {
+    rules: { ...Transcoding.defaultRules, enabled: true },
+    books: [{ id: 'a1', title: '待处理作品', library_id: 'a', status: 'pending', matched_count: 1 }]
+  };
+  const ui = Transcoding.create({ ...fixture, api: async () => snapshot, toast() {},
+    post: async () => { assert.fail('An unsupported action must not be sent'); } });
+  const find = predicate => fixture.find(fixture.host, predicate);
+  try {
+    ui.show('ignored');
+    await optimizationFlush();
+    assert.equal(find(item => item.id === 'transcode-tab-ignored').hidden, true);
+    assert.equal(find(item => item.id === 'transcode-tab-tasks').attributes['aria-selected'], 'true');
+    assert.equal(find(item => item.textContent?.includes('请重启服务并刷新页面')).hidden, false);
+    const input = find(item => item.dataset.transcodeId === 'a1');
+    input.checked = true;
+    await input.dispatch('change');
+    assert.equal(find(item => item.dataset.action === 'ignore').hidden, true);
+    assert.equal(find(item => item.dataset.action === 'original').disabled, false);
+  } finally { ui.reset(); }
+});
+
+test('ignored works have a separate list and can be restored with rules disabled', async () => {
+  const fixture = optimizationFixture();
+  const book = { id: 'a1', title: '待处理作品', library_id: 'a', status: 'pending', matched_count: 1 };
+  const ignored = { ...book, status: 'ignored' };
+  let snapshot = { rules: { ...Transcoding.defaultRules, enabled: true }, books: [book], ignored_books: [] };
+  let resolvePoll;
+  let deferPoll = false;
+  const calls = [];
+  const ui = Transcoding.create({ ...fixture,
+    api: async () => deferPoll ? new Promise(resolve => { resolvePoll = resolve; }) : snapshot,
+    toast() {},
+    post: async (url, body) => {
+      calls.push({ url, ...body });
+      snapshot = { rules: Transcoding.defaultRules, books: [], ignored_books: body.action === 'ignore' ? [ignored] : [] };
+      return snapshot;
+    } });
+  const find = predicate => fixture.find(fixture.document.body, predicate);
+  const action = name => find(item => item.dataset.action === name);
+  const select = () => find(item => item.dataset.transcodeId === book.id);
+  const selectBook = async () => { const input = select(); input.checked = true; await input.dispatch('change'); };
+  const confirm = async label => { await find(item => item.tagName === 'button' && item.textContent === label).dispatch('click'); await optimizationFlush(); };
+  try {
+    ui.show();
+    await optimizationFlush();
+    await selectBook();
+    assert.equal(action('ignore').disabled, false);
+    const beforeIgnore = snapshot;
+    deferPoll = true;
+    const poll = ui.refresh();
+    await action('ignore').dispatch('click');
+    await confirm('确认忽略');
+    deferPoll = false;
+    resolvePoll(beforeIgnore);
+    await poll;
+    assert.equal(select(), null);
+    await find(item => item.id === 'transcode-tab-ignored').dispatch('click');
+    assert.equal(action('ignore').hidden, true);
+    assert.equal(action('restore').hidden, false);
+    await selectBook();
+    assert.equal(action('restore').disabled, false);
+    await action('restore').dispatch('click');
+    await confirm('确认取消忽略');
+    assert.equal(select(), null);
+    assert.deepEqual(calls.map(({ action, ids }) => [action, ids]), [['ignore', ['a1']], ['restore', ['a1']]]);
+    assert.deepEqual(Routes.parse('#/settings/transcoding?tab=ignored'), { view: 'settings', section: 'transcoding', tab: 'ignored' });
+  } finally { ui.reset(); }
+});
+
 test('optimization refreshes active jobs promptly and backs off when the queue is idle', () => {
   assert.equal(Transcoding.refreshDelay(null), 5000);
   assert.equal(Transcoding.refreshDelay({ summary: { processing_books: 2 }, books: [] }), 5000);
@@ -153,51 +224,6 @@ test('actual derivative storage is formatted as bytes without estimating origina
   assert.equal(Transcoding.bytes(2 * 1024 * 1024), '2 MiB');
   assert.equal(Transcoding.defaultRules.enabled, false);
   assert.equal(Transcoding.defaultRules.workers, 1);
-});
-
-test('historical pending works on login only establish a reminder baseline', () => {
-  const tracker = Transcoding.createPendingTracker();
-  assert.equal(tracker.observe({ pending_book_ids: ['old'], scanning: false, last_scan: 1 }), null);
-  assert.equal(tracker.observe({ pending_book_ids: ['old'], scanning: false, last_scan: 1 }), null);
-  tracker.reset();
-  assert.equal(tracker.observe({ pending_book_ids: ['another-user'], scanning: false, last_scan: 8 }), null);
-});
-
-test('a fast completed import reports only new pending works once', () => {
-  const tracker = Transcoding.createPendingTracker();
-  tracker.observe({ pending_book_ids: ['old'], scanning: false, last_scan: 1, libraries: [{ id: 'a', last_scan: 1 }] });
-  tracker.expectScan();
-  const completed = { pending_book_ids: ['old', 'new'], scanning: false, last_scan: 2, libraries: [{ id: 'a', last_scan: 1 }, { id: 'b', last_scan: 2 }] };
-  assert.deepEqual(tracker.observe(completed), { ids: ['new'], count: 1 });
-  assert.equal(tracker.observe(completed), null);
-  assert.equal(tracker.observe({ ...completed, last_scan: 3 }), null);
-});
-
-test('partial scan results wait until completion and are summarized together', () => {
-  const tracker = Transcoding.createPendingTracker();
-  tracker.observe({ pending_book_ids: ['old'], scanning: false, last_scan: 1 });
-  assert.equal(tracker.observe({ pending_book_ids: ['old', 'first'], scanning: true, last_scan: 1 }), null);
-  assert.equal(tracker.observe({ pending_book_ids: ['old', 'first', 'second'], scanning: true, last_scan: 2 }), null);
-  assert.deepEqual(tracker.observe({ pending_book_ids: ['old', 'first', 'second'], scanning: false, last_scan: 3 }), { ids: ['first', 'second'], count: 2 });
-});
-
-test('rules and task changes update the baseline without inventing a scan popup', () => {
-  const tracker = Transcoding.createPendingTracker();
-  tracker.observe({ pending_book_ids: [], scanning: false, last_scan: 1 });
-  assert.equal(tracker.observe({ pending_book_ids: ['rule-change'], scanning: false, last_scan: 1 }), null);
-  assert.equal(tracker.observe({ pending_book_ids: ['rule-change'], scanning: false, last_scan: 2 }), null);
-  tracker.observe({ pending_book_ids: [], scanning: false, last_scan: 2 });
-  assert.deepEqual(tracker.observe({ pending_book_ids: ['rule-change'], scanning: false, last_scan: 3 }), { ids: ['rule-change'], count: 1 });
-});
-
-test('login during an existing scan stays quiet unless the administrator starts a new scan', () => {
-  const tracker = Transcoding.createPendingTracker();
-  tracker.observe({ pending_book_ids: ['partial'], scanning: true, last_scan: 1 });
-  assert.equal(tracker.observe({ pending_book_ids: ['partial', 'rest'], scanning: false, last_scan: 2 }), null);
-  tracker.reset();
-  tracker.observe({ pending_book_ids: ['partial'], scanning: true, last_scan: 1 });
-  tracker.expectScan();
-  assert.deepEqual(tracker.observe({ pending_book_ids: ['partial', 'new'], scanning: false, last_scan: 2 }), { ids: ['new'], count: 1 });
 });
 
 test('heartbeat timestamps do not replace displayed rows, but progress and errors do', () => {

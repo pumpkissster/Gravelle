@@ -281,12 +281,17 @@ test('passwords are fetched only on demand for active or closed records and visi
     assert.ok(nodesIn(cards[0]).some(node => node.textContent === '访问 12 次'));
     assert.ok(nodesIn(cards[1]).some(node => node.textContent === '访问 3 次'));
     const old = nodesIn(cards[2]).find(node => node.textContent === '原密码不可查看'); assert.equal(old.disabled, true);
-    const reveal = nodesIn(cards[0]).find(node => node.textContent === '查看密码'); const field = nodesIn(cards[0]).find(node => node.className === 'sharing-password-value'); const panel = nodesIn(cards[0]).find(node => node.className === 'sharing-password-panel');
+    const reveal = nodesIn(cards[0]).find(node => node.textContent === '查看密码'); const field = nodesIn(cards[0]).find(node => node.getAttribute('aria-label') === '分享访问密码'); const panel = field.parentElement.parentElement;
     await reveal.emit('click'); assert.deepEqual(posts[0], { path: '/api/shares/' + shares[0].id + '/password', data: {} }); assert.equal(field.value, 'view-password-1'); assert.equal(panel.hidden, false); assert.equal(reveal.textContent, '隐藏密码'); assert.equal(reveal.getAttribute('aria-expanded'), 'true');
     reveal.emit('click'); assert.equal(field.value, ''); assert.equal(panel.hidden, true); assert.equal(reveal.textContent, '查看密码');
     await reveal.emit('click'); assert.equal(posts.length, 2); assert.equal(field.value, 'view-password-2');
     const closedReveal = nodesIn(cards[1]).find(node => node.textContent === '查看密码'); await closedReveal.emit('click'); assert.equal(posts[2].path, '/api/shares/' + shares[1].id + '/password');
-    ui.hideManagement(); for (const card of cards.slice(0, 2)) { assert.equal(nodesIn(card).find(node => node.className === 'sharing-password-value').value, ''); assert.equal(nodesIn(card).find(node => node.className === 'sharing-password-panel').hidden, true); }
+    ui.hideManagement();
+    for (const card of cards.slice(0, 2)) {
+      const password = nodesIn(card).find(node => node.getAttribute('aria-label') === '分享访问密码');
+      assert.equal(password.value, '');
+      assert.equal(password.parentElement.parentElement.hidden, true);
+    }
     assert.ok(!nodesIn(host).some(node => /剩余/.test(node.textContent)));
   } finally { ui.reset(); }
 });
@@ -297,7 +302,7 @@ test('password requests ignore duplicate clicks and recover after an error witho
   const ui = Management.create({ document: f.doc, window: f.win, isAdmin: () => true, api: async () => ({ shares: [share] }), post: async () => { calls++; return calls === 1 ? pending : { password: 'recovered-password' }; } });
   try {
     ui.showManagement(); await tick(); const host = f.doc.body.children.find(node => node.tagName === 'SECTION');
-    const reveal = nodesIn(host).find(node => node.textContent === '查看密码'); const field = nodesIn(host).find(node => node.className === 'sharing-password-value');
+    const reveal = nodesIn(host).find(node => node.textContent === '查看密码'); const field = nodesIn(host).find(node => node.getAttribute('aria-label') === '分享访问密码');
     const first = reveal.emit('click'); await reveal.emit('click'); assert.equal(calls, 1); assert.equal(reveal.disabled, true);
     reject(new Error('暂时无法获取密码')); await first; assert.equal(reveal.disabled, false); assert.equal(reveal.textContent, '查看密码'); assert.equal(field.value, '');
     assert.equal(nodesIn(host).find(node => node.className === 'sharing-password-error').textContent, '暂时无法获取密码');
@@ -310,7 +315,7 @@ test('manual reload clears visible passwords immediately while automatic refresh
   const ui = Management.create({ document: f.doc, window: f.win, isAdmin: () => true, api: async () => { loads++; return { shares: [share] }; }, post: async () => ({ password: 'visible-password' }) });
   try {
     ui.showManagement(); await tick(); const host = f.doc.body.children.find(node => node.tagName === 'SECTION'); const autoRefresh = [...f.timers.values()][0];
-    const reveal = nodesIn(host).find(node => node.textContent === '查看密码'); await reveal.emit('click'); const field = nodesIn(host).find(node => node.className === 'sharing-password-value');
+    const reveal = nodesIn(host).find(node => node.textContent === '查看密码'); await reveal.emit('click'); const field = nodesIn(host).find(node => node.getAttribute('aria-label') === '分享访问密码');
     autoRefresh(); await tick(); assert.equal(loads, 1); assert.equal(field.value, 'visible-password');
     const reload = nodesIn(host).find(node => node.textContent === '刷新').emit('click'); assert.equal(field.value, ''); await reload; assert.equal(loads, 2);
     autoRefresh(); await tick(); assert.equal(loads, 3);
@@ -323,7 +328,7 @@ test('password responses cannot restore secrets after route exit, reload, or acc
     const share = { id: '3'.repeat(32), token, title: 'Work', status: 'closed', visits: 0, password_available: true };
     const ui = Management.create({ document: f.doc, window: f.win, isAdmin: () => administrator, api: async () => ({ shares: [share] }), post: async () => pending });
     try {
-      ui.showManagement(); await tick(); const host = f.doc.body.children.find(node => node.tagName === 'SECTION'); const reveal = nodesIn(host).find(node => node.textContent === '查看密码'); const field = nodesIn(host).find(node => node.className === 'sharing-password-value');
+      ui.showManagement(); await tick(); const host = f.doc.body.children.find(node => node.tagName === 'SECTION'); const reveal = nodesIn(host).find(node => node.textContent === '查看密码'); const field = nodesIn(host).find(node => node.getAttribute('aria-label') === '分享访问密码');
       const fetching = reveal.emit('click');
       if (action === 'route') ui.hideManagement();
       if (action === 'reload') await nodesIn(host).find(node => node.textContent === '刷新').emit('click');
@@ -402,12 +407,56 @@ test('password clipboard failure selects the visible field but stale failures do
     const share = { id: '5'.repeat(32), token, title: 'Work', status: 'active', password_available: true };
     const ui = Management.create({ document: f.doc, window: f.win, isAdmin: () => true, api: async () => ({ shares: [share] }), post: async () => ({ password: 'selectable-password' }), toast: value => messages.push(value) });
     try {
-      ui.showManagement(); await tick(); const host = f.doc.body.children.find(node => node.tagName === 'SECTION'); await nodesIn(host).find(node => node.textContent === '查看密码').emit('click'); const field = nodesIn(host).find(node => node.className === 'sharing-password-value');
+      ui.showManagement(); await tick(); const host = f.doc.body.children.find(node => node.tagName === 'SECTION'); await nodesIn(host).find(node => node.textContent === '查看密码').emit('click'); const field = nodesIn(host).find(node => node.getAttribute('aria-label') === '分享访问密码');
       const copying = nodesIn(host).find(node => node.getAttribute('aria-label') === '复制访问密码').emit('click'); if (hideWhileCopying) ui.hideManagement(); fail(new Error('clipboard blocked')); await copying;
       if (hideWhileCopying) { assert.equal(field.value, ''); assert.notEqual(field.selected, true); assert.equal(messages.length, 0); }
-      else { assert.equal(field.selected, true); assert.equal(messages.at(-1), '请选中密码后复制'); }
+      else { assert.equal(field.selected, true); assert.equal(messages.at(-1), '已选中密码，请手动复制。'); }
     } finally { ui.reset(); }
   }
+});
+
+test('HTTP sharing copies both rows within the click and selects the link if copying is blocked', async () => {
+  const f = fixture(), copied = [], messages = [];
+  const share = { id: '8'.repeat(32), token, title: 'Work', status: 'active', password_available: true };
+  f.win.location.href = 'http://192.0.2.10:7878/#/settings/shares';
+  f.doc.execCommand = command => {
+    assert.equal(command, 'copy');
+    assert.equal(f.doc.activeElement.selected, true);
+    copied.push(f.doc.activeElement.value);
+    return true;
+  };
+  const ui = Management.create({
+    document: f.doc, window: f.win, isAdmin: () => true,
+    api: async () => ({ shares: [share] }),
+    post: async () => ({ password: 'share-access-password' }),
+    getNetworkSettings: async () => ({ share_port_enabled: true, share_port: 8081 }),
+    toast: message => messages.push(message),
+  });
+  try {
+    ui.showManagement();
+    await tick();
+    const host = f.doc.body.children.find(node => node.tagName === 'SECTION');
+    const controls = nodesIn(host);
+    const link = controls.find(node => node.getAttribute('aria-label') === '分享链接');
+    const password = controls.find(node => node.getAttribute('aria-label') === '分享访问密码');
+    const linkCopy = controls.find(node => node.getAttribute('aria-label') === '复制分享链接');
+    const passwordCopy = controls.find(node => node.getAttribute('aria-label') === '复制访问密码');
+    assert.equal(link.className, password.className);
+    assert.equal(linkCopy.className, passwordCopy.className);
+    assert.equal(link.parentElement.parentElement.hidden, true);
+    const copying = controls.find(node => node.textContent === '复制链接').emit('click');
+    assert.deepEqual(copied, ['http://192.0.2.10:8081/share/' + token]);
+    await copying;
+    assert.equal(link.parentElement.parentElement.hidden, false);
+    await controls.find(node => node.textContent === '查看密码').emit('click');
+    await passwordCopy.emit('click');
+    assert.equal(copied[1], 'share-access-password');
+    f.doc.execCommand = () => false;
+    link.selected = false;
+    await linkCopy.emit('click');
+    assert.equal(link.selected, true);
+    assert.equal(messages.at(-1), '已选中链接，请手动复制。');
+  } finally { ui.reset(); }
 });
 
 test('share creation and management copy use the configured public origin without the security entry code', async () => {

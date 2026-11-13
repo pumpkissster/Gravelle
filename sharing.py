@@ -29,7 +29,7 @@ ATTEMPT_WINDOW = 5 * 60
 MAX_ATTEMPTS = 8
 MAX_RATE_KEYS = 4096
 MAX_LIVE_SESSIONS = 512
-SUPPORTED_FORMATS = frozenset(("folder", "zip", "cbz", "archive", "pdf", "epub"))
+SUPPORTED_FORMATS = frozenset(("folder", "zip", "cbz", "archive", "pdf", "epub", "rar"))
 
 
 def _digest(value):

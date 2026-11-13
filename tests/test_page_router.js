@@ -12,7 +12,7 @@ test('EPUB chapter location and fragment round-trip without changing the return 
 });
 
 test('all navigation views have stable copyable routes', () => {
-  for (const view of ['home', 'libraries', 'recent', 'bookmarks', 'favorite', 'search', 'models', 'settings']) {
+  for (const view of ['home', 'libraries', 'magazines', 'recent', 'bookmarks', 'favorite', 'search', 'models', 'settings', 'messages']) {
     assert.deepEqual(Routes.parse(Routes.hash({ view })), { view });
   }
   for (const view of ['library', 'model', 'book', 'reader']) {
@@ -34,6 +34,12 @@ test('sharing management is a copyable settings subpage', () => {
   const route = { view: 'settings', section: 'shares' };
   assert.equal(Routes.hash(route), '#/settings/shares');
   assert.deepEqual(Routes.parse('#/settings/shares'), route);
+});
+test('messages use a top-level route without list or notification data in the hash', () => {
+  const route = { view: 'messages' };
+  assert.equal(Routes.hash({ ...route, id: 'private', sort: 'added', section: 'network' }), '#/messages');
+  assert.deepEqual(Routes.parse('#/messages?q=private&sort=added'), route);
+  assert.deepEqual(Routes.parse('#/messages/private'), { view: 'home' });
 });
 test('reader keeps its page and detail return route with the original filtered page underneath', () => {
   const origin = { view: 'library', id: '2', query: '特集', sort: 'title' };

@@ -6,7 +6,7 @@
 })(typeof window === 'undefined' ? globalThis : window, () => {
   'use strict';
   const statusLabels = Object.freeze({ pending: '待选择', original: '使用原图', queued: '等待优化', running: '优化中', paused: '已暂停', failed: '失败', cancelled: '已取消', ready: '已完成' });
-  const actionLabels = Object.freeze({ original: '使用原图', transcode: '开始优化', pause: '暂停', resume: '继续', cancel: '取消任务', retry: '重试' });
+  const actionLabels = Object.freeze({ original: '使用原图', transcode: '开始优化', ignore: '忽略', pause: '暂停', resume: '继续', cancel: '取消任务', retry: '重试', restore: '取消忽略' });
   const defaultRules = Object.freeze({ enabled: false, file_size_mb: 10, max_source_pixels: 40000000, max_source_side: 10000, output_format: 'webp', quality: 88, max_output_side: 3840, workers: 1, memory_limit_mb: 1024, timeout_seconds: 120, storage_limit_mb: 10240, min_free_space_mb: 512 });
   function refreshDelay(snapshot) {
     return !snapshot || Number(snapshot.summary?.processing_books) > 0 || snapshot.books?.some(book => ['queued', 'running'].includes(book.status)) ? 5000 : 15000;
@@ -50,32 +50,13 @@
     const date = new Date(time * 1000); return Number.isFinite(date.getTime()) ? date.toLocaleString('zh-CN', { hour12: false }) : '未记录';
   }
   function eligible(book, action) {
+    if (book.status === 'ignored') return action === 'restore';
     if (action === 'pause') return ['queued', 'running'].includes(book.status);
     if (action === 'resume') return book.status === 'paused';
     if (action === 'cancel') return ['queued', 'running', 'paused'].includes(book.status);
     if (action === 'retry') return ['failed', 'cancelled'].includes(book.status);
     if (action === 'transcode') return Number(book.matched_count) > 0 && !['queued', 'running'].includes(book.status);
-    return action === 'original';
-  }
-  function createPendingTracker() {
-    let initialized = false; let known = new Set(); let stamp = ''; let scanning = false; let suppressUntilIdle = false; let expected = false;
-    function reset() { initialized = false; known.clear(); stamp = ''; scanning = suppressUntilIdle = expected = false; }
-    return {
-      reset,
-      expectScan() { expected = true; suppressUntilIdle = false; },
-      observe(payload) {
-        const ids = Array.from(new Set((Array.isArray(payload?.pending_book_ids) ? payload.pending_book_ids : []).map(String)));
-        const nextScanning = payload?.scanning === true;
-        const nextStamp = JSON.stringify([payload?.last_scan ?? null, (payload?.libraries || []).map(item => [String(item.id), item.last_scan ?? null]).sort((a, b) => a[0].localeCompare(b[0]))]);
-        if (!initialized) { initialized = true; known = new Set(ids); stamp = nextStamp; scanning = nextScanning; suppressUntilIdle = nextScanning; return null; }
-        if (suppressUntilIdle) { known = new Set(ids); stamp = nextStamp; scanning = nextScanning; if (!nextScanning) { suppressUntilIdle = false; expected = false; } return null; }
-        if (nextScanning) { scanning = true; return null; }
-        const completed = scanning || nextStamp !== stamp || expected;
-        const added = completed ? ids.filter(id => !known.has(id)) : [];
-        known = new Set(ids); stamp = nextStamp; scanning = expected = false;
-        return added.length ? { ids: added, count: added.length } : null;
-      }
-    };
+    return action === 'original' || action === 'ignore';
   }
   function bookDisplaySignature(book) {
     return JSON.stringify([book.id, book.title, book.library_id, book.library_name, book.status, book.matched_count, book.success_count, book.failed_count, book.pending_count, book.running_count, book.output_count, book.actual_bytes, book.output_path, book.error, book.needs_retranscode, book.published, book.reasons, book.page_count]);
@@ -93,13 +74,31 @@
     host.classList.add('transcoding-page');
     const tabs = el('div', 'transcode-tabs'); tabs.setAttribute('role', 'tablist'); tabs.setAttribute('aria-label', '图片优化');
     controls.tasksTab = button('作品与任务', '', () => switchTab('tasks'));
+    controls.ignoredTab = button('忽略列表', '', () => switchTab('ignored'));
+    controls.ignoredTab.hidden = true;
     controls.rulesTab = button('优化规则', '', () => switchTab('rules'));
-    [controls.tasksTab, controls.rulesTab].forEach((item, index) => { item.id = 'transcode-tab-' + (index ? 'rules' : 'tasks'); item.setAttribute('role', 'tab'); item.setAttribute('aria-controls', 'transcode-panel-' + (index ? 'rules' : 'tasks')); });
-    tabs.append(controls.tasksTab, controls.rulesTab);
-    tabs.addEventListener('keydown', event => { if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return; event.preventDefault(); switchTab(event.key === 'Home' || event.key === 'ArrowLeft' && state.tab === 'rules' || event.key === 'ArrowRight' && state.tab === 'rules' ? 'tasks' : 'rules'); (state.tab === 'rules' ? controls.rulesTab : controls.tasksTab).focus(); });
+    const tabButtons = { tasks: controls.tasksTab, ignored: controls.ignoredTab, rules: controls.rulesTab };
+    Object.entries(tabButtons).forEach(([tab, item]) => {
+      item.id = 'transcode-tab-' + tab;
+      item.setAttribute('role', 'tab');
+      item.setAttribute('aria-controls', 'transcode-panel-' + (tab === 'rules' ? 'rules' : 'tasks'));
+    });
+    tabs.append(...Object.values(tabButtons));
+    tabs.addEventListener('keydown', event => {
+      if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+      event.preventDefault();
+      const tabNames = Object.keys(tabButtons).filter(tab => !tabButtons[tab].hidden);
+      const index = tabNames.indexOf(state.tab);
+      const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabNames.length - 1 :
+        (index + (event.key === 'ArrowRight' ? 1 : -1) + tabNames.length) % tabNames.length;
+      switchTab(tabNames[next]);
+      tabButtons[state.tab].focus();
+    });
     controls.error = el('p', 'notice error'); controls.error.setAttribute('role', 'alert'); controls.error.hidden = true;
     const retryLoad = button('重新加载', 'button button-secondary', () => load(true));
     controls.disabledNotice = el('div', 'transcode-disabled'); controls.disabledNotice.append(el('span', '', '优化规则尚未启用。'), button('配置规则', 'button button-secondary', () => switchTab('rules')));
+    const ignoreUnavailable = el('p', 'notice', '当前 Gravelle 服务尚未加载「忽略」功能。请重启服务并刷新页面。');
+    ignoreUnavailable.hidden = true;
     controls.summary = el('div', 'transcode-summary'); controls.summary.setAttribute('aria-live', 'polite');
     const storageTools = el('div', 'transcode-storage-tools'); controls.cleanupSummary = el('span', 'transcode-hint');
     controls.cleanup = button('清理旧副本', 'button button-secondary', confirmCleanup); storageTools.append(controls.cleanupSummary, controls.cleanup);
@@ -107,9 +106,10 @@
     const filterBar = el('div', 'transcode-filter-bar');
     controls.query = el('input'); controls.query.type = 'search'; controls.query.placeholder = '搜索作品'; controls.query.maxLength = 200;
     controls.status = el('select'); controls.status.append(option('', '全部状态'), ...Object.entries(statusLabels).map(([value, text]) => option(value, text)));
-    controls.library = el('select'); controls.library.append(option('', '全部写真库'));
+    controls.library = el('select'); controls.library.append(option('', '全部媒体库'));
     controls.refresh = button('刷新', 'button button-secondary', () => load(true));
-    filterBar.append(label('搜索作品', controls.query), label('筛选状态', controls.status), label('筛选写真库', controls.library), controls.refresh);
+    const statusFilter = label('筛选状态', controls.status);
+    filterBar.append(label('搜索作品', controls.query), statusFilter, label('筛选媒体库', controls.library), controls.refresh);
     controls.query.addEventListener('input', () => { state.query = controls.query.value.slice(0, 200); renderBooks(); onFiltersChange(getFilters()); });
     controls.status.addEventListener('change', () => { state.filter = controls.status.value; renderBooks(); onFiltersChange(getFilters()); });
     controls.library.addEventListener('change', () => { state.library = controls.library.value; renderBooks(); onFiltersChange(getFilters()); });
@@ -143,7 +143,7 @@
     form.addEventListener('input', () => { state.dirty = true; state.draft = null; updateBusy(); });
     form.addEventListener('change', () => { state.dirty = true; state.draft = null; updateBusy(); });
     form.addEventListener('submit', event => { event.preventDefault(); previewRules(); });
-    host.append(tabs, controls.error, controls.disabledNotice, tasks, rules);
+    host.append(tabs, controls.error, controls.disabledNotice, ignoreUnavailable, tasks, rules);
     controls.error.after(retryLoad); controls.retryLoad = retryLoad; retryLoad.hidden = true;
 
     const dialog = el('dialog', 'settings-dialog library-dialog transcode-confirm-dialog'); dialog.setAttribute('aria-labelledby', 'transcode-confirm-title');
@@ -249,16 +249,25 @@
       if (rules.enabled && ![rules.file_size_mb, rules.max_source_pixels, rules.max_source_side].some(value => value > 0)) { controls.file_size_mb.setCustomValidity('启用时至少设置一个触发条件。'); controls.file_size_mb.reportValidity(); controls.file_size_mb.setCustomValidity(''); return null; }
       return rules;
     }
+    function currentBooks() {
+      return (state.tab === 'ignored' ? state.snapshot?.ignored_books : state.snapshot?.books) || [];
+    }
     function filtered() {
       const query = state.query.trim().toLocaleLowerCase();
-      return (state.snapshot?.books || []).filter(book => (!state.filter || book.status === state.filter) && (!state.library || String(book.library_id) === state.library) && (!query || [book.title, book.library_name].some(value => String(value || '').toLocaleLowerCase().includes(query))));
+      return currentBooks().filter(book => (state.tab === 'ignored' || !state.filter || book.status === state.filter) && (!state.library || String(book.library_id) === state.library) && (!query || [book.title, book.library_name].some(value => String(value || '').toLocaleLowerCase().includes(query))));
     }
     function renderSelection() {
-      const books = state.snapshot?.books || []; const selected = books.filter(book => state.selected.has(String(book.id))); const visible = filtered();
+      const selected = currentBooks().filter(book => state.selected.has(String(book.id))); const visible = filtered();
       controls.count.textContent = selected.length ? `已选择 ${selected.length} 本作品` : '未选择作品';
       const selectedVisible = visible.filter(book => state.selected.has(String(book.id))).length;
       controls.all.checked = visible.length > 0 && visible.length === selectedVisible; controls.all.indeterminate = selectedVisible > 0 && selectedVisible < visible.length;
-      Object.entries(controls.actions).forEach(([action, item]) => { const count = selected.filter(book => eligible(book, action)).length; item.disabled = state.busy || !count; item.title = count && count < selected.length ? `适用于所选的 ${count} 本作品` : ''; });
+      const canIgnore = Array.isArray(state.snapshot?.ignored_books);
+      Object.entries(controls.actions).forEach(([action, item]) => {
+        const count = selected.filter(book => eligible(book, action)).length;
+        item.hidden = (action === 'restore') !== (state.tab === 'ignored') || action === 'ignore' && !canIgnore;
+        item.disabled = state.busy || !count || action !== 'restore' && state.snapshot?.rules?.enabled === false;
+        item.title = count && count < selected.length ? `适用于所选的 ${count} 本作品` : '';
+      });
     }
     function renderSummary() {
       const summary = state.snapshot?.summary || {};
@@ -268,13 +277,13 @@
       controls.cleanupSummary.textContent = `已存储优化图 ${bytes(summary.stored_bytes)} · 可清理旧副本 ${count} 个，${bytes(summary.reclaimable_bytes)}`;
     }
     function renderLibraries() {
-      const libraries = new Map((state.snapshot?.books || []).map(book => [String(book.library_id), book.library_name || '写真库']));
+      const libraries = new Map(currentBooks().map(book => [String(book.library_id), book.library_name || '媒体库']));
       if (state.snapshot && state.library && !libraries.has(state.library)) state.library = '';
       controls.library.value = state.library;
       const signature = JSON.stringify(Array.from(libraries).sort((a, b) => a[0].localeCompare(b[0])));
       if (signature === state.librarySignature) return;
       state.librarySignature = signature;
-      controls.library.replaceChildren(option('', '全部写真库'), ...Array.from(libraries, ([id, name]) => option(id, name)));
+      controls.library.replaceChildren(option('', '全部媒体库'), ...Array.from(libraries, ([id, name]) => option(id, name)));
       if (!libraries.has(state.library)) state.library = ''; controls.library.value = state.library;
     }
     function renderBooks() {
@@ -285,15 +294,19 @@
         if (cached?.signature === signature) { cached.element.classList.toggle('is-selected', state.selected.has(id)); const input = cached.element.querySelector('input'); input.checked = state.selected.has(id); input.disabled = state.busy; return cached.element; }
         const row = el('article', 'transcode-book'); row.classList.toggle('is-selected', state.selected.has(id));
         const select = el('label', 'transcode-book-select'); const input = el('input'); input.type = 'checkbox'; input.checked = state.selected.has(id); input.disabled = state.busy; input.dataset.transcodeId = id; input.setAttribute('aria-label', `选择《${book.title || '作品'}》`); input.addEventListener('change', () => { input.checked ? state.selected.add(id) : state.selected.delete(id); row.classList.toggle('is-selected', input.checked); renderSelection(); }); select.append(input);
-        const main = el('div', 'transcode-book-main'); const heading = el('div', 'transcode-book-heading'); heading.append(el('h3', '', book.title || '未命名作品'), el('span', 'transcode-status transcode-status-' + String(book.status || 'pending').replace(/[^a-z]/g, ''), statusLabels[book.status] || '待选择'));
-        const counts = el('p', 'transcode-book-counts', `${book.library_name || '写真库'} · 命中 ${Number(book.matched_count) || 0} 张 · 未处理 ${Number(book.pending_count) || 0} 张 · 成功 ${Number(book.success_count) || 0} 张 · 失败 ${Number(book.failed_count) || 0} 张`);
+        const main = el('div', 'transcode-book-main'); const heading = el('div', 'transcode-book-heading'); heading.append(el('h3', '', book.title || '未命名作品'), el('span', 'transcode-status transcode-status-' + String(book.status || 'pending').replace(/[^a-z]/g, ''), book.status === 'ignored' ? '已忽略' : statusLabels[book.status] || '待选择'));
+        const libraryName = book.library_name || '媒体库';
+        const counts = el('p', 'transcode-book-counts', book.status === 'ignored' ?
+          `${libraryName} · ${Number(book.page_count) || 0} 页` :
+          `${libraryName} · 命中 ${Number(book.matched_count) || 0} 张 · 未处理 ${Number(book.pending_count) || 0} 张 · 成功 ${Number(book.success_count) || 0} 张 · 失败 ${Number(book.failed_count) || 0} 张`);
         main.append(heading, counts);
         if (['queued', 'running', 'paused'].includes(book.status)) { const track = el('div', 'transcode-progress'); track.setAttribute('role', 'progressbar'); track.setAttribute('aria-label', '优化进度'); track.setAttribute('aria-valuemin', '0'); track.setAttribute('aria-valuemax', '100'); track.setAttribute('aria-valuenow', progress(book)); const fill = el('span'); fill.style.width = progress(book) + '%'; track.append(fill); main.append(track); }
-        const meta = el('div', 'transcode-book-meta'); meta.append(el('span', '', book.published ? '已在写真库显示' : '暂未在写真库显示'));
+        const meta = el('div', 'transcode-book-meta');
+        if (book.status !== 'ignored') meta.append(el('span', '', book.published ? '已在书库显示' : '暂未在书库显示'));
         if (book.output_count || book.actual_bytes) meta.append(el('span', '', `优化图 ${Number(book.output_count) || 0} 张 · ${bytes(book.actual_bytes)}`));
         if (book.needs_retranscode) meta.append(el('span', 'transcode-rebuild', '有图片需要重新优化'));
         meta.append(button('预览作品', 'transcode-preview-button', () => openPreview(book)));
-        meta.append(button('优化详情', 'transcode-preview-button', () => openDetails(book)));
+        if (book.status !== 'ignored') meta.append(button('优化详情', 'transcode-preview-button', () => openDetails(book)));
         main.append(meta);
         if (book.reasons?.length || book.output_path || book.error) { const details = el('details', 'transcode-book-details'); details.dataset.bookId = id; details.open = open.has(id); details.append(el('summary', '', '查看详情'));
           if (book.reasons?.length) { const reasons = el('p', '', (Array.isArray(book.reasons) ? book.reasons : [book.reasons]).map(value => typeof value === 'string' ? value : value?.message || value?.reason || '').filter(Boolean).join(' · ')); details.append(reasons); }
@@ -305,7 +318,8 @@
       const retained = new Set(rows);
       Array.from(controls.list.children).forEach(row => { if (!retained.has(row)) row.remove(); });
       rows.forEach((row, index) => { if (controls.list.children[index] !== row) controls.list.insertBefore(row, controls.list.children[index] || null); });
-      controls.empty.hidden = Boolean(books.length); controls.empty.textContent = state.loading && !state.snapshot ? '正在读取优化记录…' : state.snapshot?.books?.length ? '没有符合筛选条件的作品。' : '暂无命中规则的作品。';
+      controls.empty.hidden = Boolean(books.length); controls.empty.textContent = state.loading && !state.snapshot ? '正在读取优化记录…' : currentBooks().length ? '没有符合筛选条件的作品。' : state.tab === 'ignored' ? '暂无忽略的作品。' : '暂无命中规则的作品。';
+      controls.all.disabled = state.busy || !books.length;
       renderSelection();
       if (focus) Array.from(controls.list.querySelectorAll('input[data-transcode-id]')).find(item => item.dataset.transcodeId === focus)?.focus({ preventScroll: true });
       if (state.snapshot) onRender();
@@ -321,10 +335,19 @@
     }
     function accept(snapshot) {
       if (!snapshot || !Array.isArray(snapshot.books) || !snapshot.rules) throw new Error('优化数据格式不正确。');
-      const ids = new Set(snapshot.books.map(book => String(book.id))); state.selected.forEach(id => { if (!ids.has(id)) state.selected.delete(id); });
+      const ids = new Set([...snapshot.books, ...(snapshot.ignored_books || [])].map(book => String(book.id)));
       state.rows.forEach((value, id) => { if (!ids.has(id)) state.rows.delete(id); });
-      const signature = JSON.stringify(snapshot); const published = snapshot.books.map(book => String(book.id) + ':' + Boolean(book.published)).join('|');
+      const signature = JSON.stringify(snapshot); const published = JSON.stringify([
+        snapshot.books.map(book => String(book.id) + ':' + Boolean(book.published)).sort(),
+        (snapshot.ignored_books || []).map(book => String(book.id)).sort()
+      ]);
       const changed = state.published && state.published !== published; state.published = published; state.snapshot = snapshot;
+      const canIgnore = Array.isArray(snapshot.ignored_books);
+      ignoreUnavailable.hidden = canIgnore;
+      controls.ignoredTab.hidden = !canIgnore;
+      if (!canIgnore && state.tab === 'ignored') switchTab('tasks');
+      const currentIds = new Set(currentBooks().map(book => String(book.id)));
+      state.selected.forEach(id => { if (!currentIds.has(id)) state.selected.delete(id); });
       if (!state.dirty) fillRules(snapshot.rules);
       if (signature !== state.signature) { state.signature = signature; renderSummary(); renderLibraries(); renderBooks(); }
       if (changed) Promise.resolve(onCatalogChange()).catch(() => {});
@@ -332,29 +355,51 @@
     async function load(force = false) {
       if (!state.active || state.loading || state.busy || document.hidden && !force) { scheduleLoad(); return; }
       stopLoad();
+      const request = {};
+      state.request = request;
       const generation = state.generation; state.loading = true; state.manualLoading = force; updateBusy(); if (!state.snapshot) renderBooks();
-      try { const snapshot = await api('/api/transcoding'); if (generation !== state.generation) return; accept(snapshot); setError(''); controls.retryLoad.hidden = true; }
-      catch (error) { if (generation === state.generation && error.status !== 401) { setError(error.message); controls.retryLoad.hidden = false; } }
-      finally { if (generation === state.generation) { state.loading = state.manualLoading = false; updateBusy(); if (!state.snapshot) renderBooks(); scheduleLoad(); } }
+      try { const snapshot = await api('/api/transcoding'); if (generation !== state.generation || state.request !== request) return; accept(snapshot); setError(''); controls.retryLoad.hidden = true; }
+      catch (error) { if (generation === state.generation && state.request === request && error.status !== 401) { setError(error.message); controls.retryLoad.hidden = false; } }
+      finally { if (generation === state.generation) { state.request = null; state.loading = state.manualLoading = false; updateBusy(); if (!state.snapshot) renderBooks(); scheduleLoad(); } }
     }
     function stopLoad() { clearTimeout(state.timer); state.timer = null; }
-    function scheduleLoad() { stopLoad(); if (state.active && !document.hidden && state.tab === 'tasks') state.timer = setTimeout(() => load(), refreshDelay(state.snapshot)); }
+    function scheduleLoad() { stopLoad(); if (state.active && !document.hidden && state.tab !== 'rules') state.timer = setTimeout(() => load(), refreshDelay(state.snapshot)); }
     function switchTab(tab, updateRoute = true) {
       const previous = state.tab;
-      state.tab = tab === 'rules' ? 'rules' : 'tasks'; tasks.hidden = state.tab !== 'tasks'; rules.hidden = state.tab !== 'rules';
-      [controls.tasksTab, controls.rulesTab].forEach((item, index) => { const selected = (index ? 'rules' : 'tasks') === state.tab; item.setAttribute('aria-selected', String(selected)); item.tabIndex = selected ? 0 : -1; });
+      state.tab = Object.hasOwn(tabButtons, tab) ? tab : 'tasks';
+      if (state.tab === 'ignored' && state.snapshot && !Array.isArray(state.snapshot.ignored_books)) {
+        state.tab = 'tasks';
+        updateRoute = true;
+      }
+      const ignored = state.tab === 'ignored';
+      tasks.hidden = state.tab === 'rules'; rules.hidden = !tasks.hidden;
+      tasks.setAttribute('aria-labelledby', ignored ? 'transcode-tab-ignored' : 'transcode-tab-tasks');
+      controls.summary.hidden = storageTools.hidden = statusFilter.hidden = ignored;
+      controls.list.setAttribute('aria-label', ignored ? '忽略的作品' : '优化作品');
+      Object.entries(tabButtons).forEach(([key, item]) => { const selected = key === state.tab; item.setAttribute('aria-selected', String(selected)); item.tabIndex = selected ? 0 : -1; });
       if (updateRoute) onTabChange(state.tab);
-      if (previous !== state.tab && state.tab === 'tasks' && state.active) load(); else scheduleLoad();
+      if (previous !== state.tab && (previous === 'ignored' || ignored)) state.selected.clear();
+      if (previous !== state.tab && state.tab !== 'rules') { if (state.snapshot) renderLibraries(); renderBooks(); if (state.active) load(); }
+      else scheduleLoad();
     }
     async function mutate(url, payload, success, { saveRules = false } = {}) {
       stopLoad(); const generation = state.generation; state.busy = true; dialogError.hidden = true; updateBusy();
-      try { const snapshot = await post(url, payload); if (generation !== state.generation) return; if (saveRules) { state.dirty = false; state.draft = null; } accept(snapshot); setError(''); dialog.close(); toast(typeof success === 'function' ? success(snapshot) : success); Promise.resolve(onCatalogChange()).catch(() => {}); }
-      catch (error) { if (generation === state.generation && error.status !== 401) { dialogError.textContent = error.message; dialogError.hidden = false; } }
+      try { const snapshot = await post(url, payload); if (generation !== state.generation) return; state.request = null; if (saveRules) { state.dirty = false; state.draft = null; } accept(snapshot); setError(''); dialog.close(); toast(typeof success === 'function' ? success(snapshot) : success); Promise.resolve(onCatalogChange()).catch(() => {}); }
+      catch (error) {
+        if (generation === state.generation && error.status !== 401) {
+          const unsupported = (payload.action === 'ignore' || payload.action === 'restore') && error.message === '优化批量操作无效。';
+          dialogError.textContent = unsupported ? ignoreUnavailable.textContent : error.message;
+          dialogError.hidden = false;
+        }
+      }
       finally { if (generation === state.generation) { state.busy = false; updateBusy(); renderBooks(); scheduleLoad(); } }
     }
     function confirmAction(action) {
-      const selected = (state.snapshot?.books || []).filter(book => state.selected.has(String(book.id)) && eligible(book, action)); if (!selected.length || state.busy) return;
+      if ((action === 'ignore' || action === 'restore') && !Array.isArray(state.snapshot?.ignored_books)) return;
+      const selected = currentBooks().filter(book => state.selected.has(String(book.id)) && eligible(book, action)); if (!selected.length || state.busy) return;
       const count = selected.length; const descriptions = { original: `将 ${count} 本作品设为使用原图并在写真库显示。命中规则的记录仍会保留。`, transcode: `为 ${count} 本作品处理命中规则的图片。后台完成后自动显示新作品，原始文件保持不变。`, pause: `暂停 ${count} 本作品的优化任务。`, resume: `继续 ${count} 本作品的优化任务。`, cancel: `取消 ${count} 本作品的后台任务。新作品继续等待管理员选择。`, retry: `重新处理 ${count} 本作品中尚未成功的图片。` };
+      descriptions.ignore = `将 ${count} 本作品移入忽略列表，从书库隐藏，并停止图片优化。`;
+      descriptions.restore = `将 ${count} 本作品移出忽略列表。命中当前优化规则的作品会回到「待选择」，其余作品会在书库显示。`;
       const list = el('ul', 'transcode-confirm-list'); selected.forEach(book => list.append(el('li', '', book.title || '未命名作品')));
       openConfirm(actionLabels[action], [el('p', 'settings-intro', descriptions[action]), list], '确认' + actionLabels[action], () => mutate('/api/transcoding/actions', { ids: selected.map(book => book.id), action }, '操作已提交'));
     }
@@ -381,14 +426,14 @@
       } catch (error) { if (generation === state.generation && error.status !== 401) setError(error.message); }
       finally { if (generation === state.generation) { state.busy = false; updateBusy(); } }
     }
-    document.addEventListener?.('visibilitychange', () => { if (document.hidden) stopLoad(); else if (state.active && state.tab === 'tasks') load(); });
+    document.addEventListener?.('visibilitychange', () => { if (document.hidden) stopLoad(); else if (state.active && state.tab !== 'rules') load(); });
     fillRules(defaultRules); switchTab('tasks', false); renderBooks();
     return {
       show(tab = 'tasks') { state.active = true; host.hidden = false; switchTab(tab, false); load(); },
       hide() { state.active = false; host.hidden = true; stopLoad(); if (dialog.open && !state.busy) dialog.close(); if (previewDialog.open) previewDialog.close(); if (detailDialog.open) detailDialog.close(); },
-      reset() { state.generation += 1; state.active = false; stopLoad(); state.snapshot = null; state.loading = state.manualLoading = state.busy = state.dirty = false; state.draft = null; state.selected.clear(); state.rows.clear(); state.filter = state.library = state.query = state.signature = state.published = state.librarySignature = ''; controls.query.value = ''; controls.status.value = ''; controls.library.value = ''; if (dialog.open) dialog.close(); if (previewDialog.open) previewDialog.close(); if (detailDialog.open) detailDialog.close(); detailRequest += 1; setError(''); controls.retryLoad.hidden = true; fillRules(defaultRules); renderBooks(); host.hidden = true; },
+      reset() { state.generation += 1; state.active = false; stopLoad(); state.snapshot = null; state.loading = state.manualLoading = state.busy = state.dirty = false; state.draft = null; state.selected.clear(); state.rows.clear(); state.filter = state.library = state.query = state.signature = state.published = state.librarySignature = ''; controls.query.value = ''; controls.status.value = ''; controls.library.value = ''; if (dialog.open) dialog.close(); if (previewDialog.open) previewDialog.close(); if (detailDialog.open) detailDialog.close(); detailRequest += 1; setError(''); controls.retryLoad.hidden = controls.ignoredTab.hidden = ignoreUnavailable.hidden = true; fillRules(defaultRules); renderBooks(); host.hidden = true; },
       refresh: () => load(true), getFilters, restoreFilters, isLoaded: () => Boolean(state.snapshot)
     };
   }
-  return { create, bytes, progress, eligible, statusLabels, defaultRules, createPendingTracker, bookDisplaySignature, normalizeFilters, formatParameters, formatTime, refreshDelay };
+  return { create, bytes, progress, eligible, statusLabels, defaultRules, bookDisplaySignature, normalizeFilters, formatParameters, formatTime, refreshDelay };
 });

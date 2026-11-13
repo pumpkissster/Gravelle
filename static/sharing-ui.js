@@ -75,7 +75,15 @@
       }); duration.append(control); return control;
     });
     daysLabel.append(durationLabel, duration); form.append(passwordLabel, daysLabel);
-    const result = element('section', 'sharing-result'); result.hidden = true; const resultTitle = element('h3', '', '分享已创建'); const resultLink = element('input'); resultLink.readOnly = true; resultLink.setAttribute('aria-label', '分享链接'); const resultPassword = element('input'); resultPassword.readOnly = true; resultPassword.setAttribute('aria-label', '分享访问密码'); const resultRule = element('p', 'sharing-hint'); const resultNetworkHint = element('p', 'sharing-hint'); resultNetworkHint.hidden = true; const copyAll = button('复制链接和密码', () => copy(`分享链接：${resultLink.value}\n访问密码：${resultPassword.value}`, resultLink), true); result.append(resultTitle, element('label', 'sharing-label', '分享链接'), resultLink, element('label', 'sharing-label', '访问密码'), resultPassword, resultRule, resultNetworkHint, copyAll);
+    const result = element('section', 'sharing-result'); result.hidden = true; const resultTitle = element('h3', '', '分享已创建'); const resultLink = element('input'); resultLink.readOnly = true; resultLink.setAttribute('aria-label', '分享链接'); const resultPassword = element('input'); resultPassword.readOnly = true; resultPassword.setAttribute('aria-label', '分享访问密码'); const resultRule = element('p', 'sharing-hint'); const resultNetworkHint = element('p', 'sharing-hint'); resultNetworkHint.hidden = true;
+    const copyAll = button('复制链接和密码', () => {
+      const account = generation, epoch = createEpoch;
+      const current = () => account === generation && epoch === createEpoch && dialog.open && !result.hidden && authorized();
+      return copy(`分享链接：${resultLink.value}\n访问密码：${resultPassword.value}`, resultLink, {
+        current, success: '链接和密码已复制', manual: '请分别选中链接和密码手动复制。',
+      });
+    }, true);
+    result.append(resultTitle, element('label', 'sharing-label', '分享链接'), resultLink, element('label', 'sharing-label', '访问密码'), resultPassword, resultRule, resultNetworkHint, copyAll);
     body.append(error, bookName, form, result);
     const footer = element('footer', 'sharing-footer'); const cancel = button('取消', () => closeCreate()); const submit = element('button', 'button button-primary', '创建分享'); submit.type = 'submit'; submit.setAttribute('form', form.id); footer.append(cancel, submit); dialog.append(header, body, footer); doc.body.append(dialog);
 
@@ -97,7 +105,63 @@
       if (!authorized() || createBusy || operationBusy || !book?.id) return;
       createEpoch++; currentBook = book; createFromManagement = managementActive; showError(error, ''); result.hidden = true; form.hidden = submit.hidden = false; cancel.textContent = '取消'; bookName.textContent = book.title || '作品'; password.value = resultPassword.value = resultLink.value = ''; choose(1); if (!dialog.open) dialog.showModal(); password.focus();
     }
-    async function copy(value, input) { try { if (!win.navigator?.clipboard?.writeText) throw new Error('clipboard unavailable'); await win.navigator.clipboard.writeText(value); toast('已复制'); } catch (_) { input?.focus(); input?.select(); toast('请选中内容后复制'); } }
+    async function copy(value, field, { current, success, manual }) {
+      if (!value || !current()) return;
+      const clipboard = win.navigator?.clipboard;
+      if (clipboard?.writeText) {
+        try {
+          await clipboard.writeText(value);
+          if (current()) toast(success);
+          return;
+        } catch (_) { /* Try selection-based copying if the browser permits it. */ }
+      }
+      if (!current()) return;
+      let copied = false;
+      if (typeof doc.execCommand === 'function') {
+        const focused = doc.activeElement;
+        let selection = field;
+        if (field.value !== value) {
+          selection = element('textarea', 'sr-only');
+          selection.readOnly = true;
+          selection.value = value;
+          field.parentElement.append(selection);
+        }
+        try {
+          selection.focus({ preventScroll: true });
+          selection.select();
+          copied = doc.execCommand('copy') === true;
+        } catch (_) { /* Leave the field available for manual copying. */ }
+        finally {
+          if (selection !== field) {
+            selection.value = '';
+            selection.remove();
+          }
+          if (copied) focused?.focus?.({ preventScroll: true });
+        }
+      }
+      if (!current()) return;
+      if (!copied) {
+        field.focus({ preventScroll: true });
+        field.select();
+      }
+      toast(copied ? success : manual);
+    }
+    function copyRow(label, fieldName, onCopy) {
+      const panel = element('div', 'sharing-copy-panel');
+      panel.hidden = true;
+      const caption = element('label', 'sharing-copy-label');
+      const field = element('input', 'sharing-copy-value');
+      field.readOnly = true;
+      field.autocomplete = 'off';
+      field.spellcheck = false;
+      field.setAttribute('aria-label', fieldName);
+      caption.append(element('span', '', label), field);
+      const control = button('复制', onCopy);
+      control.classList.add('sharing-copy-button');
+      control.setAttribute('aria-label', '复制' + label);
+      panel.append(caption, control);
+      return { panel, field, control };
+    }
     form.addEventListener('submit', async event => {
       event.preventDefault(); if (createBusy || !authorized() || !form.reportValidity()) return; let data;
       try { data = payload(currentBook, { password: password.value, duration_days: selectedDays }); } catch (problem) { showError(error, problem.message); return; }
@@ -120,18 +184,15 @@
     function passwordsInUse() { return [...passwordEntries].some(entry => entry.busy || !entry.panel.hidden); }
     function addPassword(share, card, actions) {
       if (share.password_available !== true) { const unavailable = button('原密码不可查看'); unavailable.disabled = true; actions.append(unavailable); return; }
-      const panel = element('div', 'sharing-password-panel'); panel.hidden = true;
-      const label = element('label', 'sharing-password-label', '访问密码'); const field = element('input', 'sharing-password-value'); field.type = 'text'; field.readOnly = true; field.autocomplete = 'off'; field.spellcheck = false; field.setAttribute('aria-label', '分享访问密码');
-      const controls = element('span', 'sharing-password-controls'); label.append(controls); controls.append(field); panel.append(label);
-      const passwordError = element('p', 'sharing-password-error'); passwordError.setAttribute('role', 'alert'); passwordError.hidden = true;
-      const entry = { field, panel, error: passwordError, reveal: null, copy: null, busy: false, alive: true, sequence: 0 };
-      const copyPassword = button('复制', async () => {
+      const { panel, field, control: copyPassword } = copyRow('访问密码', '分享访问密码', () => {
         if (!entry.alive || entry.busy || panel.hidden || !field.value || !managementActive || !authorized()) return;
         const account = generation, epoch = managementEpoch, sequence = entry.sequence;
         const current = () => account === generation && epoch === managementEpoch && sequence === entry.sequence && entry.alive && managementActive && authorized() && !panel.hidden && Boolean(field.value);
-        try { if (!win.navigator?.clipboard?.writeText) throw new Error('clipboard unavailable'); await win.navigator.clipboard.writeText(field.value); if (current()) toast('密码已复制'); }
-        catch (_) { if (current()) { field.focus(); field.select(); toast('请选中密码后复制'); } }
-      }); copyPassword.classList.add('sharing-copy-password'); copyPassword.setAttribute('aria-label', '复制访问密码'); copyPassword.disabled = true; entry.copy = copyPassword; controls.append(copyPassword);
+        return copy(field.value, field, { current, success: '密码已复制', manual: '已选中密码，请手动复制。' });
+      });
+      const passwordError = element('p', 'sharing-password-error'); passwordError.setAttribute('role', 'alert'); passwordError.hidden = true;
+      const entry = { field, panel, error: passwordError, reveal: null, copy: copyPassword, busy: false, alive: true, sequence: 0 };
+      copyPassword.disabled = true;
       const reveal = button('查看密码', async () => {
         if (!entry.alive || entry.busy || !managementActive || !authorized()) return;
         if (!entry.panel.hidden) { clearPassword(entry); return; }
@@ -149,19 +210,38 @@
       reveal.setAttribute('aria-expanded', 'false'); entry.reveal = reveal; passwordEntries.add(entry); actions.append(reveal); card.append(panel, passwordError);
     }
     async function load(force = false) {
-      if (managementBusy && !force || !managementActive || !authorized()) return; clearPasswords(); if (force) managementEpoch++; const account = generation, epoch = managementEpoch; managementBusy = true; refresh.disabled = true; refresh.setAttribute('aria-busy', 'true'); showError(managementError, '');
+      if (managementBusy && !force || !managementActive || !authorized()) return; clearPasswords(); const account = generation, epoch = ++managementEpoch; managementBusy = true; refresh.disabled = true; refresh.setAttribute('aria-busy', 'true'); showError(managementError, '');
+      const current = () => account === generation && epoch === managementEpoch && managementActive && authorized();
       try {
-        const value = await api('/api/shares'); if (account !== generation || epoch !== managementEpoch || !managementActive || !authorized()) return;
+        const [value, linkSettings] = await Promise.all([
+          api('/api/shares'),
+          Promise.resolve().then(getNetworkSettings).then(network => ({ network }), error => ({ error })),
+        ]);
+        if (!current()) return;
         const shares = Array.isArray(value.shares) ? value.shares : []; list.replaceChildren(); empty.hidden = shares.length > 0; listCount.textContent = `${shares.length} 个分享`;
         for (const share of shares) {
           const card = element('article', 'sharing-card'); const top = element('div', 'sharing-card-top'); const name = element('strong', '', share.title || '作品'); const badge = element('span', 'sharing-badge', status(share)); badge.dataset.status = share.status || 'active'; top.append(name, badge);
-          const info = element('p', 'sharing-meta', `创建于 ${date(share.created_at)}`); const limit = element('p', 'sharing-meta', rule(share)); const visits = element('p', 'sharing-meta sharing-visits', `访问 ${Number.isSafeInteger(share.visits) && share.visits >= 0 ? share.visits : 0} 次`); visits.title = '成功建立阅读会话计数，刷新和翻页不重复计数。'; const actions = element('div', 'sharing-card-actions'); let copyField = null;
-          actions.append(button('复制链接', async () => { const account = generation, epoch = managementEpoch; try { const network = await getNetworkSettings(); if (account !== generation || epoch !== managementEpoch || !managementActive || !authorized()) return; const url = shareUrl(share, baseUrl || win.location.href, network); if (!copyField) { copyField = element('input', 'sharing-copy-field'); copyField.readOnly = true; card.append(copyField); } copyField.value = url; await copy(url, copyField); if (network.share_port_enabled && !network.public_share_url) toast('已复制。外网转发或端口映射请先在网络设置填写公网分享地址。'); } catch (problem) { if (account === generation && epoch === managementEpoch && managementActive && authorized()) showError(managementError, problem.message); } }));
+          const info = element('p', 'sharing-meta', `创建于 ${date(share.created_at)}`); const limit = element('p', 'sharing-meta', rule(share)); const visits = element('p', 'sharing-meta sharing-visits', `访问 ${Number.isSafeInteger(share.visits) && share.visits >= 0 ? share.visits : 0} 次`); visits.title = '成功建立阅读会话计数，刷新和翻页不重复计数。'; const actions = element('div', 'sharing-card-actions');
+          const copyLink = () => {
+            if (!current()) return;
+            const { network, error } = linkSettings;
+            if ('error' in linkSettings) { showError(managementError, error?.message || '暂时无法获取分享地址。'); return; }
+            try {
+              field.value = shareUrl(share, baseUrl || win.location.href, network);
+              panel.hidden = false;
+              const success = network?.share_port_enabled && !network.public_share_url
+                ? '链接已复制。外网转发或端口映射请先在网络设置填写公网分享地址。'
+                : '链接已复制';
+              return copy(field.value, field, { current, success, manual: '已选中链接，请手动复制。' });
+            } catch (problem) { showError(managementError, problem.message); }
+          };
+          const { panel, field } = copyRow('分享链接', '分享链接', copyLink);
+          actions.append(button('复制链接', copyLink));
           if ([labels.active, labels.exhausted].includes(status(share))) actions.append(button('关闭分享', () => promptOperation('close', share)));
           if (share.status === 'closed') {
             const recreate = button('重新分享', () => showCreate({ id: share.book_id, title: share.title })); recreate.disabled = !share.book_id; const remove = button('删除记录', () => promptOperation('delete', share)); remove.classList.add('sharing-danger'); actions.append(recreate, remove);
           }
-          card.append(top, info); if (share.expires_at) card.append(limit); card.append(visits, actions); addPassword(share, card, actions); list.append(card);
+          card.append(top, info); if (share.expires_at) card.append(limit); card.append(visits, actions, panel); addPassword(share, card, actions); list.append(card);
         }
       } catch (problem) { if (account === generation && epoch === managementEpoch) showError(managementError, problem.message || '暂时无法获取分享。'); }
       finally { if (account === generation && epoch === managementEpoch) { managementBusy = false; refresh.disabled = false; refresh.setAttribute('aria-busy', 'false'); } }

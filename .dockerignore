@@ -15,6 +15,7 @@
 !page_cache.py
 !pdf_reader.py
 !epub_reader.py
+!rar_reader.py
 !sharing.py
 !share_crypto.py
 !share_passwords.py

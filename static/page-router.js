@@ -5,8 +5,8 @@
   else root.GravellePageRouter = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
-  const paths = { home: 'home', libraries: 'libraries', library: 'libraries', recent: 'recent', bookmarks: 'bookmarks', favorite: 'favorites', search: 'search', models: 'models', model: 'models', settings: 'settings', book: 'books', reader: 'read' };
-  const views = { home: 'home', libraries: 'libraries', recent: 'recent', bookmarks: 'bookmarks', favorites: 'favorite', search: 'search', models: 'models', settings: 'settings' };
+  const paths = { home: 'home', libraries: 'libraries', magazines: 'magazines', library: 'libraries', recent: 'recent', bookmarks: 'bookmarks', favorite: 'favorites', search: 'search', models: 'models', model: 'models', settings: 'settings', messages: 'messages', book: 'books', reader: 'read' };
+  const views = { home: 'home', libraries: 'libraries', magazines: 'magazines', recent: 'recent', bookmarks: 'bookmarks', favorites: 'favorite', search: 'search', models: 'models', settings: 'settings', messages: 'messages' };
   const sorts = ['added', 'added_asc', 'title', 'updated', 'release', 'modified'];
   const listViews = ['library', 'recent', 'favorite', 'search', 'model'];
   const settingsSections = ['service', 'users', 'interface', 'performance', 'reading', 'transcoding', 'image-search', 'cache', 'shares', 'network'];
@@ -18,7 +18,7 @@
     // Older service/user links now point to the two panels on the settings home.
     if (route.view === 'settings' && settingsSections.includes(input.section) && !['service', 'users'].includes(input.section)) {
       route.section = input.section;
-      if (route.section === 'transcoding' && input.tab === 'rules') route.tab = 'rules';
+      if (route.section === 'transcoding' && ['rules', 'ignored'].includes(input.tab)) route.tab = input.tab;
     }
     if (['library', 'model', 'book', 'reader'].includes(route.view)) {
       route.id = id(String(input.id ?? '')); if (!route.id) return home();

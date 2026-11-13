@@ -91,5 +91,75 @@
     const revision = typeof book.page_revision === 'string' && /^[a-f0-9]{24}$/.test(book.page_revision) ? book.page_revision : '';
     return base + '?width=' + bucket + (revision ? '&v=' + encodeURIComponent(revision) : '');
   }
-  return { buildSpreads, spreadForPage, visualPages, effectiveMode, effectiveDirection, canScrollPage, createWheelPager, swipePageDelta, pageDimensions, pdfPageWidth, pageSource };
+  function createFullscreen(doc, button, onChange) {
+    // A dialog cannot be a fullscreen target. Using the document also keeps
+    // secondary reader dialogs, such as the bookmark editor, available.
+    const target = doc.documentElement;
+    const request = target?.requestFullscreen || target?.webkitRequestFullscreen;
+    const exit = doc.exitFullscreen || doc.webkitExitFullscreen;
+    const fullscreenElement = () => doc.fullscreenElement || doc.webkitFullscreenElement;
+    let mode = '', pending = false, cancelled = false;
+
+    function setMode(next) {
+      if (next === mode) return;
+      mode = next;
+      const label = mode === 'immersive' ? '退出沉浸阅读' : mode === 'native' ? '退出全屏' : '进入全屏';
+      button.setAttribute('aria-label', label);
+      button.setAttribute('aria-pressed', String(Boolean(mode)));
+      button.title = label + ' (Enter)';
+      onChange(mode);
+    }
+
+    function exitNative() {
+      try { return Promise.resolve(exit.call(doc)).then(syncNative, () => {}); }
+      catch (_) {}
+    }
+
+    function syncNative() {
+      if (fullscreenElement() === target) {
+        if (!pending) return;
+        pending = false;
+        if (cancelled) exitNative();
+        else setMode('native');
+      } else if (mode === 'native') setMode('');
+    }
+
+    function requestFailed() {
+      if (!pending) return;
+      pending = false;
+      if (!cancelled) setMode('immersive');
+    }
+
+    function toggle() {
+      if (mode === 'native') return exitNative();
+      if (mode === 'immersive') { setMode(''); return; }
+      if (pending) return;
+      if (!request || !exit || (doc.fullscreenEnabled ?? doc.webkitFullscreenEnabled) === false || fullscreenElement()) {
+        setMode('immersive');
+        return;
+      }
+      cancelled = false;
+      pending = true;
+      try {
+        const result = request.call(target);
+        if (result?.then) return result.then(() => { syncNative(); requestFailed(); }, requestFailed);
+        // The prefixed WebKit API reports completion through events.
+        syncNative();
+      } catch (_) { requestFailed(); }
+    }
+
+    button.setAttribute('aria-pressed', 'false');
+    for (const event of ['fullscreenchange', 'webkitfullscreenchange']) doc.addEventListener(event, syncNative);
+    for (const event of ['fullscreenerror', 'webkitfullscreenerror']) doc.addEventListener(event, requestFailed);
+    return {
+      toggle,
+      active: () => Boolean(mode),
+      reset() {
+        cancelled = true;
+        if (mode === 'native' && fullscreenElement() === target) exitNative();
+        setMode('');
+      }
+    };
+  }
+  return { buildSpreads, spreadForPage, visualPages, effectiveMode, effectiveDirection, canScrollPage, createWheelPager, swipePageDelta, pageDimensions, pdfPageWidth, pageSource, createFullscreen };
 }));

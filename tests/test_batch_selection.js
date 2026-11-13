@@ -13,6 +13,8 @@ test('model and search batch administration never becomes available to child acc
   assert.deepEqual(Batch.actions('library', false), ['favorite', 'random']);
   assert.deepEqual(Batch.actions('library', true), ['remove', 'favorite', 'random']);
   assert.equal(Batch.kind('libraries', false), null);
+  assert.equal(Batch.kind('magazines', false), null);
+  assert.deepEqual(Batch.actions('magazines', true), Batch.actions('libraries', true));
   assert.deepEqual(Batch.actions('home', true), []);
 });
 

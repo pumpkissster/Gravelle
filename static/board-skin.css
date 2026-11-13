@@ -13,6 +13,8 @@
 .classic-icon { display: var(--classic-icon-display, inline); }
 .board-icon { display: var(--board-icon-display, none); fill: currentColor; stroke: none; }
 .board-icon > * { fill: currentColor; stroke: none; }
+.scallop-outline { stroke-width: var(--scallop-outline-width, inherit); }
+.scallop-ribs { stroke-width: var(--scallop-rib-width, inherit); }
 .classic-icon-text { display: var(--classic-icon-display, inline); }
 .board-icon-only { display: var(--board-icon-display, none); width: 20px; height: 20px; }
 
@@ -139,6 +141,8 @@
 html[data-interface-skin="board"] {
   --classic-icon-display: none;
   --board-icon-display: inline;
+  --scallop-outline-width: 2;
+  --scallop-rib-width: 1.8;
   --paper: #121212;
   --surface: #262626;
   --ink: #f7f7f7;
@@ -255,12 +259,9 @@ html[data-interface-skin="board"] #app .nav-item small {
   flex-shrink: 0;
 }
 html[data-interface-skin="board"] #app .nav-item.active small { background: color-mix(in srgb, var(--on-accent) 18%, transparent); color: var(--on-accent); }
-html[data-interface-skin="board"] .library-nav { margin: 0 0 8px 24px; padding-left: 12px; border-color: var(--line); }
-html[data-interface-skin="board"] #app .library-nav-item { min-height: 32px; padding: 7px 8px; border-radius: 8px; color: var(--muted); font-size: 13px; line-height: 18px; }
+html[data-interface-skin="board"] .library-nav { margin-bottom: 8px; padding-left: 12px; border-color: var(--line); }
+html[data-interface-skin="board"] #app .library-nav-item { min-height: 32px; padding: 7px 8px 7px 14px; border-radius: 8px; color: var(--muted); font-size: 13px; line-height: 18px; }
 html[data-interface-skin="board"] #app .library-nav-item.active { background: var(--accent-soft); color: var(--text-accent); }
-html[data-interface-skin="board"] #app .library-nav-item.active svg { color: inherit; }
-html[data-interface-skin="board"] #app .library-nav-item > .library-type-dot { color: inherit; }
-html[data-interface-skin="board"] #app .library-type-dot .board-icon-only { width: 14px; height: 14px; vertical-align: middle; }
 html[data-interface-skin="board"] .sidebar-user-area { padding-top: 24px; }
 html[data-interface-skin="board"] .sidebar-bottom.account-area { border-color: var(--line); padding-top: 12px; }
 html[data-interface-skin="board"] .account-toggle { border-radius: 10px; }
@@ -292,6 +293,8 @@ html[data-interface-skin="board"] :is(#app, #login-screen, .settings-dialog, .sh
   transition: background-color .15s, color .15s, border-color .15s, box-shadow .15s, transform .15s;
 }
 html[data-interface-skin="board"] :is(#app, #login-screen, .settings-dialog, .sharing-dialog) .button svg { width: 20px; height: 20px; flex: 0 0 20px; }
+html[data-interface-skin="board"] :is(#app, .settings-dialog) .library-order-actions > .button { padding: 5px 9px; font-size: 13px; }
+html[data-interface-skin="board"] :is(#app, .settings-dialog) .library-order-actions > .button > svg { width: 16px; height: 16px; flex-basis: 16px; }
 html[data-interface-skin="board"] :is(#app, #login-screen, .settings-dialog, .sharing-dialog) .button-primary {
   color: var(--on-accent);
   background: linear-gradient(180deg, var(--board-primary-top), var(--board-primary-bottom));
@@ -418,7 +421,7 @@ html[data-interface-skin="board"] :is(#app, #login-screen, .settings-dialog, .sh
   .library-dialog select, .library-dialog textarea, .login-card input,
   .transcode-filter input, .transcode-filter select, .transcode-rule-field input,
   .transcode-rule-field select, .network-field input, .sharing-field input,
-  .sharing-result > input, .cache-limit-input input, .sharing-password-value,
+  .sharing-result > input, .cache-limit-input input, .sharing-copy-value,
   .performance-row input, .performance-task-actions input,
   .image-search-failures-filter input, .image-search-failures-filter select
 ) {
@@ -637,7 +640,7 @@ html[data-interface-skin="board"] .settings-panel .setting-row { padding: 16px 0
 html[data-interface-skin="board"] .settings-panel .setting-row:last-child { padding-bottom: 0; }
 html[data-interface-skin="board"] .service-panel dl { grid-template-columns: 152px minmax(0, 1fr); row-gap: 16px; }
 html[data-interface-skin="board"] .service-panel dt { align-self: center; }
-html[data-interface-skin="board"] :is(.service-panel code, .field-hint code, .empty-state code, .sharing-copy-field) { background: var(--board-hover); border-color: var(--line); color: var(--ink); border-radius: 6px; }
+html[data-interface-skin="board"] :is(.service-panel code, .field-hint code, .empty-state code) { background: var(--board-hover); border-color: var(--line); color: var(--ink); border-radius: 6px; }
 html[data-interface-skin="board"] #app #settings-connection { color: var(--ink); }
 html[data-interface-skin="board"] #app #settings-connection.connection-error { color: var(--text-danger); }
 html[data-interface-skin="board"] .settings-menu { gap: 16px; }
@@ -646,36 +649,6 @@ html[data-interface-skin="board"] #app .settings-menu-item:hover { background: v
 html[data-interface-skin="board"] .settings-menu-content strong { font-size: 16px; line-height: 22px; font-weight: 500; }
 html[data-interface-skin="board"] .settings-menu-content small { margin-top: 4px; font-size: 13px; line-height: 18px; }
 html[data-interface-skin="board"] .settings-menu-icon { background: var(--board-hover); border: 1px solid var(--line); color: var(--muted); border-radius: 12px; }
-html[data-interface-skin="board"] .settings-menu-badge { color: var(--text-accent); background: var(--accent-soft); }
-html[data-interface-skin="board"] #optimization-pending {
-  display: grid;
-  grid-template-columns: 20px minmax(0, 1fr) 16px;
-  align-items: center;
-  gap: 10px;
-  min-height: 66px;
-  padding: 12px;
-  border: 1px solid color-mix(in srgb, var(--text-accent) 18%, var(--line));
-  background: var(--accent-soft);
-  color: var(--text-accent);
-  border-radius: 12px;
-  box-shadow: none;
-  transition: border-color .15s, background-color .15s;
-}
-html[data-interface-skin="board"] #optimization-pending > svg:first-child { width: 20px; height: 20px; }
-html[data-interface-skin="board"] #optimization-pending > svg:last-child { width: 16px; height: 16px; color: var(--text-accent); }
-html[data-interface-skin="board"] #optimization-pending > span { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-html[data-interface-skin="board"] #optimization-pending small { order: 0; margin: 0; font: 500 14px/20px var(--sans); color: var(--ink); }
-html[data-interface-skin="board"] #optimization-pending strong {
-  order: 1;
-  font: 500 13px/18px var(--sans);
-  color: color-mix(in srgb, var(--text-accent) 20%, var(--ink));
-  overflow-wrap: anywhere;
-}
-html[data-interface-skin="board"] #optimization-pending:hover {
-  border-color: var(--text-accent);
-  background: color-mix(in srgb, var(--text-accent) 6%, var(--accent-soft));
-}
-html[data-interface-skin="board"] #optimization-pending:not([hidden]) + .account-area { margin-top: 12px; }
 
 /* Shared dialogs, profile tabs, directory picker and access cards. */
 html[data-interface-skin="board"] :is(.settings-dialog, .sharing-dialog) {
@@ -785,13 +758,13 @@ html[data-interface-skin="board"] :is(#app, .sharing-dialog) .sharing-duration .
   background: var(--board-disabled);
   box-shadow: none;
 }
-html[data-interface-skin="board"] .sharing-password-panel { background: var(--paper); border-radius: 11px; }
-html[data-interface-skin="board"] .sharing-password-controls .sharing-copy-password { background: var(--board-raised); color: var(--ink); }
+html[data-interface-skin="board"] .sharing-copy-panel { background: var(--paper); border-radius: 11px; }
+html[data-interface-skin="board"] .sharing-copy-panel .sharing-copy-button { background: var(--board-raised); color: var(--ink); }
 html[data-interface-skin="board"] .network-listening[data-state="ready"] { color: var(--text-accent); }
 html[data-interface-skin="board"] .network-recovery { border-radius: 11px; background: var(--paper); }
 html[data-interface-skin="board"] .network-error { color: var(--text-danger); border-color: color-mix(in srgb, var(--text-danger) 35%, var(--line)); background: color-mix(in srgb, var(--text-danger) 5%, var(--surface)); }
 html[data-interface-skin="board"] #app .notice:not(.error) { color: var(--ink); border-color: var(--line); background: var(--surface); border-radius: 11px; }
-html[data-interface-skin="board"] #app :is(.notice.error, .scan-errors) { color: var(--text-warning); border-color: color-mix(in srgb, var(--text-warning) 30%, var(--line)); background: color-mix(in srgb, var(--text-warning) 5%, var(--surface)); border-radius: 11px; }
+html[data-interface-skin="board"] #app .notice.error { color: var(--text-warning); border-color: color-mix(in srgb, var(--text-warning) 30%, var(--line)); background: color-mix(in srgb, var(--text-warning) 5%, var(--surface)); border-radius: 11px; }
 html[data-interface-skin="board"] .empty-illustration { background: var(--surface); border-color: var(--line); box-shadow: var(--board-shadow); border-radius: 20px; }
 html[data-interface-skin="board"] .folder-guide { background: var(--surface); border-color: var(--line); border-radius: 11px; }
 html[data-interface-skin="board"] .toast { border: 1px solid var(--line); background: var(--board-raised); color: var(--ink); box-shadow: var(--board-shadow-hover); border-radius: 12px; }

@@ -88,6 +88,12 @@ def match_reasons(page, rules):
     return reasons
 
 
+def catalogue_visibility(alias="b"):
+    """SQL predicate for shared import visibility, independent of account access."""
+    return f"""NOT EXISTS(SELECT 1 FROM tc_books tc WHERE tc.book_id={alias}.id AND (
+        tc.decision='ignored' OR (tc.published=0 AND EXISTS(SELECT 1 FROM tc_settings WHERE enabled=1))))"""
+
+
 def image_dimensions(handle):
     """Read headers only; no full image decode during a library scan."""
     handle.seek(0)
@@ -631,9 +637,8 @@ class TranscodingManager:
 
     def inspect_book(self, book):
         """Source headers are inspected outside catalogue write transactions."""
-        # PDF pages already have bounded, on-demand rendering and its own cache.
-        # Do not eagerly rasterize a document or apply source-image rules to it.
-        if book["format"] in ("pdf", "epub"):
+        # These formats use their own on-demand page readers.
+        if book["format"] in ("pdf", "epub", "rar"):
             return []
         from server import check_zip_directory, validate_archive_image
         root = self.library._directory_path(book["source_root"])
@@ -730,7 +735,9 @@ class TranscodingManager:
         for key in set(previous) - current_keys:
             connection.execute("DELETE FROM tc_pages WHERE book_id=? AND page_key=?", (book["id"], key))
             changed = True
-        if not rules["enabled"] or not matched:
+        if decision == "ignored":
+            status, published = "ignored", False
+        elif not rules["enabled"] or not matched:
             status, published = "original", True
             connection.execute("UPDATE tc_pages SET active_file='',active_source='',active_profile='' WHERE book_id=?", (book["id"],))
         elif decision == "original":
@@ -799,7 +806,10 @@ class TranscodingManager:
         profile = output_profile(rules)
         impacts = []
         with closing(self.library.connect()) as connection:
+            ignored = {row[0] for row in connection.execute("SELECT book_id FROM tc_books WHERE decision='ignored'")}
             for book, pages in sources:
+                if book["id"] in ignored:
+                    continue
                 old = {row["page_key"]: row for row in connection.execute("SELECT * FROM tc_pages WHERE book_id=?", (book["id"],))}
                 newly, removed, redo = 0, 0, 0
                 reasons = set()
@@ -877,9 +887,10 @@ class TranscodingManager:
             statuses = {row["status"]: row["count"] for row in connection.execute("""
                 SELECT t.status, COUNT(*) AS count FROM tc_books t
                 JOIN books b ON b.id=t.book_id
-                WHERE b.active=1 AND b.removed=0 AND EXISTS(
-                    SELECT 1 FROM tc_pages p WHERE p.book_id=b.id AND p.matched=1)
+                WHERE b.active=1 AND b.removed=0 AND (t.decision='ignored' OR EXISTS(
+                    SELECT 1 FROM tc_pages p WHERE p.book_id=b.id AND p.matched=1))
                 GROUP BY t.status""")}
+            ignored_count = statuses.pop("ignored", 0)
             # Rules may return a previously optimized book to pending while
             # keeping the previous readable outputs. It needs another choice
             # just as an undecided new import does; paused/failed jobs do not.
@@ -898,6 +909,7 @@ class TranscodingManager:
                        processing_books=statuses.get("queued", 0) + statuses.get("running", 0),
                        queued_books=statuses.get("queued", 0), failed_books=statuses.get("failed", 0),
                        completed_books=statuses.get("ready", 0), original_books=statuses.get("original", 0),
+                       ignored_books=ignored_count,
                        paused_books=statuses.get("paused", 0) + statuses.get("cancelled", 0))
         scans = [item["last_scan"] for item in libraries if item["last_scan"] is not None]
         return dict(summary=summary, enabled=rules["enabled"], revision=revision,
@@ -935,13 +947,21 @@ class TranscodingManager:
                 FROM tc_books t JOIN books b ON b.id=t.book_id
                 JOIN media_libraries l ON l.id=b.library_id LEFT JOIN book_metadata m ON m.book_id=b.id
                 JOIN page_totals p ON p.book_id=b.id LEFT JOIN output_totals o ON o.book_id=b.id
-                WHERE b.active=1 AND b.removed=0 ORDER BY t.updated_at DESC,b.id""").fetchall()
+                WHERE b.active=1 AND b.removed=0 AND t.decision<>'ignored'
+                ORDER BY t.updated_at DESC,b.id""").fetchall()
+            ignored_books = [dict(row) for row in connection.execute("""
+                SELECT t.book_id AS id,COALESCE(m.title,b.title) AS title,b.library_id,
+                       l.name AS library_name,b.page_count,t.status,t.updated_at
+                FROM tc_books t JOIN books b ON b.id=t.book_id
+                JOIN media_libraries l ON l.id=b.library_id LEFT JOIN book_metadata m ON m.book_id=b.id
+                WHERE b.active=1 AND b.removed=0 AND t.decision='ignored'
+                ORDER BY t.updated_at DESC,b.id""")]
             # Rule reasons have only a few combinations. Deduplicate in SQL
             # before decoding them instead of parsing JSON once for every page.
             reasons = {}
             for row in connection.execute("""SELECT DISTINCT p.book_id,p.reasons FROM tc_pages p
                     JOIN tc_books t ON t.book_id=p.book_id JOIN books b ON b.id=p.book_id
-                    WHERE p.matched=1 AND b.active=1 AND b.removed=0"""):
+                    WHERE p.matched=1 AND b.active=1 AND b.removed=0 AND t.decision<>'ignored'"""):
                 reasons.setdefault(row["book_id"], set()).update(json.loads(row["reasons"]))
             books = []
             for row in records:
@@ -966,13 +986,13 @@ class TranscodingManager:
                        queued_books=sum(item["status"] == "queued" for item in books),
                        failed_books=sum(item["status"] == "failed" for item in books),
                        completed_books=sum(item["status"] == "ready" for item in books),
-                       original_books=sum(item["status"] == "original" for item in books),
+                       original_books=sum(item["status"] == "original" for item in books), ignored_books=len(ignored_books),
                        paused_books=sum(item["status"] in ("paused", "cancelled") for item in books),
                        matched_images=sum(item["matched_count"] for item in books), actual_bytes=sum(item["actual_bytes"] for item in books))
         summary["pending_decision_books"] = summary["pending_books"]
         summary["stored_bytes"] = stored_bytes
         summary["reclaimable_files"], summary["reclaimable_bytes"] = reclaimable[0], reclaimable[1]
-        return dict(rules=rules, revision=revision, summary=summary, books=books)
+        return dict(rules=rules, revision=revision, summary=summary, books=books, ignored_books=ignored_books)
 
     @staticmethod
     def _parameter_snapshot(record):
@@ -1169,24 +1189,48 @@ class TranscodingManager:
         self.library.require_admin()
         ids = self.library._batch_ids(body.get("ids"))
         action = body.get("action")
-        if action not in ("original", "transcode", "pause", "resume", "cancel", "retry"):
+        if action not in ("original", "transcode", "ignore", "restore", "pause", "resume", "cancel", "retry"):
             raise self._error("优化批量操作无效。")
         with self.lock, closing(self.library.connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             rules, revision = self.settings(connection)
-            if not rules["enabled"]:
+            if not rules["enabled"] and action != "restore":
                 raise self._error("请先启用图片优化规则。")
             records = {}
             for book_id in ids:
-                record = connection.execute("""SELECT t.* FROM tc_books t JOIN books b ON b.id=t.book_id
-                    WHERE t.book_id=? AND b.active=1 AND b.removed=0 AND
-                    EXISTS(SELECT 1 FROM tc_pages p WHERE p.book_id=b.id AND p.matched=1)""", (book_id,)).fetchone()
+                record = connection.execute("""SELECT t.*,
+                    EXISTS(SELECT 1 FROM tc_pages p WHERE p.book_id=b.id AND p.matched=1) AS has_matches
+                    FROM tc_books t JOIN books b ON b.id=t.book_id
+                    WHERE t.book_id=? AND b.active=1 AND b.removed=0""", (book_id,)).fetchone()
                 if record is None:
                     raise self._error("部分所选作品不在优化名单中，请刷新后重试。", 404)
+                ignored = record["decision"] == "ignored"
+                if action == "restore":
+                    if not ignored:
+                        raise self._error("部分所选作品不在忽略列表中，请刷新后重试。", 409)
+                elif not ignored and not record["has_matches"]:
+                    raise self._error("部分所选作品不在优化名单中，请刷新后重试。", 404)
+                elif ignored and action != "ignore":
+                    raise self._error("请先从忽略列表恢复作品。", 409)
                 records[book_id] = record
-            next_order = connection.execute("SELECT COALESCE(MAX(queue_order),0) FROM tc_books").fetchone()[0]
+            next_order = 0
+            if action in ("transcode", "resume", "retry"):
+                next_order = connection.execute("SELECT COALESCE(MAX(queue_order),0) FROM tc_books").fetchone()[0]
             for book_id in ids:
-                if action == "original":
+                record = records[book_id]
+                if action == "ignore":
+                    if record["decision"] == "ignored":
+                        continue
+                    connection.execute("""UPDATE tc_books SET decision='ignored',status='ignored',published=0,
+                        error='',generation=generation+1,updated_at=? WHERE book_id=?""", (time.time(), book_id))
+                    connection.execute("""UPDATE tc_pages SET active_file='',active_source='',active_profile='',
+                        status=CASE WHEN status='running' THEN 'pending' ELSE status END WHERE book_id=?""", (book_id,))
+                elif action == "restore":
+                    pending = rules["enabled"] and record["has_matches"]
+                    connection.execute("""UPDATE tc_books SET decision='undecided',status=?,published=?,
+                        error='',generation=generation+1,updated_at=? WHERE book_id=?""",
+                        ("pending" if pending else "original", int(not pending), time.time(), book_id))
+                elif action == "original":
                     connection.execute("UPDATE tc_books SET decision='original',status='original',published=1,error='',generation=generation+1,updated_at=? WHERE book_id=?", (time.time(), book_id))
                     connection.execute("UPDATE tc_pages SET active_file='',active_source='',active_profile='' WHERE book_id=?", (book_id,))
                 elif action in ("pause", "cancel"):
@@ -1194,7 +1238,6 @@ class TranscodingManager:
                                        ("paused" if action == "pause" else "cancelled", time.time(), book_id))
                     connection.execute("UPDATE tc_pages SET status='pending' WHERE book_id=? AND status='running'", (book_id,))
                 else:
-                    record = records[book_id]
                     order = record["queue_order"]
                     if record["status"] not in ("queued", "running") or not order:
                         next_order += 1
@@ -1254,8 +1297,8 @@ class TranscodingManager:
         from server import check_zip_directory, validate_archive_image
         @contextmanager
         def opened():
-            if book["format"] in ("pdf", "epub"):
-                raise self._error("PDF 页面使用按需渲染，不参与图片优化或搜图索引。", 422)
+            if book["format"] in ("pdf", "epub", "rar"):
+                raise self._error("此格式不参与图片优化或搜图索引。", 422)
             root = self.library._directory_path(book["source_root"])
             if book["format"] == "folder":
                 with self.library._open_media_file(root, page_key) as handle:

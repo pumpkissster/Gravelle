@@ -1,12 +1,15 @@
 """Real catalogue invalidation, bounded list reads and account-scoped status."""
 from contextlib import closing
+from email.message import Message
 import http.client
+from io import BytesIO
 import json
 import threading
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from image_search import ALGORITHM_VERSION, LOCAL_VERSION
-from server import COOKIE_NAME, Library, ReaderError, ReaderServer
+from server import COOKIE_NAME, Library, ReaderError, ReaderHandler, ReaderServer
 from test_image_search import ImageSearchFixture
 
 
@@ -89,6 +92,86 @@ class CatalogPerformanceTests(ImageSearchFixture):
         self.assert_mutation_invalidates('UPDATE tc_books SET published=0 WHERE book_id=?', (self.book_id,))
         self.assert_mutation_invalidates('UPDATE tc_settings SET enabled=1 WHERE id=1')
         self.assert_mutation_invalidates('UPDATE library_cover_cache SET generation=generation+1 WHERE library_id=?', (self.library_id,))
+
+    def seed_library_order(self):
+        photos = [self.library_id, '1' * 24, '2' * 24]
+        magazines = ['3' * 24, '4' * 24]
+        with closing(self.app.connect()) as connection, connection:
+            connection.execute('UPDATE media_libraries SET created_at=1 WHERE id=?', (self.library_id,))
+            for position, (identifier, kind) in enumerate([
+                (magazines[0], 'magazine'), (photos[1], 'manga_jp'),
+                (magazines[1], 'magazine'), (photos[2], 'photo'),
+            ], start=2):
+                connection.execute('''INSERT INTO media_libraries(id,name,path,media_type,created_at)
+                    VALUES(?,?,?,?,?)''', (identifier, str(position), str(self.media), kind, position))
+        return photos, magazines
+
+    def library_ids(self, *, include_hidden=False):
+        return [row['id'] for row in self.app.libraries(include_hidden, include_covers=False)['libraries']]
+
+    def test_manual_library_order_preserves_hidden_slots_across_categories_and_restarts(self):
+        photos, magazines = self.seed_library_order()
+        a, hidden, c = photos
+        first_magazine, second_magazine = magazines
+        self.assertEqual(self.library_ids(), [a, first_magazine, hidden, second_magazine, c])
+        self.app.save_my_libraries({'visible_library_ids': [a, c, *magazines]})
+        before = self.token()
+        body = {'kind': 'photo', 'previous_ids': [a, c], 'ids': [c, a]}
+        self.assertEqual(self.app.order_libraries(body), {'ids': [c, a]})
+        self.assertEqual(self.library_ids(), [c, first_magazine, second_magazine, a])
+        self.assertNotEqual(self.token(), before)
+        self.assertEqual(self.library_ids(include_hidden=True), [c, first_magazine, hidden, second_magazine, a])
+        after = self.token()
+        self.assertEqual(self.app.order_libraries(body), {'ids': [c, a]})
+        self.assertEqual(self.token(), after, 'An idempotent retry must not invalidate the catalogue')
+
+        self.app.order_libraries({'kind': 'magazine', 'ids': magazines[::-1]})
+        self.app.close()
+        self.app = Library(self.media, self.data, '', 0)
+        self.assertEqual(self.library_ids(include_hidden=True), [c, second_magazine, hidden, first_magazine, a])
+        new_id = '5' * 24
+        self.sql('INSERT INTO media_libraries(id,name,path,media_type,created_at) VALUES(?,?,?,?,?)',
+                 (new_id, 'new', str(self.media), 'photo', 6))
+        self.assertEqual(self.library_ids(include_hidden=True), [c, second_magazine, hidden, first_magazine, a, new_id])
+
+    def test_library_order_api_is_admin_only_and_rejects_stale_or_invalid_groups(self):
+        photos, magazines = self.seed_library_order()
+        child = self.child(photos + magazines)
+        cookies = {actor: f'{COOKIE_NAME}={self.app.make_session(actor)}' for actor in (1, child)}
+
+        def request(actor, path, body=None):
+            handler = ReaderHandler.__new__(ReaderHandler)
+            handler.server = SimpleNamespace(library=self.app, share_only=False)
+            handler.client_address = ('127.0.0.1', 0)
+            handler.path = path
+            handler.command = 'GET' if body is None else 'POST'
+            handler.raw_requestline = f'{handler.command} {path} HTTP/1.1'.encode('ascii')
+            handler.headers = Message()
+            if actor:
+                handler.headers['Cookie'] = cookies[actor]
+            if body is not None:
+                data = json.dumps(body).encode('utf-8')
+                handler.headers['Content-Type'] = 'application/json'
+                handler.headers['Content-Length'] = str(len(data))
+                handler.rfile = BytesIO(data)
+            responses = []
+            handler.respond = lambda payload, status=200, headers=None: responses.append((status, payload))
+            (handler.do_GET if body is None else handler.do_POST)()
+            self.assertEqual(len(responses), 1)
+            return responses[0]
+
+        order = '/api/libraries/order'
+        body = {'kind': 'photo', 'previous_ids': photos, 'ids': photos[::-1]}
+        self.assertEqual(request(None, order, body)[0], 401)
+        self.assertEqual(request(child, order, body)[0], 403)
+        self.assertEqual(request(1, order, {**body, 'ids': [photos[0], photos[0]]})[0], 400)
+        self.assertEqual(request(1, order, {**body, 'ids': [*photos[1:], magazines[0]]})[0], 409)
+        self.assertEqual(request(1, order + '?ignored=1', body)[0], 400)
+        self.assertEqual(request(1, order, body), (200, {'ids': photos[::-1]}))
+        self.assertEqual(request(1, order, {**body, 'ids': photos})[0], 409)
+        status, payload = request(child, '/api/libraries')
+        self.assertEqual(status, 200)
+        self.assertEqual([item['id'] for item in payload['libraries'] if item['media_type'] != 'magazine'], photos[::-1])
 
     def test_account_and_visibility_changes_are_never_cached_across_users(self):
         child = self.child([self.library_id])

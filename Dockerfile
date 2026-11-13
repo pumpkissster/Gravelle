@@ -26,7 +26,7 @@ WORKDIR /app
 # The PDFium Linux font mapper scans /usr/share/fonts directly. Keep the
 # Debian package copyright files alongside the CJK fonts and fontconfig tools.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends fontconfig fonts-noto-cjk \
+    && apt-get install -y --no-install-recommends fontconfig fonts-noto-cjk libarchive-tools \
     && fc-cache -f \
     && test -s /usr/share/doc/fonts-noto-cjk/copyright \
     && test -s /usr/share/doc/fontconfig/copyright \
@@ -46,7 +46,7 @@ RUN python -m pip install --no-cache-dir -r requirements.txt \
 RUN python -c "import ssl; from cryptography.hazmat.primitives.serialization import pkcs12; assert callable(pkcs12.load_key_and_certificates); ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)"
 
 COPY server.py accounts.py password_reset.py network_settings.py https_settings.py transcoding.py image_search.py image_search_features.py task_scheduler.py library_covers.py cache_manager.py page_cache.py sharing.py share_crypto.py share_passwords.py epub_reader.py pdf_reader.py ./
-COPY avatar_face_crop.py ./
+COPY avatar_face_crop.py rar_reader.py ./
 COPY models/yunet ./models/yunet
 COPY desktop/licenses/OpenSSL-4.0.2-LICENSE.txt ./licenses/cryptography/OpenSSL-4.0.2-LICENSE.txt
 COPY release.json LICENSE ./

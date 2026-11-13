@@ -10,7 +10,7 @@
   const labels = { mode: '阅读方式', direction: '阅读方向', fit: '图片适配' };
   const MEDIA_LIMIT = 3, MEMORY_LIMIT = 96 * 1024 * 1024;
   function tokenFromPath(path) { return /^\/share\/([A-Za-z0-9_-]{43})\/?$/.exec(String(path || ''))?.[1] || null; }
-  function validManifest(value) { return Boolean(value?.manifest && typeof value.manifest.title === 'string' && Number.isInteger(value.manifest.page_count) && value.manifest.page_count > 0 && value.manifest.page_count <= 100000 && typeof value.key === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value.key) && ['folder', 'zip', 'cbz', 'archive', 'pdf', 'epub'].includes(value.manifest.format)); }
+  function validManifest(value) { return Boolean(value?.manifest && typeof value.manifest.title === 'string' && Number.isInteger(value.manifest.page_count) && value.manifest.page_count > 0 && value.manifest.page_count <= 100000 && typeof value.key === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value.key) && ['folder', 'zip', 'cbz', 'archive', 'pdf', 'epub', 'rar'].includes(value.manifest.format)); }
   function pageNumber(value, total) { const number = Number(value); return Number.isInteger(number) ? Math.min(Math.max(number, 0), Math.max(0, total - 1)) : 0; }
   function readingPrefs(saved, book = {}) {
     const value = saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : {};
@@ -37,6 +37,11 @@
     let spreads = null, lastMode = 'single', offsets = [0], rowWidth = 0, scrollRestoring = null;
     const media = new Map(), rows = new Map(), sizes = new Map(), controllers = new Set(), failedPages = new Set();
     const wheel = Model.createWheelPager();
+    const fullscreen = Model.createFullscreen(doc, $('share-fullscreen'), mode => {
+      if (!active) return;
+      setChrome(mode !== 'immersive');
+      controls();
+    });
     const storageKey = 'gravelle-share-page:' + token, prefsKey = 'gravelle-share-prefs:' + token, exitKey = 'gravelle-share-exit:' + token;
     const element = (name, className, text) => { const node = doc.createElement(name); node.className = className || ''; if (text !== undefined) node.textContent = text; return node; };
     const style = (node, name, value) => node?.style?.setProperty(name, value);
@@ -72,7 +77,7 @@
       for (const timer of [expiryTimer, chromeTimer, scrollTimer, resizeTimer]) win.clearTimeout(timer);
       expiryTimer = chromeTimer = scrollTimer = resizeTimer = null; win.clearInterval(heartbeat); heartbeat = null;
       closeChoice(); menu.hidden = help.hidden = true; touch = null; wheel.reset();
-      if (doc.fullscreenElement === reader) Promise.resolve(doc.exitFullscreen?.()).catch(() => {});
+      fullscreen.reset();
     }
     function gateState(text, { password = false, retry = false, title = '分享已结束' } = {}) {
       clearSession(); reader.hidden = true; gate.hidden = false; gateTitle.textContent = title; gateMessage.textContent = text; gateMessage.hidden = !text;
@@ -289,7 +294,6 @@
       popup.replaceChildren(element('span', 'reader-choice-heading', labels[name]), ...popupOptions); popup.hidden = false; positionChoice();
       (edge === 'End' ? popupOptions.at(-1) : popupOptions.find(button => button.getAttribute('aria-selected') === 'true') || popupOptions[0])?.focus();
     }
-    async function fullscreen() { try { if (doc.fullscreenElement) await doc.exitFullscreen?.(); else await reader.requestFullscreen?.(); } catch (_) {} setChrome(true); }
     function toggleHelp() { closeChoice(); help.hidden = !help.hidden; $('share-help').setAttribute('aria-expanded', String(!help.hidden)); setChrome(true); if (!help.hidden) $('share-help-close').focus(); }
     function scrollBy(amount) { if (viewport.scrollBy) viewport.scrollBy({ top: amount, behavior: 'auto' }); else viewport.scrollTop = Math.max(0, (viewport.scrollTop || 0) + amount); }
     function verticalMove(delta, event) { if (Model.canScrollPage(delta, viewport)) { scrollBy(delta * Math.max(80, (viewport.clientHeight || 800) * .8)); wheel.reset(); } else if (!event?.repeat) move(delta); }
@@ -316,7 +320,7 @@
     listening(reader, 'pointerdown', event => { if (choice && !event.target?.closest?.('.reader-choice,.reader-choice-popover')) closeChoice(); scheduleChrome(); }, true);
     listening(reader, 'focusout', scheduleChrome); listening(reader, 'keydown', event => { if (event.key === 'Tab' && active) setChrome(true); });
     listening($('share-theme'), 'click', () => change('theme', prefs.theme === 'dark' ? 'light' : 'dark')); listening($('share-menu-theme'), 'click', () => change('theme', prefs.theme === 'dark' ? 'light' : 'dark'));
-    listening($('share-fullscreen'), 'click', fullscreen); listening($('share-help'), 'click', toggleHelp); listening($('share-help-close'), 'click', () => { help.hidden = true; setChrome(true); });
+    listening($('share-fullscreen'), 'click', fullscreen.toggle); listening($('share-help'), 'click', toggleHelp); listening($('share-help-close'), 'click', () => { help.hidden = true; setChrome(true); });
     listening($('share-menu-toggle'), 'click', () => { menu.hidden = !menu.hidden; $('share-menu-toggle').setAttribute('aria-expanded', String(!menu.hidden)); setChrome(true); });
     listening($('share-menu-mode'), 'click', () => change('mode', prefs.mode === 'double' ? 'single' : 'double'));
     listening($('share-cover-alone'), 'change', event => change('coverAlone', Boolean(event.target?.checked ?? $('share-cover-alone').checked))); listening($('share-spread-offset'), 'change', event => change('offset', Boolean(event.target?.checked ?? $('share-spread-offset').checked)));
@@ -355,7 +359,7 @@
     listening(viewport, 'pointerdown', event => { if (event.target === viewport && event.pointerType !== 'touch') scrollRestoring = null; }, { passive: true });
     listening(doc, 'keydown', event => {
       if (!active || event.defaultPrevented || event.ctrlKey || event.altKey || event.metaKey) return;
-      if (event.key === 'Escape') { event.preventDefault(); if (choice) closeChoice(true); else if (!help.hidden) help.hidden = true; else if (!menu.hidden) menu.hidden = true; else if (doc.fullscreenElement) doc.exitFullscreen?.(); else exit(); return; }
+      if (event.key === 'Escape') { event.preventDefault(); if (choice) closeChoice(true); else if (!help.hidden) help.hidden = true; else if (!menu.hidden) menu.hidden = true; else if (fullscreen.active()) fullscreen.toggle(); else exit(); return; }
       if (/^(INPUT|TEXTAREA|SELECT|BUTTON)$/.test((event.target || doc.activeElement)?.tagName || '') || choice) return;
       if (!help.hidden && !['?', '/'].includes(event.key)) return;
       let delta = 0;
@@ -366,12 +370,11 @@
       else if (['Home', 'End'].includes(event.key)) { event.preventDefault(); render(event.key === 'Home' ? 0 : manifest.page_count - 1); }
       else if (event.key.toLowerCase() === 'm') { event.preventDefault(); setChrome(reader.dataset.controls !== 'visible'); }
       else if (event.key === '?' || event.key === '/') { event.preventDefault(); toggleHelp(); }
-      else if (event.key === 'Enter') { event.preventDefault(); fullscreen(); }
+      else if (event.key === 'Enter' && !event.repeat) { event.preventDefault(); fullscreen.toggle(); }
       else if (event.key === 'Backspace') { event.preventDefault(); exit(); }
     });
     listening(doc, 'visibilitychange', () => { if (!doc.hidden && active) checkSession(); });
     listening(win, 'resize', () => { if (!active) return; positionChoice(); controls(); win.clearTimeout(resizeTimer); resizeTimer = win.setTimeout(() => { resizeTimer = null; if (active && (lastMode !== mode() || mode() === 'webtoon' || manifest.format === 'pdf')) render(page); }, 100); });
-    listening(doc, 'fullscreenchange', () => { $('share-fullscreen').setAttribute('aria-label', doc.fullscreenElement ? '退出全屏' : '进入全屏'); if (active) controls(); });
     listening(win, 'pagehide', () => { stopped = true; clearSession(); }); listening(win, 'pageshow', event => { if (event.persisted) start(); });
     return { start, reset() { stopped = true; lifecycle++; clearSession(); }, checkSession };
   }

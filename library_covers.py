@@ -19,6 +19,7 @@ import threading
 import time
 
 from PIL import Image, ImageDraw, ImageOps
+from transcoding import catalogue_visibility
 
 
 WIDTH, HEIGHT = 960, 480
@@ -120,13 +121,12 @@ class LibraryCoverManager:
                 return {}
             extra = " AND b.id IN (" + ",".join("?" for _ in selected) + ")"
             arguments.extend(selected)
-        rows = connection.execute("""SELECT b.id,b.signature,
+        rows = connection.execute(f"""SELECT b.id,b.signature,
             COALESCE(m.cover_source,'page') AS cover_source, COALESCE(m.cover_page,0) AS cover_page,
             COALESCE(m.cover_file,'') AS cover_file, COALESCE(m.cover_revision,0) AS cover_revision
             FROM books b LEFT JOIN book_metadata m ON m.book_id=b.id
             WHERE b.library_id=? AND b.active=1 AND b.removed=0
-            AND (NOT EXISTS(SELECT 1 FROM tc_settings WHERE enabled=1)
-                 OR NOT EXISTS(SELECT 1 FROM tc_books tc WHERE tc.book_id=b.id AND tc.published=0))
+            AND {catalogue_visibility()}
             """ + extra + " ORDER BY b.id", arguments)
         return {row["id"]: _hash([row[key] for key in row.keys()]) for row in rows}
 

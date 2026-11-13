@@ -3,7 +3,7 @@
 // Run with: node --test tests/test_reader_model.js
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { buildSpreads, spreadForPage, visualPages, effectiveMode, effectiveDirection, canScrollPage, createWheelPager, swipePageDelta, pageDimensions, pdfPageWidth, pageSource } = require('../static/reader-model.js');
+const { buildSpreads, spreadForPage, visualPages, effectiveMode, effectiveDirection, canScrollPage, createWheelPager, swipePageDelta, pageDimensions, pdfPageWidth, pageSource, createFullscreen } = require('../static/reader-model.js');
 
 test('default spreads preserve a standalone cover and logical page order', () => {
   assert.deepEqual(buildSpreads(0), []);
@@ -172,4 +172,67 @@ test('PDF dimensions and source revisions use distinct browser cache URLs while 
   for (const format of ['folder', 'zip', 'cbz']) assert.equal(pageSource({ ...pdf, format }, 5, 2400), '/api/books/one%2Ftwo/pages/5');
   assert.equal(pageSource({ id: 'list-pdf', format: 'pdf', modified: 10, size: 500 }, 1, 800), '/api/books/list-pdf/pages/1?width=800');
   assert.equal(pageSource({ ...pdf, page_revision: 'bad:old' }, 1, 800), '/api/books/one%2Ftwo/pages/1?width=800');
+});
+
+function fullscreenFixture(configure) {
+  const doc = Object.assign(new EventTarget(), { documentElement: {}, fullscreenElement: null });
+  const attrs = new Map();
+  const button = { setAttribute(name, value) { attrs.set(name, value); } };
+  const modes = [];
+  configure(doc);
+  return { doc, attrs, modes, fullscreen: createFullscreen(doc, button, mode => modes.push(mode)) };
+}
+
+test('reader fullscreen targets the document and tracks browser-initiated exits', async () => {
+  const { doc, attrs, modes, fullscreen } = fullscreenFixture(doc => {
+    doc.documentElement.requestFullscreen = async function () {
+      assert.equal(this, doc.documentElement);
+      doc.fullscreenElement = this;
+      doc.dispatchEvent(new Event('fullscreenchange'));
+    };
+    doc.exitFullscreen = async () => { doc.fullscreenElement = null; doc.dispatchEvent(new Event('fullscreenchange')); };
+  });
+  await fullscreen.toggle();
+  assert.equal(fullscreen.active(), true);
+  assert.equal(attrs.get('aria-label'), '退出全屏');
+  await doc.exitFullscreen();
+  assert.equal(fullscreen.active(), false);
+  assert.equal(attrs.get('aria-label'), '进入全屏');
+  assert.deepEqual(modes, ['native', '']);
+});
+
+test('reader falls back to immersive reading when fullscreen is blocked or unsupported', async () => {
+  for (const request of [undefined, async () => { throw new Error('fullscreen denied'); }]) {
+    const { attrs, modes, fullscreen } = fullscreenFixture(doc => {
+      doc.documentElement.requestFullscreen = request;
+      doc.exitFullscreen = async () => {};
+    });
+    await fullscreen.toggle();
+    assert.equal(attrs.get('aria-label'), '退出沉浸阅读');
+    assert.equal(attrs.get('aria-pressed'), 'true');
+    fullscreen.toggle();
+    assert.equal(attrs.get('aria-pressed'), 'false');
+    assert.deepEqual(modes, ['immersive', '']);
+  }
+});
+
+test('closing the reader cancels a pending fullscreen and leaves an external fullscreen alone', async () => {
+  let finish;
+  const { doc, modes, fullscreen } = fullscreenFixture(doc => {
+    doc.documentElement.requestFullscreen = () => new Promise(resolve => {
+      finish = () => { doc.fullscreenElement = doc.documentElement; resolve(); };
+    });
+    doc.exitFullscreen = async () => { doc.fullscreenElement = null; };
+  });
+  const pending = fullscreen.toggle();
+  fullscreen.reset();
+  finish();
+  await pending;
+  assert.equal(doc.fullscreenElement, null);
+  assert.deepEqual(modes, []);
+  doc.fullscreenElement = { id: 'another-element' };
+  fullscreen.toggle();
+  fullscreen.reset();
+  assert.equal(doc.fullscreenElement.id, 'another-element');
+  assert.deepEqual(modes, ['immersive', '']);
 });

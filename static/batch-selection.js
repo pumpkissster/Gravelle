@@ -7,13 +7,13 @@
   'use strict';
 
   function kind(view, admin) {
-    if (view === 'libraries') return admin ? 'libraries' : null;
+    if (view === 'libraries' || view === 'magazines') return admin ? 'libraries' : null;
     if (view === 'library' || (admin && ['model', 'search'].includes(view))) return 'books';
     return null;
   }
   function actions(view, admin) {
     if (!kind(view, admin)) return [];
-    if (view === 'libraries') return ['remove', 'scan', 'random'];
+    if (kind(view, admin) === 'libraries') return ['remove', 'scan', 'random'];
     if (['model', 'search'].includes(view)) return ['models', 'remove'];
     return admin ? ['remove', 'favorite', 'random'] : ['favorite', 'random'];
   }

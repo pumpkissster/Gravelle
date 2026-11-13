@@ -21,6 +21,7 @@
   <script src="/batch-selection.js" defer></script>
   <script src="/page-router.js" defer></script>
   <script src="/list-state.js" defer></script>
+  <script src="/message-center.js" defer></script>
   <script src="/transcoding-ui.js" defer></script>
   <script src="/image-search-ui.js" defer></script>
   <script src="/cache-management-ui.js" defer></script>
@@ -28,6 +29,8 @@
   <script src="/sharing-ui.js" defer></script>
   <script src="/network-settings-ui.js" defer></script>
   <script src="/catalog-render.js" defer></script>
+  <script src="/release-date-model.js" defer></script>
+  <script src="/release-date-picker.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
@@ -61,49 +64,103 @@
     <symbol id="i-cache" viewBox="0 0 24 24"><g class="classic-icon"><path d="M3 7V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/></g><g class="board-icon" fill="currentColor" stroke="none"><path d="M5 12.5C5 12.8134 5.46101 13.3584 6.53047 13.8931C7.91405 14.5849 9.87677 15 12 15C14.1232 15 16.0859 14.5849 17.4695 13.8931C18.539 13.3584 19 12.8134 19 12.5V10.3287C17.35 11.3482 14.8273 12 12 12C9.17273 12 6.64996 11.3482 5 10.3287V12.5ZM19 15.3287C17.35 16.3482 14.8273 17 12 17C9.17273 17 6.64996 16.3482 5 15.3287V17.5C5 17.8134 5.46101 18.3584 6.53047 18.8931C7.91405 19.5849 9.87677 20 12 20C14.1232 20 16.0859 19.5849 17.4695 18.8931C18.539 18.3584 19 17.8134 19 17.5V15.3287ZM3 17.5V7.5C3 5.01472 7.02944 3 12 3C16.9706 3 21 5.01472 21 7.5V17.5C21 19.9853 16.9706 22 12 22C7.02944 22 3 19.9853 3 17.5ZM12 10C14.1232 10 16.0859 9.58492 17.4695 8.89313C18.539 8.3584 19 7.81342 19 7.5C19 7.18658 18.539 6.6416 17.4695 6.10687C16.0859 5.41508 14.1232 5 12 5C9.87677 5 7.91405 5.41508 6.53047 6.10687C5.46101 6.6416 5 7.18658 5 7.5C5 7.81342 5.46101 8.3584 6.53047 8.89313C7.91405 9.58492 9.87677 10 12 10Z"></path></g></symbol>
     <symbol id="i-share" viewBox="0 0 24 24"><g class="classic-icon"><path d="M4 12h16m-6-6 6 6-6 6"/></g><g class="board-icon" fill="currentColor" stroke="none"><path d="M13.1202 17.0228L8.92129 14.7324C8.19135 15.5125 7.15261 16 6 16C3.79086 16 2 14.2091 2 12C2 9.79086 3.79086 8 6 8C7.15255 8 8.19125 8.48746 8.92118 9.26746L13.1202 6.97713C13.0417 6.66441 13 6.33707 13 6C13 3.79086 14.7909 2 17 2C19.2091 2 21 3.79086 21 6C21 8.20914 19.2091 10 17 10C15.8474 10 14.8087 9.51251 14.0787 8.73246L9.87977 11.0228C9.9583 11.3355 10 11.6629 10 12C10 12.3371 9.95831 12.6644 9.87981 12.9771L14.0788 15.2675C14.8087 14.4875 15.8474 14 17 14C19.2091 14 21 15.7909 21 18C21 20.2091 19.2091 22 17 22C14.7909 22 13 20.2091 13 18C13 17.6629 13.0417 17.3355 13.1202 17.0228ZM6 14C7.10457 14 8 13.1046 8 12C8 10.8954 7.10457 10 6 10C4.89543 10 4 10.8954 4 12C4 13.1046 4.89543 14 6 14ZM17 8C18.1046 8 19 7.10457 19 6C19 4.89543 18.1046 4 17 4C15.8954 4 15 4.89543 15 6C15 7.10457 15.8954 8 17 8ZM17 20C18.1046 20 19 19.1046 19 18C19 16.8954 18.1046 16 17 16C15.8954 16 15 16.8954 15 18C15 19.1046 15.8954 20 17 20Z"></path></g></symbol>
     <symbol id="i-menu" viewBox="0 0 24 24"><g class="classic-icon"><path d="M4 6h16M4 12h16M4 18h16"/></g><g class="board-icon" fill="currentColor" stroke="none"><path d="M3 4H21V6H3V4ZM3 11H21V13H3V11ZM3 18H21V20H3V18Z"></path></g></symbol>
+    <symbol id="i-scallop" viewBox="0 0 24 24">
+      <path class="scallop-outline" d="M8.5 18.2 3 11.1a2.5 2.5 0 0 1-.4-2.3 9.9 9.9 0 0 1 18.8 0 2.5 2.5 0 0 1-.4 2.3l-5.5 7.1 1.3 2H7.2l1.3-2Z"/>
+      <path class="scallop-ribs" d="M12 3.7v12.1m-6-9.9 3.7 9.7M18 5.9l-3.7 9.7"/>
+    </symbol>
+    <symbol id="i-bell" viewBox="0 0 24 24"><path d="M9.5 20a2.6 2.6 0 0 0 5 0M18 8a6 6 0 0 0-12 0c0 4-1 6.2-2.5 8h17C19 14.2 18 12 18 8Z"/></symbol>
+    <symbol id="i-scan-warning" viewBox="0 0 24 24"><path d="M3 8V5a2 2 0 0 1 2-2h3m8 0h3a2 2 0 0 1 2 2v3m0 8v3a2 2 0 0 1-2 2h-3m-8 0H5a2 2 0 0 1-2-2v-3m9-8v4m0 4h.01"/></symbol>
+    <symbol id="i-drag-handle" viewBox="0 0 24 24"><path d="M8 5h.01m7.99 0h.01M8 12h.01m7.99 0h.01M8 19h.01m7.99 0h.01" stroke-width="3.5"/></symbol>
   </svg>
 
   <div id="app" class="app-shell" data-view="home" hidden>
     <aside class="sidebar" id="sidebar" aria-label="主菜单">
       <a class="brand" href="#/home" aria-label="Gravelle 首页"><img class="brand-wordmark" src="/gravelle-wordmark.svg?v=1.8.2" alt="Gravelle" width="938" height="313"></a>
       <nav id="side-nav" class="main-nav" aria-label="主导航">
-        <button class="nav-item active" data-view="home"><svg><use href="#i-home"/></svg><span>主页</span></button>
-        <button class="nav-item" data-view="libraries"><svg><use href="#i-grid"/></svg><span>写真库</span><small data-count="libraries">0</small></button>
-        <div id="library-nav" class="library-nav" aria-label="我的写真库"></div>
-        <button class="nav-item" data-view="recent"><svg><use href="#i-clock"/></svg><span>最近阅读</span><small data-count="recent">0</small></button>
-        <button class="nav-item" data-view="bookmarks"><svg><use href="#i-bookmark"/></svg><span>书签</span><small data-count="bookmarks">0</small></button>
-        <button class="nav-item" data-view="favorite"><svg><use href="#i-heart"/></svg><span>收藏</span><small data-count="favorite">0</small></button>
-        <button class="nav-item" data-view="search"><svg><use href="#i-search"/></svg><span>搜索</span></button>
-        <button class="nav-item" data-view="models"><svg><use href="#i-person"/></svg><span>模特</span><small data-count="models">0</small></button>
+        <button class="nav-item active" data-sidebar-item="home" data-view="home"><svg><use href="#i-home"/></svg><span>主页</span></button>
+        <div data-sidebar-item="libraries">
+          <button class="nav-item" data-view="libraries"><svg aria-hidden="true"><use href="#i-scallop"/></svg><span>写真库</span><small data-count="libraries">0</small></button>
+          <div id="library-nav" class="library-nav" aria-label="我的写真库"></div>
+        </div>
+        <div data-sidebar-item="magazines">
+          <button class="nav-item" data-view="magazines"><svg><use href="#i-book"/></svg><span>杂志库</span><small data-count="magazines">0</small></button>
+          <div id="magazine-nav" class="library-nav" aria-label="我的杂志库"></div>
+        </div>
+        <button class="nav-item" data-sidebar-item="recent" data-view="recent"><svg><use href="#i-clock"/></svg><span>最近阅读</span><small data-count="recent">0</small></button>
+        <button class="nav-item" data-sidebar-item="bookmarks" data-view="bookmarks"><svg><use href="#i-bookmark"/></svg><span>书签</span><small data-count="bookmarks">0</small></button>
+        <button class="nav-item" data-sidebar-item="favorite" data-view="favorite"><svg><use href="#i-heart"/></svg><span>收藏</span><small data-count="favorite">0</small></button>
+        <button class="nav-item" data-sidebar-item="search" data-view="search"><svg><use href="#i-search"/></svg><span>搜索</span></button>
+        <button class="nav-item" data-sidebar-item="models" data-view="models"><svg><use href="#i-person"/></svg><span>模特</span><small data-count="models">0</small></button>
       </nav>
-      <div class="sidebar-user-area"><button id="optimization-pending" class="optimization-pending" type="button" hidden><svg><use href="#i-optimization"/></svg><span><strong id="optimization-pending-count"></strong><small>图片优化</small></span><svg><use href="#i-right"/></svg></button><div class="sidebar-bottom account-area"><div class="account-menu" id="account-menu" aria-label="个人账户菜单" hidden><button id="account-settings" type="button"><svg><use href="#i-settings"/></svg>设置</button><button id="logout" type="button"><svg><use href="#i-logout"/></svg>注销退出</button></div><button id="account-toggle" class="account-toggle" type="button" aria-expanded="false" aria-controls="account-menu" aria-label="打开个人账户菜单"><span id="account-avatar" class="account-avatar">我</span><span class="account-label"><strong id="account-name">个人账户</strong></span></button><button id="sidebar-settings" class="icon-button sidebar-settings" type="button" aria-label="设置"><svg><use href="#i-settings"/></svg></button></div></div>
+      <div class="sidebar-user-area">
+        <div class="sidebar-bottom account-area">
+          <div class="account-menu" id="account-menu" aria-label="个人账户菜单" hidden>
+            <button id="account-messages" type="button"><svg aria-hidden="true"><use href="#i-bell"/></svg><span>消息</span><span id="account-message-count" class="account-message-count" hidden></span></button>
+            <button id="account-settings" type="button"><svg><use href="#i-settings"/></svg>设置</button>
+            <button id="logout" type="button"><svg><use href="#i-logout"/></svg>注销退出</button>
+          </div>
+          <button id="account-toggle" class="account-toggle" type="button" aria-expanded="false" aria-controls="account-menu" aria-label="打开个人账户菜单">
+            <span class="account-avatar-wrap"><span id="account-avatar" class="account-avatar">我</span><span id="account-message-dot" class="account-message-dot" aria-hidden="true" hidden></span></span>
+            <span class="account-label"><strong id="account-name">个人账户</strong></span>
+          </button>
+          <button id="sidebar-settings" class="icon-button sidebar-settings" type="button" aria-label="设置"><svg><use href="#i-settings"/></svg></button>
+        </div>
+      </div>
     </aside>
     <button id="nav-backdrop" class="nav-backdrop" aria-label="关闭主菜单" hidden></button>
     <main class="main-content" id="main-content">
       <header class="topbar"><button id="nav-toggle" class="icon-button mobile-menu" aria-label="打开主菜单" aria-expanded="false" aria-controls="sidebar"><span class="classic-icon-text" aria-hidden="true">☰</span><svg class="board-icon-only" aria-hidden="true"><use href="#i-menu"/></svg></button></header>
       <section class="library-heading"><div class="heading-identity"><span id="model-heading-avatar" class="model-heading-avatar" hidden></span><div class="heading-copy"><h1 id="library-title">主页</h1><p class="heading-description" id="heading-description">把喜欢的影像，收进自己的藏馆。</p></div></div><div class="library-actions"><button id="create-library" class="button button-primary">＋ 创建写真库</button><button id="edit-library" class="button button-secondary" hidden><svg><use href="#i-settings"/></svg>编辑写真库</button><button id="edit-model" type="button" class="button button-secondary" hidden><svg><use href="#i-edit"/></svg>编辑模特</button><button id="selection-manage" type="button" class="button button-secondary" hidden aria-pressed="false" aria-controls="selection-toolbar"><svg><use href="#i-settings"/></svg><span>管理</span></button><button id="create-model" class="button button-primary" hidden>＋ 新建模特</button></div></section>
       <div id="notice" class="notice" role="status" hidden></div>
-      <section id="selection-toolbar" class="selection-toolbar" aria-label="批量操作" hidden><button id="selection-toggle" class="button button-secondary" type="button" aria-pressed="false">完成管理</button><span id="selection-count" class="selection-count" role="status" aria-live="polite" hidden>已选择 0 项</span><button id="selection-all" class="button button-secondary" type="button" hidden>全选</button><div class="selection-actions"><button id="selection-models" class="button button-secondary" type="button" hidden>修改模特</button><button id="selection-remove" class="button button-danger" type="button" hidden>移除</button><button id="selection-scan" class="button button-secondary" type="button" hidden><svg><use href="#i-refresh"/></svg>立即扫描</button><button id="selection-favorite" class="button button-secondary" type="button" hidden><svg><use href="#i-heart"/></svg>收藏</button><button id="selection-random" class="button button-primary" type="button" hidden>随机阅读</button></div></section>
+      <section id="selection-toolbar" class="selection-toolbar" aria-label="批量操作" hidden><button id="selection-toggle" class="button button-secondary" type="button" aria-pressed="false">完成管理</button><span id="selection-count" class="selection-count" role="status" aria-live="polite" hidden>已选择 0 项</span><button id="selection-all" class="button button-secondary" type="button" hidden>全选</button><div class="selection-actions"><button id="selection-order" class="button button-secondary" type="button" aria-haspopup="dialog" hidden>调整顺序</button><button id="selection-models" class="button button-secondary" type="button" hidden>修改模特</button><button id="selection-remove" class="button button-danger" type="button" hidden>移除</button><button id="selection-scan" class="button button-secondary" type="button" hidden><svg><use href="#i-refresh"/></svg>立即扫描</button><button id="selection-favorite" class="button button-secondary" type="button" hidden><svg><use href="#i-heart"/></svg>收藏</button><button id="selection-random" class="button button-primary" type="button" hidden>随机阅读</button></div></section>
       <section id="library-home" class="library-home" aria-label="我的写真库"><div id="home-library-heading" class="section-label home-library-heading"><h2>写真库</h2><button id="home-all-libraries" class="icon-button" type="button" aria-label="查看全部写真库" title="查看全部写真库"><svg><use href="#i-right"/></svg></button></div><div id="library-tiles" class="library-tiles"></div></section>
       <section id="continue-section" class="continue-section" aria-labelledby="continue-heading" hidden><div class="section-label"><h2 id="continue-heading">继续阅读</h2></div><div id="continue-card"></div></section>
       <div id="search-tabs" class="search-mode-tabs" role="tablist" aria-label="搜索方式" hidden><button id="search-tab-text" type="button" role="tab" aria-selected="true" aria-controls="catalog-section">文字搜索</button><button id="search-tab-image" type="button" role="tab" aria-selected="false" aria-controls="image-search-panel" tabindex="-1">以图搜图</button></div>
       <section id="image-search-panel" role="tabpanel" aria-labelledby="search-tab-image" hidden></section>
-      <section id="catalog-section" class="shelf" aria-label="作品列表"><div class="shelf-tools"><h2 id="shelf-heading">最近加入</h2><label class="search-box"><svg><use href="#i-search"/></svg><input id="search" type="search" placeholder="搜索作品、模特、写真库…" aria-label="搜索作品、模特、写真库或路径" autocomplete="off"><kbd>/</kbd></label><div class="select-tools"><label><span class="sr-only">筛选系列</span><select id="series-filter"><option value="">所有系列</option></select></label><label><span class="sr-only">排列方式</span><select id="sort"><option value="added">加入时间（新到旧）</option><option value="added_asc">加入时间（旧到新）</option><option value="title">按名称排序</option><option value="updated">最近阅读</option><option value="release">发布日期</option><option value="modified">最近修改</option></select></label></div></div><div class="shelf-meta"><span id="results-label">正在打开藏馆…</span></div><div id="loading-state" class="loading-state" role="status"><span class="spinner"></span>正在读取写真库</div><div id="book-grid" class="book-grid"></div></section>
+      <section id="catalog-section" class="shelf" aria-label="作品列表"><div class="shelf-tools"><h2 id="shelf-heading">最近加入</h2><label class="search-box"><svg><use href="#i-search"/></svg><input id="search" type="search" placeholder="搜索作品、杂志资料、模特…" aria-label="搜索作品、杂志资料、模特、媒体库或路径" autocomplete="off"><kbd>/</kbd></label><div class="select-tools"><label><span class="sr-only">筛选系列</span><select id="series-filter"><option value="">所有系列</option></select></label><label><span class="sr-only">排列方式</span><select id="sort"><option value="added">加入时间（新到旧）</option><option value="added_asc">加入时间（旧到新）</option><option value="title">按名称排序</option><option value="updated">最近阅读</option><option value="release">发布日期</option><option value="modified">最近修改</option></select></label></div></div><div class="shelf-meta"><span id="results-label">正在打开藏馆…</span></div><div id="loading-state" class="loading-state" role="status"><span class="spinner"></span>正在读取媒体库</div><div id="book-grid" class="book-grid"></div></section>
       <section id="bookmark-section" hidden><div id="bookmark-list" class="bookmark-list"></div></section>
       <section id="models-section" hidden><div id="models-grid" class="models-grid"></div></section>
+      <section id="message-center" class="message-center" aria-labelledby="library-title" hidden>
+        <p id="message-scan-progress" class="notice" role="status" hidden><span class="spinner" aria-hidden="true"></span>正在扫描媒体文件夹…</p>
+        <ul id="message-list" class="message-list"></ul>
+        <div id="message-empty" class="message-empty">
+          <svg aria-hidden="true"><use href="#i-bell"/></svg>
+          <h2>暂无待处理事项</h2>
+        </div>
+      </section>
       <section id="settings-page" class="settings-page" hidden>
         <div class="settings-panel service-panel"><h2>服务与数据</h2><p>原始图片保留在媒体目录。写真库设置、作品资料、模特、书签、收藏和阅读记录保存在服务端的数据目录内。</p><dl><dt>服务版本</dt><dd class="service-version-row"><span id="settings-version">—</span><button id="check-updates" class="button button-secondary" type="button">检查新版本</button></dd><dt>版本更新</dt><dd class="service-update-result"><span id="update-status" role="status" aria-live="polite">点击检查 GitHub 上的稳定版本。升级需要手动完成。</span><a id="update-release" target="_blank" rel="noopener noreferrer" hidden>打开发布页面</a></dd><dt>连接状态</dt><dd id="settings-connection" role="status">正在连接</dd><dt>家庭（局域网）访问</dt><dd id="settings-lan-access"><a id="settings-lan-url">正在获取…</a></dd></dl></div>
         <div id="users-panel" class="settings-panel"><h2>用户管理</h2><div class="settings-account"><span id="settings-account-avatar" class="account-avatar">我</span><div><strong id="settings-account-name">个人账户</strong><span id="settings-account-role" class="account-role"></span></div><button id="edit-profile" class="button button-secondary" type="button">编辑用户信息</button></div><div id="subaccounts-setting" class="setting-row" hidden><span><strong>子账户管理</strong><small id="subaccounts-count" role="status" aria-live="polite">尚未读取</small></span><button id="manage-users" class="button button-secondary" type="button">管理子账户<svg><use href="#i-right"/></svg></button></div><div id="my-shares-setting" class="setting-row" hidden><span><strong>我的分享</strong></span><button id="manage-shares" class="button button-secondary" type="button">管理分享<svg><use href="#i-right"/></svg></button></div></div>
-        <div class="settings-panel"><h2>界面设置</h2><fieldset id="interface-skin-picker" class="skin-picker"><legend>界面皮肤</legend><p class="settings-intro">按当前账号保存在此设备，可搭配亮色或暗色主题。</p><div class="skin-options"><label class="skin-option is-selected" data-skin="classic"><input type="radio" name="interface-skin" value="classic" checked><span class="skin-preview" aria-hidden="true"><span class="skin-preview-sidebar"><i></i><i></i><i></i></span><span class="skin-preview-main"><span class="skin-preview-toolbar"></span><span class="skin-preview-cards"><i></i><i></i><i></i></span></span></span><span class="skin-option-content"><strong>经典</strong><small>熟悉的柔和粉色</small></span><span class="skin-option-check" aria-hidden="true"><svg><use href="#i-check"/></svg></span></label><label class="skin-option" data-skin="board"><input type="radio" name="interface-skin" value="board"><span class="skin-preview" aria-hidden="true"><span class="skin-preview-sidebar"><i></i><i></i><i></i></span><span class="skin-preview-main"><span class="skin-preview-toolbar"></span><span class="skin-preview-cards"><i></i><i></i><i></i></span></span></span><span class="skin-option-content"><strong>Board</strong><small>清爽留白，粉色点缀</small></span><span class="skin-option-check" aria-hidden="true"><svg><use href="#i-check"/></svg></span></label></div></fieldset><label class="setting-row"><span><strong>界面主题</strong><small>按当前账号保存在此设备</small></span><select id="interface-theme"><option value="dark">暗色</option><option value="light">亮色</option></select></label></div>
+        <div class="settings-panel"><h2>界面设置</h2><fieldset id="interface-skin-picker" class="skin-picker"><legend>界面皮肤</legend><p class="settings-intro">按当前账号保存在此设备，可搭配亮色或暗色主题。</p><div class="skin-options"><label class="skin-option is-selected" data-skin="classic"><input type="radio" name="interface-skin" value="classic" checked><span class="skin-preview" aria-hidden="true"><span class="skin-preview-sidebar"><i></i><i></i><i></i></span><span class="skin-preview-main"><span class="skin-preview-toolbar"></span><span class="skin-preview-cards"><i></i><i></i><i></i></span></span></span><span class="skin-option-content"><strong>经典</strong><small>熟悉的柔和粉色</small></span><span class="skin-option-check" aria-hidden="true"><svg><use href="#i-check"/></svg></span></label><label class="skin-option" data-skin="board"><input type="radio" name="interface-skin" value="board"><span class="skin-preview" aria-hidden="true"><span class="skin-preview-sidebar"><i></i><i></i><i></i></span><span class="skin-preview-main"><span class="skin-preview-toolbar"></span><span class="skin-preview-cards"><i></i><i></i><i></i></span></span></span><span class="skin-option-content"><strong>Board</strong><small>清爽留白，粉色点缀</small></span><span class="skin-option-check" aria-hidden="true"><svg><use href="#i-check"/></svg></span></label></div></fieldset><label class="setting-row"><span><strong>界面主题</strong><small>按当前账号保存在此设备</small></span><select id="interface-theme"><option value="dark">暗色</option><option value="light">亮色</option></select></label>
+          <div class="setting-row">
+            <span><strong>侧边栏显示</strong><small>调整主导航的显示和顺序</small></span>
+            <button id="sidebar-display-open" class="button button-secondary" type="button" aria-haspopup="dialog" aria-controls="sidebar-display-dialog">管理条目<svg aria-hidden="true"><use href="#i-right"/></svg></button>
+          </div>
+        </div>
         <div id="performance-settings" class="settings-panel"></div>
-        <div class="settings-panel"><h2>阅读偏好</h2><p class="settings-intro">阅读方式与方向默认跟随写真库，阅读时更改仅对当前账号生效，并在设备间同步。以下显示偏好按当前账号保存在此设备。</p><label class="setting-row"><span><strong>图片适配</strong><small>分页阅读中的图片大小</small></span><select id="pref-fit"><option value="height">适应屏幕</option><option value="width">适应宽度</option></select></label><label class="setting-row"><span><strong>阅读背景</strong><small>专注于图片的阅读画面</small></span><select id="pref-theme"><option value="dark">深色</option><option value="light">浅色</option></select></label></div>
+        <div class="settings-panel"><h2>阅读偏好</h2><p class="settings-intro">阅读方式与方向默认跟随所在的库，阅读时更改仅对当前账号生效，并在设备间同步。以下显示偏好按当前账号保存在此设备。</p><label class="setting-row"><span><strong>图片适配</strong><small>分页阅读中的图片大小</small></span><select id="pref-fit"><option value="height">适应屏幕</option><option value="width">适应宽度</option></select></label><label class="setting-row"><span><strong>阅读背景</strong><small>专注于图片的阅读画面</small></span><select id="pref-theme"><option value="dark">深色</option><option value="light">浅色</option></select></label></div>
       </section>
       <section id="empty-state" class="empty-state" hidden><div class="empty-illustration" aria-hidden="true"><svg><use href="#i-folder"/></svg></div><h2 id="empty-title">从第一个写真库开始。</h2><p id="empty-description">连接 NAS 写真目录，创建属于你的收藏。</p><div id="folder-guide" class="folder-guide"><svg><use href="#i-folder"/></svg><div><strong>写真库 / 单本写真 /</strong><span>001.jpg · 002.png · 003.webp …</span></div></div><button id="empty-scan" class="button button-primary scan-trigger"><svg><use href="#i-refresh"/></svg><span>创建第一个写真库</span></button><p id="empty-hint" class="empty-hint">支持图片文件夹、ZIP / CBZ · 阅读记录在设备间同步</p></section>
-      <div id="scan-errors" class="scan-errors" hidden></div>
     </main>
   </div>
 
   <section id="login-screen" class="login-screen" aria-labelledby="login-heading" hidden><form id="login-form" class="login-card"><div class="brand"><img class="brand-wordmark" src="/gravelle-wordmark.svg?v=1.8.2" alt="Gravelle" width="938" height="313"></div><h1 id="login-heading">登录</h1><label class="field-label" for="username">用户名</label><input id="username" type="text" autocomplete="username" minlength="2" maxlength="40" required placeholder="输入用户名"><label class="field-label" for="password">密码</label><input id="password" type="password" autocomplete="current-password" maxlength="256" required placeholder="输入密码"><div id="registration-confirm-field" hidden><label class="field-label" for="password-confirm">确认密码</label><input id="password-confirm" type="password" autocomplete="new-password" maxlength="256" placeholder="再次输入密码"></div><div id="setup-password-field" hidden><label class="field-label" for="setup-password">原访问密码</label><input id="setup-password" type="password" autocomplete="off" placeholder="输入之前配置的访问密码"><p class="field-hint">验证原访问密码后，即可设置用户名和新的登录密码。</p></div><p id="login-error" class="form-error" role="alert" hidden></p><button id="login-submit" type="submit" class="button button-primary">登录 <svg><use href="#i-arrow"/></svg></button></form></section>
+
+  <dialog id="sidebar-display-dialog" class="settings-dialog library-dialog compact-dialog" aria-labelledby="sidebar-display-title" aria-describedby="sidebar-display-description">
+    <header class="dialog-header">
+      <h2 id="sidebar-display-title">侧边栏显示</h2>
+      <button id="sidebar-display-close" class="icon-button" type="button" aria-label="关闭侧边栏设置"><svg aria-hidden="true"><use href="#i-close"/></svg></button>
+    </header>
+    <div class="dialog-body">
+      <p id="sidebar-display-description" class="field-hint">拖动条目左侧的手柄调整顺序。更改按当前账号保存在此设备。</p>
+      <ol id="sidebar-item-settings" class="sidebar-item-settings" role="list"></ol>
+      <p id="sidebar-order-status" class="sr-only" role="status"></p>
+    </div>
+    <footer class="dialog-footer">
+      <button id="sidebar-display-cancel" class="button button-secondary" type="button">取消</button>
+      <button id="sidebar-display-save" class="button button-primary" type="button" disabled>保存</button>
+    </footer>
+  </dialog>
 
   <dialog id="profile-dialog" class="settings-dialog library-dialog compact-dialog" aria-labelledby="profile-title">
     <form id="profile-form" novalidate>
@@ -116,7 +173,20 @@
           <div class="profile-password-group"><h3>修改密码</h3><p class="field-hint">不修改密码时，以下三项留空。</p><label class="library-field" for="profile-current-password">当前密码</label><input id="profile-current-password" type="password" maxlength="256" autocomplete="current-password"><label class="library-field" for="profile-password">新密码</label><input id="profile-password" type="password" minlength="8" maxlength="256" autocomplete="new-password" placeholder="至少 8 个字符"><label class="library-field" for="profile-password-confirm">确认新密码</label><input id="profile-password-confirm" type="password" maxlength="256" autocomplete="new-password"></div>
         </section>
         <section id="profile-permissions" role="tabpanel" aria-labelledby="profile-tab-permissions" hidden>
-          <div id="my-libraries-panel" class="profile-library-panel"><h3>写真库显示</h3><p class="field-hint">隐藏仅影响当前账号的展示，不会改变写真库的访问授权。</p><p id="my-libraries-status" class="settings-intro" role="status" aria-live="polite"></p><div class="visibility-selection-tools"><label class="model-checkbox user-access-all"><input id="my-libraries-all" type="checkbox"><span>全部显示</span></label><button id="my-libraries-none" class="button button-secondary" type="button">全部隐藏</button></div><div id="my-libraries-options" class="library-visibility-grid"></div></div>
+          <div id="my-libraries-panel" class="profile-library-panel">
+            <h3>媒体库显示</h3>
+            <p class="field-hint">按当前账号选择要显示的写真库和杂志库。</p>
+            <p id="my-libraries-status" class="settings-intro" role="status" aria-live="polite"></p>
+            <div class="visibility-selection-tools">
+              <label class="profile-visibility-all">
+                <input class="sr-only" id="my-libraries-all" type="checkbox">
+                <span class="profile-visibility-check" aria-hidden="true"></span>
+                <span>全部显示</span>
+              </label>
+              <button id="my-libraries-none" class="button button-secondary" type="button">全部隐藏</button>
+            </div>
+            <div id="my-libraries-options" class="library-visibility-grid"></div>
+          </div>
         </section>
         <p id="profile-error" class="form-error" role="alert" hidden></p>
       </div>
@@ -138,12 +208,29 @@
           <label class="model-checkbox user-enabled"><input id="user-enabled" type="checkbox" checked><span>启用此账号</span></label>
         </section>
         <section id="user-permissions" role="tabpanel" aria-labelledby="user-tab-permissions" hidden>
-          <div class="profile-library-panel"><h3>写真库访问</h3><div class="visibility-selection-tools"><label class="model-checkbox user-access-all"><input id="user-libraries-all" type="checkbox"><span>全部授权</span></label><button id="user-libraries-none" class="button button-secondary" type="button">取消全部</button></div><div id="user-libraries" class="library-visibility-grid"></div></div>
+          <div class="profile-library-panel"><h3>媒体库访问</h3><div class="visibility-selection-tools"><label class="model-checkbox user-access-all"><input id="user-libraries-all" type="checkbox"><span>全部授权</span></label><button id="user-libraries-none" class="button button-secondary" type="button">取消全部</button></div><div id="user-libraries" class="library-visibility-grid"></div></div>
         </section>
         <p id="user-error" class="form-error" role="alert" hidden></p>
       </div>
       <footer class="dialog-footer"><button id="user-delete" class="button button-danger" type="button" hidden>删除用户</button><button id="user-save" class="button button-primary" type="submit">保存</button></footer>
     </form>
+  </dialog>
+
+  <dialog id="library-order-dialog" class="settings-dialog library-dialog compact-dialog" aria-labelledby="library-order-title" aria-describedby="library-order-description">
+    <header class="dialog-header">
+      <h2 id="library-order-title">调整媒体库顺序</h2>
+      <button id="library-order-close" class="icon-button" type="button" aria-label="关闭排序"><svg aria-hidden="true"><use href="#i-close"/></svg></button>
+    </header>
+    <div class="dialog-body library-order-panel">
+      <p id="library-order-description" class="settings-intro">拖动左侧手柄调整顺序。保存后，其他账号也会按此顺序看到各自可见的媒体库。</p>
+      <ol id="library-order-list" class="library-order-list" role="list"></ol>
+      <p id="library-order-status" class="sr-only" role="status"></p>
+      <p id="library-order-error" class="form-error" role="alert" hidden></p>
+    </div>
+    <footer class="dialog-footer">
+      <button id="library-order-cancel" class="button button-secondary" type="button">取消</button>
+      <button id="library-order-save" class="button button-primary" type="button" disabled>保存顺序</button>
+    </footer>
   </dialog>
 
   <dialog id="library-dialog" class="settings-dialog library-dialog" aria-labelledby="library-dialog-title">
@@ -158,7 +245,7 @@
       <label class="library-field" for="library-path">媒体目录路径 <span>必填 · 可添加多个</span></label><div id="library-paths" class="library-paths"></div><button id="library-add-path" type="button" class="button button-secondary library-path-add">＋ 添加目录</button>
       <section id="directory-picker" class="directory-picker" aria-label="选择媒体目录" hidden><label id="directory-roots-field" class="directory-roots-field" for="directory-roots" hidden><span>根文件夹</span><select id="directory-roots" aria-label="选择根文件夹"></select></label><div class="directory-toolbar"><button id="directory-parent" type="button" class="button button-secondary">上一级</button><code id="directory-current"></code><button id="directory-select" type="button" class="button button-primary">选择此目录</button></div><div id="directory-list"></div><p id="directory-error" class="form-error" role="alert" hidden></p></section>
       <label class="library-field" for="library-excludes">扫描排除规则 <span>可选 · 每行一条</span></label><textarea id="library-excludes" rows="3" placeholder="缩略图/&#10;*_thumb.*"></textarea>
-      <label class="library-field" for="library-author">默认模特 <span>可选 · 单选</span></label><select id="library-author"><option value="">不设置默认模特</option></select><div id="library-author-new" class="library-author-new" hidden><label class="sr-only" for="library-new-author">新模特名称</label><input id="library-new-author" maxlength="100" placeholder="输入新模特名称" autocomplete="off"><button id="library-create-author" type="button" class="button button-secondary">新建并选择</button></div><p id="library-author-error" class="form-error" role="alert" hidden></p>
+      <div id="library-author-field"><label class="library-field" for="library-author">默认模特 <span>可选 · 单选</span></label><select id="library-author"><option value="">不设置默认模特</option></select><div id="library-author-new" class="library-author-new" hidden><label class="sr-only" for="library-new-author">新模特名称</label><input id="library-new-author" maxlength="100" placeholder="输入新模特名称" autocomplete="off"><button id="library-create-author" type="button" class="button button-secondary">新建并选择</button></div><p id="library-author-error" class="form-error" role="alert" hidden></p></div>
       <p id="library-form-error" class="form-error" role="alert" hidden></p></div><footer class="dialog-footer"><button id="library-remove" class="button button-danger" type="button" hidden>移除写真库</button><button id="library-save" class="button button-primary" type="submit">创建并扫描</button></footer>
     </form>
   </dialog>
@@ -168,18 +255,41 @@
       <header class="dialog-header"><div><h2 id="metadata-title">编辑作品资料</h2></div><button type="button" class="icon-button" id="metadata-close" aria-label="关闭资料编辑"><svg><use href="#i-close"/></svg></button></header><div class="dialog-body">
       <label class="library-field" for="metadata-name">作品名称</label><input id="metadata-name" maxlength="200" placeholder="留空恢复自动名称">
       <label class="library-field" for="metadata-release">发布日期</label><input id="metadata-release" type="date">
+      <div class="release-date-field" id="release-date-field" hidden>
+        <input class="release-date-text" id="release-date-text" type="text" placeholder="YYYY-MM-DD" maxlength="10" autocomplete="off" spellcheck="false" aria-describedby="release-date-format">
+        <button class="release-date-open" id="release-date-open" type="button" popovertarget="release-date-calendar" aria-haspopup="dialog" aria-expanded="false" aria-controls="release-date-calendar" aria-label="打开发布日期日历">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5.5" width="17" height="15" rx="2.5"/><path d="M7.5 3.5v4m9-4v4m-13 2.5h17m-12 5h1m4 0h1"/></svg>
+        </button>
+        <span class="sr-only" id="release-date-format">输入四位年份、两位月份和两位日期，使用短横线分隔。</span>
+      </div>
       <div class="form-columns"><div><label class="library-field" for="metadata-mode">阅读方式</label><select id="metadata-mode"><option value="">跟随写真库</option><option value="single">单页</option><option value="double">双页</option><option value="webtoon">条漫</option></select></div><div><label class="library-field" for="metadata-direction">阅读方向</label><select id="metadata-direction"><option value="">跟随写真库</option><option value="ltr">从左向右</option><option value="rtl">从右向左</option><option value="ttb" disabled>从上到下</option></select></div></div>
-      <label class="library-field" for="metadata-model-search">关联模特 <span>可多选</span></label>
+      <div id="magazine-info-field" hidden><label class="library-field" for="metadata-magazine-info">杂志资料 <span>可选</span></label><textarea id="metadata-magazine-info" rows="8" aria-describedby="magazine-info-hint"></textarea><p id="magazine-info-hint" class="field-hint">可直接粘贴带有【介绍】和【目录】的文字，目录每行一条。</p></div>
+      <div id="metadata-model-field"><label class="library-field" for="metadata-model-search">关联模特 <span>可多选</span></label>
       <div class="metadata-model-tools"><input id="metadata-model-search" type="search" maxlength="100" placeholder="搜索已有模特" autocomplete="off"><button id="metadata-show-new-model" type="button" class="button button-secondary" aria-expanded="false" aria-controls="metadata-new-model-row">新建模特</button></div>
       <p id="metadata-model-selection" class="field-hint" aria-live="polite"></p><div id="metadata-models" class="model-checkboxes"></div>
       <div id="metadata-new-model-row" class="path-field" hidden><input id="metadata-new-model" placeholder="输入新模特名称" maxlength="100" aria-label="新模特名称"><button id="metadata-add-model" type="button" class="button button-secondary">新建并选择</button></div>
-      <label class="library-field" for="metadata-cover-source">封面图片</label><select id="metadata-cover-source"><option value="page">从作品内选页</option><option value="upload">手动上传封面</option></select>
+      </div><label class="library-field" for="metadata-cover-source">封面图片</label><select id="metadata-cover-source"><option value="page">从作品内选页</option><option value="upload">手动上传封面</option></select>
       <div class="cover-selector metadata-cover-selector"><img id="metadata-cover-preview" alt="当前选中的作品封面"><div>
         <div id="metadata-cover-page-field"><label for="metadata-cover" class="metadata-cover-label">封面页码</label><input id="metadata-cover" type="number" min="1" value="1" required><p id="metadata-cover-hint" class="field-hint"></p></div>
         <div id="metadata-cover-upload-field" hidden><label for="metadata-cover-upload" class="metadata-cover-label">上传图片</label><input id="metadata-cover-upload" type="file" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp"><p id="metadata-upload-status" class="field-hint" role="status"></p></div>
       </div></div>
       <p id="metadata-error" class="form-error" role="alert" hidden></p></div><footer class="dialog-footer"><button id="metadata-remove" class="button button-danger" type="button">移除作品</button><button id="metadata-save" type="submit" class="button button-primary">保存资料</button></footer>
     </form>
+    <div class="release-date-calendar" id="release-date-calendar" popover="auto" role="dialog" aria-label="选择发布日期" hidden>
+      <div class="release-date-calendar-header">
+        <button class="release-date-month-button" id="release-date-previous" type="button" aria-label="上个月"><svg aria-hidden="true"><use href="#i-left"/></svg></button>
+        <h3 id="release-date-month" aria-live="polite" aria-atomic="true"></h3>
+        <button class="release-date-month-button" id="release-date-next" type="button" aria-label="下个月"><svg aria-hidden="true"><use href="#i-right"/></svg></button>
+      </div>
+      <table role="grid" aria-labelledby="release-date-month">
+        <thead><tr><th scope="col" aria-label="星期一">一</th><th scope="col" aria-label="星期二">二</th><th scope="col" aria-label="星期三">三</th><th scope="col" aria-label="星期四">四</th><th scope="col" aria-label="星期五">五</th><th scope="col" aria-label="星期六">六</th><th scope="col" aria-label="星期日">日</th></tr></thead>
+        <tbody id="release-date-days"></tbody>
+      </table>
+      <div class="release-date-calendar-footer">
+        <button id="release-date-clear" type="button">清除</button>
+        <button id="release-date-today" type="button">今天</button>
+      </div>
+    </div>
   </dialog>
   <dialog id="model-dialog" class="settings-dialog library-dialog compact-dialog" aria-labelledby="model-dialog-title"><form id="model-form"><header class="dialog-header"><h2 id="model-dialog-title">编辑模特</h2><button id="model-close" type="button" class="icon-button" aria-label="关闭模特编辑"><svg><use href="#i-close"/></svg></button></header><div class="dialog-body"><label class="library-field" for="model-avatar-upload">模特头像</label><div class="avatar-editor"><img id="model-avatar-preview" class="avatar-editor-preview" alt="模特头像预览"><div><input id="model-avatar-upload" type="file" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp"><div class="model-avatar-actions"><button id="model-avatar-regenerate" class="button button-secondary" type="button" hidden><svg><use href="#i-refresh"/></svg><span>重新生成头像</span></button><button id="model-avatar-reset" class="button button-secondary" type="button">恢复默认头像</button></div><p class="field-hint">支持 JPG、PNG 和 WebP 图片。随机生成时优先围绕人脸裁切，保存后生效。</p><p id="model-avatar-status" class="field-hint" role="status" aria-live="polite" hidden></p></div></div><label class="library-field" for="model-name">模特名称</label><input id="model-name" required maxlength="100" autocomplete="off"><p id="model-error" class="form-error" role="alert" hidden></p></div><footer class="dialog-footer"><button id="model-remove" class="button button-danger" type="button" hidden>删除模特</button><button id="model-save" class="button button-primary" type="submit">保存</button></footer></form></dialog>
   <dialog id="bookmark-dialog" class="settings-dialog library-dialog compact-dialog" aria-labelledby="bookmark-dialog-title"><form id="bookmark-form"><header class="dialog-header"><h2 id="bookmark-dialog-title">添加书签</h2><button id="bookmark-close" type="button" class="icon-button" aria-label="关闭书签编辑"><svg><use href="#i-close"/></svg></button></header><div class="dialog-body"><p id="bookmark-page-label" class="settings-intro"></p><label class="library-field" for="bookmark-note">备注 <span>可选</span></label><input id="bookmark-note" maxlength="500" placeholder="留下这一页的印象…"><p id="bookmark-error" class="form-error" role="alert" hidden></p></div><footer class="dialog-footer"><button id="bookmark-save" class="button button-primary" type="submit">保存书签</button></footer></form></dialog>
@@ -209,7 +319,6 @@
   </dialog>
   <dialog id="remove-dialog" class="settings-dialog library-dialog compact-dialog" aria-labelledby="remove-title" aria-describedby="remove-description"><header class="dialog-header"><h2 id="remove-title">确认移除</h2></header><div class="dialog-body"><p id="remove-description" class="settings-intro" style="white-space:pre-line"></p></div><footer class="dialog-footer"><button id="remove-cancel" class="button button-secondary" type="button">取消</button><button id="remove-confirm" class="button button-danger" type="button">确认移除</button></footer></dialog>
   <div id="toast" class="toast" role="status" popover="manual" hidden></div>
-  <dialog id="optimization-notice-dialog" class="settings-dialog library-dialog compact-dialog" aria-labelledby="optimization-notice-title"><header class="dialog-header"><h2 id="optimization-notice-title">作品需要处理</h2><button id="optimization-notice-close" class="icon-button" type="button" aria-label="稍后处理">×</button></header><div class="dialog-body"><p id="optimization-notice-description" class="settings-intro"></p></div><footer class="dialog-footer"><button id="optimization-notice-later" class="button button-secondary" type="button">稍后处理</button><button id="optimization-notice-view" class="button button-primary" type="button">查看图片优化</button></footer></dialog>
 </body>
 </html>
 

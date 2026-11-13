@@ -36,6 +36,7 @@ import sqlite3
 import stat
 import struct
 import sys
+from tempfile import TemporaryFile
 import threading
 import time
 import unicodedata
@@ -47,7 +48,7 @@ from PIL import Image, ImageDraw, ImageOps, UnidentifiedImageError
 from accounts import (PERMISSION_KEYS, PERMISSION_OPTIONS, check_password, hash_password,
                       migrate_accounts, prepare_account_migration, validate_password)
 from password_reset import DataDirectoryLock
-from transcoding import TranscodingManager
+from transcoding import TranscodingManager, catalogue_visibility
 from image_search import ImageSearchManager, MAX_QUERY_BYTES
 from task_scheduler import SharedTaskScheduler
 from library_covers import LibraryCoverManager
@@ -55,13 +56,15 @@ from page_cache import SourcePageCache, file_identity, source_identity
 from cache_manager import CacheManager
 from pdf_reader import PdfManager, page_key as pdf_page_key, source_version as pdf_source_version
 from epub_reader import EpubManager, METADATA_VERSION as EPUB_METADATA_VERSION, legacy_image_page
+from rar_reader import RarError, open_rar
 from sharing import SharingManager
 from network_settings import (NetworkSettings, ENTRY_COOKIE, ENTRY_SECONDS,
                               SHARE_STATIC, SHARE_PAGE, SHARE_GET, SHARE_POST)
 from https_settings import HTTPSSettingsError, MAX_CERTIFICATE_BODY_BYTES, load_context
 
-VERSION = "0.9.4"
-MEDIA_TYPES = {"manga_jp", "manga_kr", "comic_us", "photo"}
+VERSION = "0.9.5"
+MEDIA_TYPES = {"manga_jp", "manga_kr", "comic_us", "photo", "magazine"}
+LIBRARY_ORDER_SQL = "l.display_order IS NULL,l.display_order,l.created_at,l.id"
 IMAGE_TYPES = {
     ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
     ".webp": "image/webp", ".gif": "image/gif", ".avif": "image/avif",
@@ -72,9 +75,12 @@ MAX_BOOK_BYTES = 8 * 1024 * 1024 * 1024
 MAX_PAGES = 10000
 MAX_ZIP_ENTRIES = 50000
 MAX_ZIP_DIRECTORY_BYTES = 32 * 1024 * 1024
+MAX_RAR_PAGE_BYTES = 128 * 1024 * 1024
+MAX_MAGAZINE_INFO_CHARS = 100_000
 MAX_BODY_BYTES = 16384
 MAX_COVER_UPLOAD_BYTES = 6 * 1024 * 1024
 MAX_COVER_BODY_BYTES = 8 * 1024 * 1024 + MAX_BODY_BYTES
+MAX_METADATA_BODY_BYTES = MAX_COVER_BODY_BYTES + MAX_MAGAZINE_INFO_CHARS * 12
 MAX_COVER_PIXELS = 40_000_000
 Image.MAX_IMAGE_PIXELS = MAX_COVER_PIXELS
 SESSION_SECONDS = 30 * 24 * 60 * 60
@@ -82,6 +88,8 @@ COOKIE_NAME = "sumi_session"
 PASSWORD_ITERATIONS = 600_000
 STATIC_FILES = {
     "/catalog-render.js": "catalog-render.js",
+    "/release-date-model.js": "release-date-model.js",
+    "/release-date-picker.js": "release-date-picker.js",
     "/": "index.html", "/index.html": "index.html", "/app.js": "app.js",
     "/styles.css": "styles.css", "/favicon.svg": "favicon.svg",
     "/favicon.ico": "favicon.ico", "/manifest.webmanifest": "manifest.webmanifest",
@@ -108,6 +116,7 @@ STATIC_FILES = {
     "/batch-selection.js": "batch-selection.js",
     "/page-router.js": "page-router.js",
     "/list-state.js": "list-state.js",
+    "/message-center.js": "message-center.js",
     "/transcoding-ui.js": "transcoding-ui.js",
     "/image-search-ui.js": "image-search-ui.js",
     "/cache-management-ui.js": "cache-management-ui.js",
@@ -275,8 +284,8 @@ def natural_key(value: str) -> tuple:
     return tuple(result)
 
 
-def photo_date_prefix(title: str) -> str:
-    """Recognize the valid source-folder date used for photo metadata/titles."""
+def title_date_prefix(title: str) -> str:
+    """Return a valid YYYY-MM-DD date at the start of a source title."""
     prefix = re.match(r"^([0-9]{4}-[0-9]{2}-[0-9]{2})(?!\d)", title)
     if prefix:
         try:
@@ -401,6 +410,14 @@ def check_zip_directory(handle) -> None:
     handle.seek(0)
 
 
+def archive_image_name(name):
+    path = PurePosixPath(name)
+    return (bool(path.parts) and not path.is_absolute() and ".." not in path.parts
+            and "\\" not in name and ":" not in path.parts[0]
+            and not any(is_hidden(part) for part in path.parts)
+            and path.suffix.lower() in IMAGE_TYPES)
+
+
 def archive_pages(handle) -> list[str]:
     check_zip_directory(handle)
     with zipfile.ZipFile(handle) as archive:
@@ -412,14 +429,7 @@ def archive_pages(handle) -> list[str]:
             if info.is_dir():
                 continue
             name = info.filename
-            path = PurePosixPath(name.replace("\\", "/"))
-            if any(is_hidden(part) for part in path.parts):
-                continue
-            if path.suffix.lower() not in IMAGE_TYPES:
-                continue
-            if not path.parts or path.is_absolute() or ".." in path.parts or "\\" in name or ":" in path.parts[0]:
-                # Ignore extraction-style paths instead of discarding otherwise
-                # readable pages. No ZIP entry is ever written to disk.
+            if not archive_image_name(name):
                 continue
             if name in seen:
                 raise ReaderError("压缩包中存在重名图片，请整理后重新扫描。", 422)
@@ -434,6 +444,28 @@ def archive_pages(handle) -> list[str]:
             if len(pages) > MAX_PAGES:
                 raise ReaderError("单本写真超过 10,000 页，请拆成分卷。", 422)
         return sorted(pages, key=natural_key)
+
+
+def rar_images(archive):
+    seen, total = set(), 0
+    for entry in archive.entries(MAX_ZIP_ENTRIES):
+        if not archive_image_name(entry.name):
+            continue
+        if entry.linked or entry.mode != stat.S_IFREG:
+            raise RarError("压缩包中的图片需要是普通文件。")
+        if entry.encrypted:
+            raise RarError("暂不支持加密的 RAR 压缩包。")
+        if entry.name in seen:
+            raise RarError("压缩包中存在重名图片，请整理后重新扫描。")
+        seen.add(entry.name)
+        if entry.size <= 0:
+            continue
+        if entry.size > MAX_RAR_PAGE_BYTES:
+            raise RarError("RAR 中有单页图片超过 128 MiB。")
+        total += entry.size
+        if total > MAX_BOOK_BYTES or len(seen) > MAX_PAGES:
+            raise RarError("RAR 压缩包的图片超过 8 GiB 或 10,000 页。")
+        yield entry
 
 
 def validate_archive_image(info):
@@ -543,7 +575,7 @@ class Library:
             "user_libraries": None, "user_hidden_libraries": None,
             "progress": None, "favorites": None, "bookmarks": None,
             "reading_preferences": None,
-            "tc_settings": ("enabled",), "tc_books": ("published",),
+            "tc_settings": ("enabled",), "tc_books": ("published", "decision"),
             "library_cover_cache": ("selection", "source_signature", "generation",
                 "ready_signature", "cache_file", "cache_etag", "deferred", "retry_after", "error"),
         }
@@ -687,6 +719,8 @@ class Library:
                 connection.execute("ALTER TABLE media_libraries ADD COLUMN paths TEXT NOT NULL DEFAULT '[]'")
             if "default_author_id" not in library_columns:
                 connection.execute("ALTER TABLE media_libraries ADD COLUMN default_author_id TEXT REFERENCES models(id)")
+            if "display_order" not in library_columns:
+                connection.execute("ALTER TABLE media_libraries ADD COLUMN display_order INTEGER")
             columns = {row["name"] for row in connection.execute("PRAGMA table_info(books)")}
             if "library_id" not in columns:
                 connection.execute("ALTER TABLE books ADD COLUMN library_id TEXT")
@@ -746,6 +780,8 @@ class Library:
                 connection.execute("ALTER TABLE book_metadata ADD COLUMN cover_file TEXT NOT NULL DEFAULT ''")
             if "cover_revision" not in metadata_columns:
                 connection.execute("ALTER TABLE book_metadata ADD COLUMN cover_revision INTEGER NOT NULL DEFAULT 0")
+            if "magazine_info" not in metadata_columns:
+                connection.execute("ALTER TABLE book_metadata ADD COLUMN magazine_info TEXT NOT NULL DEFAULT ''")
             for row in connection.execute("SELECT id,path,paths,default_author,default_author_id FROM media_libraries").fetchall():
                 if not json.loads(row["paths"]):
                     connection.execute("UPDATE media_libraries SET paths=? WHERE id=?",
@@ -842,12 +878,11 @@ class Library:
 
     def libraries(self, include_hidden=False, *, include_covers=True):
         with self.state_lock, closing(self.connect()) as connection:
-            rows = connection.execute("""SELECT l.*, author.name AS default_author_name, COUNT(b.id) AS book_count
+            rows = connection.execute(f"""SELECT l.*, author.name AS default_author_name, COUNT(b.id) AS book_count
                 FROM media_libraries l LEFT JOIN books b ON b.library_id=l.id AND b.active=1
-                AND (NOT EXISTS(SELECT 1 FROM tc_settings WHERE enabled=1)
-                     OR NOT EXISTS(SELECT 1 FROM tc_books tc WHERE tc.book_id=b.id AND tc.published=0))
+                AND {catalogue_visibility()}
                 LEFT JOIN models author ON author.id=l.default_author_id
-                GROUP BY l.id ORDER BY l.created_at,l.id""").fetchall()
+                GROUP BY l.id ORDER BY {LIBRARY_ORDER_SQL}""").fetchall()
             libraries = [self._library_export(row, row["id"] == self.current_scan or
                           row["id"] in self.pending_scans) for row in rows]
             actor = self._actor(connection)
@@ -865,19 +900,52 @@ class Library:
         return {"libraries": libraries, "root_path": str(self.root) if actor["role"] == "admin" else None,
                 "root_paths": [str(root) for root in self.roots] if actor["role"] == "admin" else []}
 
+    def order_libraries(self, body):
+        with self.state_lock, closing(self.connect()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self.require_admin(connection)
+            kind = body.get("kind")
+            ids = body.get("ids")
+            previous = body.get("previous_ids")
+            if kind not in ("photo", "magazine") or set(body) - {"kind", "ids", "previous_ids"}:
+                raise ReaderError("请选择写真库或杂志库排序。")
+            orders = (ids, previous) if "previous_ids" in body else (ids,)
+            for order in orders:
+                if (not isinstance(order, list) or any(not isinstance(item, str) or
+                        not re.fullmatch(r"[a-f0-9]{24}", item) for item in order) or len(set(order)) != len(order)):
+                    raise ReaderError("媒体库排序需要提供不重复的有效 ID。")
+            actor = self._actor(connection)
+            rows = connection.execute(f"""SELECT l.id,l.media_type,h.library_id IS NULL AS visible
+                FROM media_libraries l LEFT JOIN user_hidden_libraries h ON h.library_id=l.id AND h.user_id=?
+                ORDER BY {LIBRARY_ORDER_SQL}""", (actor["id"],)).fetchall()
+            magazine = kind == "magazine"
+            current = [row["id"] for row in rows if row["visible"] and (row["media_type"] == "magazine") == magazine]
+            if ids == current:
+                return {"ids": ids}
+            targets = set(current)
+            if set(ids) != targets or previous is not None and previous != current:
+                raise ReaderError("媒体库列表或顺序已变化，请刷新后重试。", 409)
+            # Reuse the visible group's slots so hidden libraries and the
+            # other group keep their positions in the full catalogue.
+            arranged = iter(ids)
+            ordered_ids = (next(arranged) if row["id"] in targets else row["id"] for row in rows)
+            connection.executemany("UPDATE media_libraries SET display_order=? WHERE id=? AND display_order IS NOT ?",
+                                   ((position, library_id, position) for position, library_id in enumerate(ordered_ids)))
+        return {"ids": ids}
+
     def my_libraries(self):
         with closing(self.connect()) as connection:
             actor = self._actor(connection)
             if actor["role"] == "admin":
-                rows = connection.execute("""SELECT l.id,l.name,h.library_id IS NULL AS visible
+                rows = connection.execute("""SELECT l.id,l.name,l.media_type,h.library_id IS NULL AS visible
                     FROM media_libraries l LEFT JOIN user_hidden_libraries h ON h.library_id=l.id AND h.user_id=?
                     ORDER BY l.name,l.id""", (actor["id"],))
             else:
-                rows = connection.execute("""SELECT l.id,l.name, h.library_id IS NULL AS visible
+                rows = connection.execute("""SELECT l.id,l.name,l.media_type,h.library_id IS NULL AS visible
                     FROM user_libraries ul JOIN media_libraries l ON l.id=ul.library_id
                     LEFT JOIN user_hidden_libraries h ON h.user_id=ul.user_id AND h.library_id=ul.library_id
                     WHERE ul.user_id=? ORDER BY l.name,l.id""", (actor["id"],))
-            return {"libraries": [{"id": row["id"], "name": row["name"], "visible": bool(row["visible"])} for row in rows]}
+            return {"libraries": [{**dict(row), "visible": bool(row["visible"])} for row in rows]}
 
     def save_my_libraries(self, body):
         values = body.get("visible_library_ids")
@@ -932,18 +1000,21 @@ class Library:
         self.require_admin()
         with self.state_lock, closing(self.connect()) as connection, connection:
             previous = self._library_config(library_id, connection) if library_id else {}
+            media_type = body.get("media_type", previous.get("media_type", "manga_jp"))
+            if not isinstance(media_type, str) or media_type not in MEDIA_TYPES:
+                raise ReaderError("媒体库类型需要是 manga_jp、manga_kr、comic_us、photo 或 magazine。")
+            magazine = media_type == "magazine"
+            if previous and magazine != (previous["media_type"] == "magazine"):
+                raise ReaderError("请在对应分类中创建新的媒体库。")
             name = body.get("name", previous.get("name", ""))
             if not isinstance(name, str) or not name.strip() or len(name.strip()) > 100:
-                raise ReaderError("写真库名称需要 1 至 100 个字符。")
+                raise ReaderError(f"{'杂志库' if magazine else '写真库'}名称需要 1 至 100 个字符。")
             roots = body.get("paths") if "paths" in body else (
                 [body["path"]] if "path" in body else json.loads(previous.get("paths", "[]")))
             paths = self._library_paths(roots)
             path = paths[0]
             mode = body.get("reading_mode", previous.get("reading_mode", "single"))
             direction = body.get("reading_direction", previous.get("reading_direction", "ltr"))
-            media_type = body.get("media_type", previous.get("media_type", "manga_jp"))
-            if not isinstance(media_type, str) or media_type not in MEDIA_TYPES:
-                raise ReaderError("写真库类型需要是 manga_jp、manga_kr、comic_us 或 photo。")
             if mode not in ("single", "double", "webtoon"):
                 raise ReaderError("阅读方式需要是 single、double 或 webtoon。")
             if direction not in ("ltr", "rtl", "ttb"):
@@ -956,7 +1027,9 @@ class Library:
                 raise ReaderError("将阅读设置应用于全部作品需要是布尔值。")
             author_id = body.get("default_author_id", previous.get("default_author_id"))
             author = previous.get("default_author", "")
-            if "default_author_id" in body:
+            if magazine:
+                author_id, author = None, ""
+            elif "default_author_id" in body:
                 if author_id is not None and (not isinstance(author_id, str)
                         or not re.fullmatch(r"[a-f0-9]{24}", author_id)):
                     raise ReaderError("默认模特需要选择一位已有模特，或 null 不设置。")
@@ -1083,10 +1156,13 @@ class Library:
             self._validate_targets(connection, "books", ids)
             # Recheck the complete ACL after reserving the write transaction.
             # A grant may have been revoked after the preliminary validation.
-            if any(self._select(connection, book_id) is None for book_id in ids):
+            targets = [self._select(connection, book_id) for book_id in ids]
+            if any(book is None for book in targets):
                 raise ReaderError("部分所选作品不存在或未被授权，请刷新后重试。", 404)
             if action == "models":
                 self.require_permission("edit_metadata", connection)
+                if any(book["media_type"] == "magazine" for book in targets):
+                    raise ReaderError("杂志没有模特关联。")
                 model_ids = self._model_ids(connection, body.get("model_ids"))
                 connection.executemany("""INSERT INTO book_metadata(book_id,models_manual) VALUES(?,1)
                     ON CONFLICT(book_id) DO UPDATE SET models_manual=1""", [(book_id,) for book_id in ids])
@@ -1217,8 +1293,7 @@ class Library:
         # Import eligibility is shared business state, independent of account
         # authorization and each person's hidden-library preference.
         if not management:
-            clause += (f" AND (NOT EXISTS(SELECT 1 FROM tc_settings WHERE enabled=1)"
-                       f" OR NOT EXISTS(SELECT 1 FROM tc_books tc WHERE tc.book_id={alias}.id AND tc.published=0))")
+            clause += " AND " + catalogue_visibility(alias)
         return clause, arguments
 
     def _model_access(self, connection, model_id, *, editing=False):
@@ -1431,7 +1506,7 @@ class Library:
             self.require_admin(connection)
             return {'users': [self._public_user(row, connection) for row in connection.execute('SELECT * FROM users ORDER BY id')],
                 'permission_options': [],
-                    'libraries': [dict(row) for row in connection.execute('SELECT id,name FROM media_libraries ORDER BY name,id')]}
+                    'libraries': [dict(row) for row in connection.execute('SELECT id,name,media_type FROM media_libraries ORDER BY name,id')]}
 
     def save_user(self, body, user_id=None):
         with self.auth_lock, closing(self.connect()) as connection, connection:
@@ -1653,6 +1728,7 @@ class Library:
         errors, found, unreadable = [], [], []
         rules = json.loads(config["exclude_rules"])
         roots = json.loads(config["paths"]) or [config["path"]]
+        archive_types = ARCHIVE_TYPES | {".rar"} if config["media_type"] == "magazine" else ARCHIVE_TYPES
 
         def report(path, message):
             if len(errors) < 200:
@@ -1710,7 +1786,7 @@ class Library:
                             continue
                         candidate = folder / name
                         suffix = candidate.suffix.lower()
-                        if suffix not in IMAGE_TYPES and suffix not in ARCHIVE_TYPES and suffix not in (".pdf", ".epub"):
+                        if suffix not in IMAGE_TYPES and suffix not in archive_types and suffix not in (".pdf", ".epub"):
                             continue
                         relative = candidate.relative_to(root).as_posix()
                         if self._excluded(relative, rules):
@@ -1764,10 +1840,24 @@ class Library:
                                 found.append(book)
                             else:
                                 book_id = previous_ids.get((self._source_identity(root, relative), "archive")) or self._book_id("source\0" + self._source_identity(root, relative), "archive", library_id)
-                                signature = f"{info.st_size}:{info.st_mtime_ns}"
                                 previous = cached.get(book_id)
-                                if (previous and previous["signature"] == signature
-                                        and previous["scan_revision"] == revision):
+                                signature = f"{info.st_size}:{info.st_mtime_ns}"
+                                if suffix == ".rar":
+                                    with self._open_media_file(root, relative) as handle:
+                                        info = os.fstat(handle.fileno())
+                                        identity = source_identity(handle, info)
+                                        stamp = identity or file_identity(info)
+                                        signature = "rar:" + ":".join(map(str, stamp))
+                                        if (identity is not None and previous and previous["signature"] == signature
+                                                and previous["scan_revision"] == revision):
+                                            pages = json.loads(previous["pages"])
+                                        else:
+                                            with open_rar(handle, cancelled=self.stop_event.is_set) as archive:
+                                                pages = sorted((entry.name for entry in rar_images(archive)), key=natural_key)
+                                        if (source_identity(handle) or file_identity(os.fstat(handle.fileno()))) != stamp:
+                                            raise RarError("RAR 在扫描期间发生变化，请重新扫描。")
+                                elif (previous and previous["signature"] == signature
+                                      and previous["scan_revision"] == revision):
                                     pages = json.loads(previous["pages"])
                                 else:
                                     with self._open_media_file(root, relative) as handle:
@@ -1781,7 +1871,7 @@ class Library:
                                     report(relative, "压缩包中没有支持的图片，或图片已被排除规则过滤。")
                         except (OSError, ValueError, RuntimeError, NotImplementedError,
                                 zipfile.BadZipFile, ReaderError) as error:
-                            message = str(error) if isinstance(error, ReaderError) else "无法读取写真，请检查文件是否损坏或权限是否正确。"
+                            message = str(error) if isinstance(error, (ReaderError, RarError)) else "无法读取作品，请检查文件是否损坏或权限是否正确。"
                             report(relative, message)
                     if image_files:
                         relative = folder.relative_to(root).as_posix()
@@ -1858,7 +1948,7 @@ class Library:
                         source_root=excluded.source_root,scan_revision=excluded.scan_revision,pdf_sizes=excluded.pdf_sizes,
                         epub_metadata=excluded.epub_metadata,active=1
                     """, book)
-                    self._apply_photo_defaults(connection, config, Path(book["source_root"]), book)
+                    self._apply_book_defaults(connection, config, Path(book["source_root"]), book)
                     if book["id"] in inspected:
                         self.transcoding.apply_book(connection, book, inspected[book["id"]])
                     connection.execute("UPDATE progress SET page=MIN(page, ?) WHERE book_id=?",
@@ -1927,9 +2017,8 @@ class Library:
                     library_id=config["id"], scan_revision=config["revision"], source_root=str(root), pdf_sizes="[]", epub_metadata="{}")
 
     @staticmethod
-    def _photo_folder_values(root, book):
+    def _photo_folder_model(root, book):
         """Infer only the supported model/work and selected-model/work layouts."""
-        release_date = photo_date_prefix(book["title"])
         parts = PurePosixPath(book["path"]).parts
         model_name = root.name if len(parts) == 1 else parts[0] if len(parts) == 2 else ""
         # Some collections decorate just one side of the model directory,
@@ -1942,7 +2031,7 @@ class Library:
         if (not model_name or len(model_name) > 100
                 or any(unicodedata.category(char) == "Cc" for char in model_name)):
             model_name = ""
-        return release_date, model_name
+        return model_name
 
     @staticmethod
     def _folder_model(connection, name, *, automatic=False):
@@ -1969,13 +2058,26 @@ class Library:
                            (normalized, model_id))
         return model_id
 
-    def _apply_photo_defaults(self, connection, config, root, book):
-        previous = connection.execute("SELECT * FROM book_metadata WHERE book_id=?", (book["id"],)).fetchone()
-        if config["media_type"] != "photo" and previous is None:
+    def _apply_book_defaults(self, connection, config, root, book):
+        media_type = config["media_type"]
+        release_date = title_date_prefix(book["title"]) if media_type in ("photo", "magazine") else ""
+        if media_type == "magazine" and book["format"] == "epub" and not release_date:
+            # An EPUB can supply a display title that omits the date in its filename.
+            release_date = title_date_prefix(PurePosixPath(book["path"]).stem)
+        if media_type == "photo" or release_date:
+            connection.execute("INSERT OR IGNORE INTO book_metadata(book_id) VALUES(?)", (book["id"],))
+        connection.execute("UPDATE book_metadata SET release_date=? WHERE book_id=? AND release_date_manual=0",
+                           (release_date, book["id"]))
+        if media_type == "magazine":
             return
-        release_date, model_name = self._photo_folder_values(root, book) if config["media_type"] == "photo" else ("", "")
-        manual = bool(previous and previous["models_manual"])
-        suppressed = bool(previous and previous["models_auto_suppressed"])
+        previous = connection.execute(
+            "SELECT models_manual,models_auto_suppressed,folder_model_id FROM book_metadata WHERE book_id=?",
+            (book["id"],)).fetchone()
+        if previous is None:
+            return
+        model_name = self._photo_folder_model(root, book) if media_type == "photo" else ""
+        manual = bool(previous["models_manual"])
+        suppressed = bool(previous["models_auto_suppressed"])
         default_model = config.get("default_author_id")
         # A chosen default and manual work bindings take precedence. In those
         # cases even creating a folder-derived registry entry would be wrong.
@@ -1985,12 +2087,8 @@ class Library:
             # Keep an already resolved folder label for compatibility without
             # creating any new registry entry behind a manual work selection.
             model_id = previous["folder_model_id"]
-        connection.execute("INSERT OR IGNORE INTO book_metadata(book_id) VALUES(?)", (book["id"],))
         connection.execute("UPDATE book_metadata SET folder_model_id=? WHERE book_id=?", (model_id, book["id"]))
-        connection.execute("UPDATE book_metadata SET release_date=? WHERE book_id=? AND release_date_manual=0",
-                           (release_date, book["id"]))
-        metadata = connection.execute("SELECT models_manual FROM book_metadata WHERE book_id=?", (book["id"],)).fetchone()
-        if not metadata["models_manual"]:
+        if not manual:
             connection.execute("DELETE FROM book_models WHERE book_id=?", (book["id"],))
             selected_model = default_model or model_id
             if selected_model is not None:
@@ -2008,8 +2106,10 @@ class Library:
         book["title"] = row["title_override"] or row["title"]
         book["source_title"] = row["title"]
         book["title_override"] = row["title_override"]
-        if not row["title_override"] and row["media_type"] == "photo" and row["hide_date_prefix"]:
-            prefix = photo_date_prefix(row["title"])
+        if row["media_type"] == "magazine":
+            book["magazine_info"] = row["magazine_info"]
+        if not row["title_override"] and row["media_type"] in ("photo", "magazine") and row["hide_date_prefix"]:
+            prefix = title_date_prefix(row["title"])
             if prefix:
                 book["title"] = row["title"][len(prefix):].lstrip() or row["title"]
         book["cover_page"] = min(max(row["cover_page"], 0), max(row["page_count"] - 1, 0))
@@ -2055,6 +2155,7 @@ class Library:
             COALESCE(rp.reading_direction,m.reading_direction_override,l.reading_direction) AS reading_direction,
             rp.reading_mode AS personal_reading_mode, rp.reading_direction AS personal_reading_direction,
             m.title AS title_override, COALESCE(m.release_date,'') AS release_date,
+            COALESCE(m.magazine_info,'') AS magazine_info,
             COALESCE(m.cover_page,0) AS cover_page, m.reading_direction_override,
             m.reading_mode_override, l.hide_date_prefix,
             COALESCE(m.cover_source,'page') AS cover_source,
@@ -2390,6 +2491,18 @@ class Library:
                 raise ReaderError("作品不存在，请重新扫描写真库。", 404)
             self.require_permission("edit_metadata", connection)
             updates = {}
+            if "magazine_info" in body:
+                if book["media_type"] != "magazine":
+                    raise ReaderError("杂志资料只能填写在杂志中。")
+                value = body["magazine_info"]
+                if not isinstance(value, str):
+                    raise ReaderError("杂志资料需要是文字。")
+                value = value.replace("\r\n", "\n").replace("\r", "\n")
+                if len(value) > MAX_MAGAZINE_INFO_CHARS:
+                    raise ReaderError(f"杂志资料最多可填写 {MAX_MAGAZINE_INFO_CHARS:,} 个字符。")
+                if any(unicodedata.category(char) in ("Cc", "Cs") and char not in "\n\t" for char in value):
+                    raise ReaderError("杂志资料不能包含控制字符。")
+                updates["magazine_info"] = value
             if "title" in body:
                 value = body["title"]
                 updates["title"] = None if value is None else self._text(value, "作品名称", 200, blank=True) or None
@@ -2430,6 +2543,8 @@ class Library:
                 updates["reading_mode_override"] = value or None
             model_ids = None
             if "model_ids" in body:
+                if book["media_type"] == "magazine":
+                    raise ReaderError("杂志没有模特关联。")
                 model_ids = self._model_ids(connection, body["model_ids"])
                 updates["models_manual"] = 1
             upload_name = None
@@ -2868,6 +2983,26 @@ class Library:
                         after = os.fstat(handle.fileno())
                         if file_identity(after) != stamp or identity is not None and source_identity(handle, after) != identity:
                             raise ReaderError("源图片在读取期间发生变化，请重新扫描后重试。", 422)
+                    if book["format"] == "rar":
+                        key = ('rar', str(root), book['path'], identity, page) if identity is not None else None
+                        with open_rar(handle, cancelled=self.stop_event.is_set) as archive:
+                            entry = next((entry for entry in rar_images(archive) if entry.name == page), None)
+                            if entry is None:
+                                raise RarError("RAR 中的图片已移动或删除，请重新扫描。")
+                            def build(output):
+                                prepared = self._prepare_image_stream(archive, entry.size, mime, output=output)
+                                verify()
+                                return prepared[2], prepared[3]
+                            with self.source_pages.open(key, entry.size, build) as cached:
+                                verify()
+                                if cached is not None:
+                                    yield cached
+                                else:
+                                    with TemporaryFile(dir=self.data) as output:
+                                        result = self._prepare_image_stream(archive, entry.size, mime, output=output)
+                                        verify()
+                                        yield result
+                        return
                     check_zip_directory(handle)
                     with zipfile.ZipFile(handle) as archive:
                         if len(archive.infolist()) > MAX_ZIP_ENTRIES:
@@ -2891,6 +3026,8 @@ class Library:
                                     result = self._prepare_image_stream(source, info.file_size, mime)
                                     verify()
                                     yield result
+        except RarError as error:
+            raise ReaderError(str(error), 422) from error
         except (OSError, KeyError, zipfile.BadZipFile, RuntimeError, EOFError, NotImplementedError) as error:
             raise ReaderError("无法读取这一页，文件可能已移动或损坏，请重新扫描。", 422) from error
 
@@ -4104,9 +4241,18 @@ class ReaderHandler(BaseHTTPRequestHandler):
                 raise ReaderError("图片搜索配置包含不支持的字段。")
             self.respond(self.library.image_search.configure(body))
             return
-        upload_request = (re.fullmatch(r"/api/books/[a-f0-9]{24}/metadata", path)
-                          or re.fullmatch(r"/api/models(?:/[a-f0-9]{24})?", path) or path == "/api/profile")
-        body = self.read_body(MAX_COVER_BODY_BYTES if upload_request else MAX_BODY_BYTES)
+        if path == "/api/libraries/order":
+            if request.query:
+                raise ReaderError("媒体库排序不接受查询参数。")
+            self.respond(self.library.order_libraries(self.read_body(4 * MAX_BODY_BYTES)))
+            return
+        if re.fullmatch(r"/api/books/[a-f0-9]{24}/metadata", path):
+            maximum = MAX_METADATA_BODY_BYTES
+        elif re.fullmatch(r"/api/models(?:/[a-f0-9]{24})?", path) or path == "/api/profile":
+            maximum = MAX_COVER_BODY_BYTES
+        else:
+            maximum = MAX_BODY_BYTES
+        body = self.read_body(maximum)
         if path in ("/api/cache/settings", "/api/cache/clear"):
             self.library.require_admin()
             if urlsplit(self.path).query:

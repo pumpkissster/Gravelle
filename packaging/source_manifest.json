@@ -1,6 +1,6 @@
 [
   "server.py", "accounts.py", "password_reset.py", "network_settings.py", "https_settings.py", "transcoding.py", "image_search.py", "image_search_features.py", "avatar_face_crop.py", "task_scheduler.py", "library_covers.py", "cache_manager.py", "epub_reader.py", "pdf_reader.py", "release.json", "requirements.txt", "README.md", "LICENSE",
-  "models/yunet/face_detection_yunet_2023mar.onnx", "models/yunet/LICENSE", "models/yunet/provenance.json", "models/yunet/README.md",
+  "rar_reader.py", "models/yunet/face_detection_yunet_2023mar.onnx", "models/yunet/LICENSE", "models/yunet/provenance.json", "models/yunet/README.md",
   "tests/test_avatar_face_crop.py", "tests/test_avatar_face_worker.py", "tests/test_avatar_face_packaging.py", "tests/test_model_avatar_regeneration.py", "tests/test_model_avatar_ui.js", "static/board-skin.css", "tests/test_interface_skin.js", "static/vendor/remixicon-LICENSE.txt", "static/vendor/remixicon-provenance.json",
   "Dockerfile", "compose.yaml", "compose.build.yaml", "compose.optimization.yaml", ".env.example", ".dockerignore", ".gitignore", ".gitattributes",
   ".github/workflows/release.yml",
@@ -8,8 +8,10 @@
   "start_windows.py", "start-windows.cmd", "restart-windows.cmd", "restart-windows.ps1",
   "start-windows-lan.cmd", "restart-windows-lan.cmd",
   "static/index.html", "static/app.js", "static/styles.css", "static/reader-model.js",
+  "static/release-date-model.js", "static/release-date-picker.js", "tests/test_release_date_model.js",
   "static/performance-settings.js", "static/reader-end.js", "static/reader-end.css", "static/avatar-ui.js", "static/user-management.js", "static/batch-selection.js", "static/page-router.js", "static/transcoding-ui.js", "static/image-search-ui.js",
   "static/list-state.js", "tests/test_list_state.js", "static/catalog-render.js", "tests/test_catalog_render.js", "tests/test_catalog_performance.py",
+  "static/message-center.js", "tests/test_message_center.js",
   "static/cache-management-ui.js", "tests/test_decoded_cache.js", "tests/test_next_update_api.py",
   "static/network-settings-ui.js", "static/network-settings-ui.css", "tests/test_network_settings.py", "tests/test_network_settings_ui.js", "tests/test_desktop_network_settings.py", "docs/network.md",
   "tests/test_https_packaging.py", "tests/test_https_settings.py", "tests/test_desktop_https.py",
@@ -47,5 +49,6 @@
   "docs/releases/0.9.2.md",
   "docs/releases/0.9.3.md",
   "docs/releases/0.9.4.md",
+  "docs/releases/0.9.5.md",
   "tests/test_release_assets.py", "tests/test_release_workflow.py", "packaging/source_manifest.json", "packaging/package_source.py", "packaging/check_docker_context.py", "packaging/smoke_image_workers.py"
 ]

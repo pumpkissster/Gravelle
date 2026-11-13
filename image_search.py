@@ -922,7 +922,7 @@ class ImageSearchManager:
                 # without its request being lost when this one completes.
                 connection.execute("UPDATE is_settings SET reconcile_pending=0 WHERE generation=?", (generation,))
                 books = [dict(row) for row in connection.execute("""SELECT id,source_root,path,format,pages,signature
-                    FROM books WHERE active=1 AND removed=0 AND format NOT IN ('pdf','epub') ORDER BY id""")]
+                FROM books WHERE active=1 AND removed=0 AND format NOT IN ('pdf','epub','rar') ORDER BY id""")]
             total = sum(len(json.loads(book["pages"])) for book in books)
             done = 0
             self._set_activity("reconciling", generation, done=done, total=total)
@@ -950,7 +950,7 @@ class ImageSearchManager:
             if not self._current(generation, connection):
                 return
             live = {row["id"]: set(json.loads(row["pages"])) for row in connection.execute(
-                "SELECT id,pages FROM books WHERE active=1 AND removed=0 AND format NOT IN ('pdf','epub')")}
+                "SELECT id,pages FROM books WHERE active=1 AND removed=0 AND format NOT IN ('pdf','epub','rar')")}
             obsolete = [(row["book_id"], row["page_key"]) for row in connection.execute(
                 "SELECT book_id,page_key FROM is_pages") if row["page_key"] not in live.get(row["book_id"], set())]
             for start in range(0, len(obsolete), CATALOGUE_BATCH_SIZE):
