@@ -315,14 +315,14 @@ class CatalogPerformanceTests(ImageSearchFixture):
             return connection
         with self.app.acting_as(child), patch.object(self.app, 'connect', side_effect=traced):
             result = self.app.image_search.snapshot()
-        self.assertEqual(result, {'enabled': True, 'available': False, 'indexing': False})
+        self.assertEqual(result, {'enabled': True, 'available': False, 'indexing': False, 'working': False})
         self.assertFalse(any('COUNT(' in sql.upper() for sql in statements))
         self.seed_index(status='ready', local_state='pending')
         with self.app.acting_as(child):
-            self.assertEqual(self.app.image_search.snapshot(), {'enabled': True, 'available': True, 'indexing': True})
+            self.assertEqual(self.app.image_search.snapshot(), {'enabled': True, 'available': True, 'indexing': True, 'working': False})
         self.sql('UPDATE is_settings SET paused=1')
         with self.app.acting_as(child):
-            self.assertEqual(self.app.image_search.snapshot(), {'enabled': True, 'available': True, 'indexing': False})
+            self.assertEqual(self.app.image_search.snapshot(), {'enabled': True, 'available': True, 'indexing': False, 'working': False})
 
     def test_catalogue_api_authentication_and_account_tokens(self):
         child = self.child([self.library_id])
