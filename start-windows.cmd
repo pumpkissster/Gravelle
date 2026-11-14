@@ -1,4 +1,5 @@
 @echo off
+rem Start Gravelle from source on Windows using an installed Python 3.12 or newer.
 setlocal
 cd /d "%~dp0"
 
