@@ -158,7 +158,7 @@ class UpdateTests(unittest.TestCase):
             version_key("../../setup.exe")
 
     def test_unconfigured_update_is_explicit(self):
-        result = check_update(None, "1.8.2")
+        result = check_update(None, "0.9.5")
         self.assertFalse(result["configured"])
         self.assertFalse(result["available"])
         self.assertIn("尚未配置", result["message"])
@@ -182,7 +182,7 @@ class UpdateTests(unittest.TestCase):
             def read(self, limit):
                 return b'{"tag_name":"v2.0.0","html_url":"https://evil.example/setup.exe"}'
         with patch("desktop.core.urlopen", return_value=Response()):
-            result = check_update(ReleaseConfig("pumpkissster/Gravelle"), "1.8.2")
+            result = check_update(ReleaseConfig("pumpkissster/Gravelle"), "0.9.5")
         self.assertTrue(result["available"])
         self.assertEqual(result["url"], "https://github.com/pumpkissster/Gravelle/releases")
 
@@ -203,7 +203,7 @@ class UpdateTests(unittest.TestCase):
                 return json.dumps({"tag_name": self.tag, "prerelease": False, "draft": False}).encode()
         for tag in ("v1.9.0-rc.1", "v01.9.0", "v1.09.0", "v1.9.00", "V1.9.0", "v1.9.0+build", "v1000000000.0.0"):
             with self.subTest(tag=tag), patch("desktop.core.urlopen", return_value=Response(tag)):
-                result = check_update(ReleaseConfig("pumpkissster/Gravelle"), "1.8.2")
+                result = check_update(ReleaseConfig("pumpkissster/Gravelle"), "0.9.5")
                 self.assertFalse(result["available"])
                 self.assertNotIn("tag", result)
 

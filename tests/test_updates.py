@@ -43,13 +43,13 @@ def github_response(document=None, status=200, raw=None, length=None):
 
 class ReleaseValidationTests(unittest.TestCase):
     def test_stable_versions_compare_numerically(self):
-        self.assertEqual(release_version("v1.8.2"), (1, 8, 2))
+        self.assertEqual(release_version("v2.3.4"), (2, 3, 4))
         self.assertEqual(release_version("0.0.0"), (0, 0, 0))
         self.assertGreater(release_version("1.10.0"), release_version("1.9.99"))
 
     def test_prerelease_malformed_and_ambiguous_versions_are_rejected(self):
-        for value in (None, 182, "", "v1.8", "1.8.2.0", "1.8.2-rc.1", "1.8.2+local",
-                      " 1.8.2", "1.8.2\n", "01.8.2", "1.08.2", "V1.8.2", "1.2." + "9" * 100):
+        for value in (None, 234, "", "v2.3", "2.3.4.0", "2.3.4-rc.1", "2.3.4+local",
+                      " 2.3.4", "2.3.4\n", "02.3.4", "2.03.4", "V2.3.4", "1.2." + "9" * 100):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 release_version(value)
 
@@ -155,11 +155,11 @@ class UpdateCacheTests(unittest.TestCase):
         fetch.assert_not_called()
 
     def test_new_equal_and_older_release_cannot_trigger_downgrade(self):
-        for tag, expected in (("v1.9.0", "available"), ("v1.8.2", "up_to_date"), ("v1.8.1", "up_to_date")):
+        for tag, expected in (("v2.4.0", "available"), ("v2.3.4", "up_to_date"), ("v2.3.3", "up_to_date")):
             with self.subTest(tag=tag), patch("server.latest_github_release", return_value=(tag, RELEASE_URL)):
-                result = UpdateChecker("1.8.2", REPOSITORY).check()
+                result = UpdateChecker("2.3.4", REPOSITORY).check()
                 self.assertEqual(result["status"], expected)
-                self.assertEqual(result["current"], "1.8.2")
+                self.assertEqual(result["current"], "2.3.4")
 
     def test_success_cache_expires_after_ten_minutes_and_returns_copies(self):
         clock = [1000.0]

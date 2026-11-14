@@ -1508,7 +1508,9 @@
     $('#subaccounts-setting').hidden = !isAdmin();
     renderSubaccountSummary();
     if (isAdmin() && !section) loadUsers();
-    Object.keys(defaultPrefs).forEach(key => { $('#pref-' + key).value = state.prefs[key]; }); $('#settings-version').textContent = 'v' + String(state.session?.version || '1.8.2').replace(/^v/, '');
+    Object.keys(defaultPrefs).forEach(key => { $('#pref-' + key).value = state.prefs[key]; });
+    const version = state.session?.version;
+    $('#settings-version').textContent = version ? `v${String(version).replace(/^v/, '')}` : '—';
     $('#settings-connection').textContent = state.libraryError ? '连接异常 · ' + state.libraryError : '已连接';
     $('#settings-connection').classList.toggle('connection-error', Boolean(state.libraryError));
     $('#interface-theme').value = interfaceTheme();

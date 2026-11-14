@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#19161a">
   <meta name="description" content="Gravelle：属于你的私人影像藏馆。">
   <title>Gravelle</title>
-  <link rel="icon" type="image/png" href="/gravelle-icon.png?v=1.8.2">
+  <link rel="icon" type="image/png" href="/gravelle-icon.png">
   <link rel="stylesheet" href="/styles.css">
   <link rel="stylesheet" href="/reader-end.css">
   <link rel="stylesheet" href="/epub-reader.css">
@@ -75,7 +75,7 @@
 
   <div id="app" class="app-shell" data-view="home" hidden>
     <aside class="sidebar" id="sidebar" aria-label="主菜单">
-      <a class="brand" href="#/home" aria-label="Gravelle 首页"><img class="brand-wordmark" src="/gravelle-wordmark.svg?v=1.8.2" alt="Gravelle" width="938" height="313"></a>
+      <a class="brand" href="#/home" aria-label="Gravelle 首页"><img class="brand-wordmark" src="/gravelle-wordmark.svg" alt="Gravelle" width="938" height="313"></a>
       <nav id="side-nav" class="main-nav" aria-label="主导航">
         <button class="nav-item active" data-sidebar-item="home" data-view="home"><svg><use href="#i-home"/></svg><span>主页</span></button>
         <div data-sidebar-item="libraries">
@@ -144,7 +144,7 @@
     </main>
   </div>
 
-  <section id="login-screen" class="login-screen" aria-labelledby="login-heading" hidden><form id="login-form" class="login-card"><div class="brand"><img class="brand-wordmark" src="/gravelle-wordmark.svg?v=1.8.2" alt="Gravelle" width="938" height="313"></div><h1 id="login-heading">登录</h1><label class="field-label" for="username">用户名</label><input id="username" type="text" autocomplete="username" minlength="2" maxlength="40" required placeholder="输入用户名"><label class="field-label" for="password">密码</label><input id="password" type="password" autocomplete="current-password" maxlength="256" required placeholder="输入密码"><div id="registration-confirm-field" hidden><label class="field-label" for="password-confirm">确认密码</label><input id="password-confirm" type="password" autocomplete="new-password" maxlength="256" placeholder="再次输入密码"></div><div id="setup-password-field" hidden><label class="field-label" for="setup-password">原访问密码</label><input id="setup-password" type="password" autocomplete="off" placeholder="输入之前配置的访问密码"><p class="field-hint">验证原访问密码后，即可设置用户名和新的登录密码。</p></div><p id="login-error" class="form-error" role="alert" hidden></p><button id="login-submit" type="submit" class="button button-primary">登录 <svg><use href="#i-arrow"/></svg></button></form></section>
+  <section id="login-screen" class="login-screen" aria-labelledby="login-heading" hidden><form id="login-form" class="login-card"><div class="brand"><img class="brand-wordmark" src="/gravelle-wordmark.svg" alt="Gravelle" width="938" height="313"></div><h1 id="login-heading">登录</h1><label class="field-label" for="username">用户名</label><input id="username" type="text" autocomplete="username" minlength="2" maxlength="40" required placeholder="输入用户名"><label class="field-label" for="password">密码</label><input id="password" type="password" autocomplete="current-password" maxlength="256" required placeholder="输入密码"><div id="registration-confirm-field" hidden><label class="field-label" for="password-confirm">确认密码</label><input id="password-confirm" type="password" autocomplete="new-password" maxlength="256" placeholder="再次输入密码"></div><div id="setup-password-field" hidden><label class="field-label" for="setup-password">原访问密码</label><input id="setup-password" type="password" autocomplete="off" placeholder="输入之前配置的访问密码"><p class="field-hint">验证原访问密码后，即可设置用户名和新的登录密码。</p></div><p id="login-error" class="form-error" role="alert" hidden></p><button id="login-submit" type="submit" class="button button-primary">登录 <svg><use href="#i-arrow"/></svg></button></form></section>
 
   <dialog id="sidebar-display-dialog" class="settings-dialog library-dialog compact-dialog" aria-labelledby="sidebar-display-title" aria-describedby="sidebar-display-description">
     <header class="dialog-header">

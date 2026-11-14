@@ -41,8 +41,7 @@ SetupLogging=yes
 UninstallDisplayName=Gravelle
 LanguageDetectionMethod=uilanguage
 ShowLanguageDialog=yes
-; Follow the current Windows UI language even when upgrading the English-only
-; 1.8.2 installer. The user can still choose either language in the dialog.
+; Follow the current Windows UI language on upgrades and show the language chooser.
 UsePreviousLanguage=no
 
 [Languages]

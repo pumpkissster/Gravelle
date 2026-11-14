@@ -197,7 +197,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
             output.write('Automatically appended marketing text\n')
         with self.assertRaisesRegex(AssertionError, 'exactly match the reviewed'):
             self.execute(ASSET_CHECK)
-        self.assertNotIn('1.8.3', RELEASE)
+        self.assertNotRegex(RELEASE, r'\b1\.8\.\d+\b')
         self.assertNotIn('Record whether the Docker image is published', RELEASE)
 
     def test_previous_release_asset_layout_is_accepted_without_macos(self):
