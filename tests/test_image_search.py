@@ -325,7 +325,7 @@ class ImageSearchTests(ImageSearchFixture):
             result = self.manager.query(self.source, limit=1)
             self.assertEqual(result["results"], [{"book_id": self.book_id, "page": 0, "match": "exact", "distance": 0}])
             self.assertEqual(result["total"], 1)
-            self.assertEqual(set(self.manager.snapshot()), {"enabled", "available", "indexing"})
+            self.assertEqual(set(self.manager.snapshot()), {"enabled", "available", "indexing", "working"})
             self.error(404, self.manager.thumbnail, private_book, 0)
             self.error(403, self.manager.configure, {"enabled": False})
         with closing(self.app.connect()) as connection, connection:

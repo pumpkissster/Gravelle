@@ -15,6 +15,17 @@
   const Routes = window.GravellePageRouter;
   const Catalog = window.GravelleCatalog;
   const Messages = window.GravelleMessageCenter;
+  const accountMenu = window.GravelleAccountMenu.mount($('#account-menu-host'), {
+    onMessages: () => {
+      navigate('messages');
+      if (state.view === 'messages') $('#library-title').focus({ preventScroll: true });
+    },
+    onSettings: () => navigate('settings'),
+    onLogout: async () => {
+      try { await flushProgress(true); state.session = await post('/api/logout', {}); handleUnauthorized(); $('#login-error').hidden = true; }
+      catch (error) { if (error.status !== 401) toast(error.message); }
+    },
+  }, Avatars.DEFAULT_AVATAR);
   const routing = { current: Routes.parse(location.hash), ready: false, restoring: false, generation: 0 };
   let listPositions = null;
   let listRestoration = null;
@@ -40,7 +51,7 @@
   const chapterPaging = { page: 0, signature: '' };
   const modeLabels = { single: '单页', double: '双页', webtoon: '条漫' };
   const allowedPrefs = { mode: ['single', 'double', 'webtoon'], direction: ['ltr', 'rtl', 'ttb'], fit: ['height', 'width'], theme: ['dark', 'light'] };
-  const state = { session: null, books: [], scanning: false, lastScan: null, scanErrors: [], filter: 'all', query: '', series: '', sort: 'added', loading: true, loaded: false, poll: null, refreshPromise: null, libraryError: null, libraries: [], libraryId: '', rootPath: '/library', view: 'home', models: [], bookmarks: [], modelId: '', detailBook: null, editingBook: null, selectedModels: new Set(), editingModel: null, bookmarkTarget: null, editingLibrary: null, directoryPath: '', prefs: { mode: 'single', direction: 'ltr', ...readPrefs() } };
+  const state = { session: null, books: [], scanning: false, lastScan: null, scanErrors: [], filter: 'all', query: '', searchMedia: '', series: '', sort: 'added', loading: true, loaded: false, poll: null, refreshPromise: null, libraryError: null, libraries: [], libraryId: '', rootPath: '/library', view: 'home', models: [], bookmarks: [], modelId: '', detailBook: null, editingBook: null, selectedModels: new Set(), editingModel: null, bookmarkTarget: null, editingLibrary: null, directoryPath: '', prefs: { mode: 'single', direction: 'ltr', ...readPrefs() } };
   const reader = { open: false, book: null, index: 0, token: 0, epoch: 0, observer: null, rows: [], visible: new Set(), frame: 0, restoring: null, preloads: [], loadedPage: null, lastVisible: null, saveTimer: null, pending: null, saveChains: new Map(), settingsChains: new Map(), saveSeq: 0, noticeType: '', suppressClickUntil: 0, sizes: [], spreads: [], coverAlone: true, offset: false, effective: 'single', chromeTimer: null, turnAnimations: [], scrollJumpBehavior: 'instant' };
   let toastTimer;
   let settingsAccessRequest = null;
@@ -104,15 +115,15 @@
     clearTimeout(state.poll); state.poll = null; state.refreshPromise = null;
     stopCatalogFlow(); resetSelection(); selection.busy = false;
     transcodingUI?.reset();
-    imageSearchUI?.reset(); searchMode = 'text';
+    imageSearchUI?.reset(); searchMode = 'text'; state.searchMedia = '';
     cacheManagementUI?.reset(); libraryCoverRequest += 1; libraryCoverBusy = false;
     resetMessages();
     state.books = []; state.libraries = []; state.models = []; state.bookmarks = [];
     state.loaded = false; state.loading = true; state.scanning = false; state.scanErrors = []; state.libraryError = null; state.lastScan = null; state.rootPath = '/library';
     state.view = 'home'; state.libraryId = ''; state.modelId = ''; state.query = ''; state.series = ''; state.sort = 'added'; state.settingsSection = ''; state.settingsTab = '';
     state.detailBook = null; state.editingBook = null; state.editingModel = null; state.editingLibrary = null; state.selectedModels.clear(); state.bookmarkTarget = null; state.directoryPath = '';
-    $('#search').value = ''; $('#sort').value = 'added';
-    ['book-grid', 'library-tiles', 'library-nav', 'magazine-nav', 'continue-card', 'models-grid', 'bookmark-list', 'detail-content', 'metadata-models'].forEach(id => $('#' + id).replaceChildren());
+    $('#search').value = $('#library-name-search').value = ''; $('#sort').value = 'added';
+    ['book-grid', 'library-tiles', 'home-library-tiles', 'home-magazine-tiles', 'library-nav', 'magazine-nav', 'continue-card', 'models-grid', 'bookmark-list', 'detail-content', 'metadata-models'].forEach(id => $('#' + id).replaceChildren());
     catalogCards.clear();
     Object.assign(catalogFlow, { books: [], indices: new Map(), layout: null, drawnLayout: null, drawnWindow: '', anchor: null });
     userManagement.generation += 1; Object.assign(userManagement, { users: [], libraries: [], loaded: false, loading: false, error: false, updatedAt: 0, request: 0, busy: false, editingId: null });
@@ -126,8 +137,8 @@
     state.prefs = { mode: 'single', direction: 'ltr', ...readPrefs() };
     librarySorts.clear(); readLibrarySorts().forEach((value, key) => librarySorts.set(key, value));
     applyInterfaceTheme(interfaceTheme());
-    applyInterfaceSkin(interfaceSkin());
     applySidebarPreferences();
+    homePreferences = displayPreferences(homeSectionIds, homeSectionIds, readDisplayPreferences('home-sections'));
     Performance.setUser(activeUser);
     catalogPaging.signature = ''; chapterPaging.signature = ''; renderedLibraryData = '';
   }
@@ -151,33 +162,10 @@
   function applyInterfaceTheme(theme) {
     const value = theme === 'light' ? 'light' : 'dark';
     document.documentElement.dataset.interfaceTheme = value;
-    updateInterfaceThemeColor();
+    document.querySelector('meta[name="theme-color"]')?.setAttribute('content', value === 'light' ? '#f7f7f7' : '#121212');
     storePreference('interface-theme', value);
   }
-  function interfaceSkin() {
-    return stored('interface-skin') === 'board' ? 'board' : 'classic';
-  }
-  function updateInterfaceThemeColor() {
-    const light = document.documentElement.dataset.interfaceTheme === 'light';
-    const board = document.documentElement.dataset.interfaceSkin === 'board';
-    document.querySelector('meta[name="theme-color"]')?.setAttribute('content', board ? light ? '#f7f7f7' : '#121212' : light ? '#fcf8fa' : '#19161a');
-  }
-  function syncInterfaceSkinPicker(value = document.documentElement.dataset.interfaceSkin) {
-    const skin = value === 'board' ? 'board' : 'classic';
-    $$('#interface-skin-picker input[name="interface-skin"]').forEach(input => {
-      input.checked = input.value === skin;
-      input.closest('.skin-option')?.classList.toggle('is-selected', input.checked);
-    });
-  }
-  function applyInterfaceSkin(skin) {
-    const value = skin === 'board' ? 'board' : 'classic';
-    document.documentElement.dataset.interfaceSkin = value;
-    storePreference('interface-skin', value);
-    syncInterfaceSkinPicker(value);
-    updateInterfaceThemeColor();
-  }
   applyInterfaceTheme(interfaceTheme());
-  applyInterfaceSkin(interfaceSkin());
 
   function node(tag, className, content) {
     const element = document.createElement(tag);
@@ -298,7 +286,7 @@
     $('#settings-lan-url').removeAttribute('href');
     $('#settings-lan-url').textContent = '正在获取…';
     ['library-dialog', 'book-detail', 'metadata-dialog', 'model-dialog', 'bookmark-dialog', 'profile-dialog', 'remove-dialog', 'user-dialog', 'users-dialog', 'batch-model-dialog'].forEach(id => { if ($('#' + id).open) $('#' + id).close(); });
-    closeAccountMenu();
+    accountMenu.close();
     $('#app').hidden = true;
     $('#login-screen').hidden = false;
     const registering = Boolean(state.session?.registration_required);
@@ -325,22 +313,18 @@
     renderAccount();
     loadVisibleLibraries();
     startMessageUpdates();
+    ensureImageSearchUI();
+    imageSearchUI.watchActivity();
   }
 
-  function closeAccountMenu() {
-    $('#account-menu').hidden = true;
-    $('#account-toggle').setAttribute('aria-expanded', 'false');
-  }
   function renderAccount() {
     const user = state.session?.user;
     const name = user?.username || '个人账户';
-    $('#account-name').textContent = name;
+    accountMenu.update({ name, avatar: Avatars.source(user) });
     $('#settings-account-name').textContent = name;
     $('#settings-account-role').textContent = isAdmin() ? '管理员' : '用户';
     $('#my-shares-setting').hidden = !isAdmin();
-    ['account-avatar', 'settings-account-avatar'].forEach(id => {
-      $('#' + id).replaceChildren(Avatars.createImage(user, { alt: '', lazy: false }));
-    });
+    $('#settings-account-avatar').replaceChildren(Avatars.createImage(user, { alt: '', lazy: false }));
   }
   function resetMessages() {
     clearInterval(messageState.timer);
@@ -355,12 +339,7 @@
     const messages = inbox ? [...messageState.scan, administrator ? messageState.optimization : null]
       .filter(Boolean).map(message => ({ message, read: inbox.isRead(message) })) : [];
     const unread = messages.filter(item => !item.read).length;
-    $('#account-message-dot').hidden = !unread;
-    const badge = $('#account-message-count');
-    badge.hidden = !unread;
-    badge.textContent = unread > 99 ? '99+' : unread ? String(unread) : '';
-    $('#account-messages').setAttribute('aria-label', unread ? `消息，${unread} 条未读` : '消息');
-    $('#account-toggle').setAttribute('aria-label', unread ? `打开个人账户菜单，有 ${unread} 条未读消息` : '打开个人账户菜单');
+    accountMenu.update({ unread });
     if ($('#message-center').hidden) return;
     $('#message-scan-progress').hidden = !state.scanning;
     $('#message-empty').hidden = Boolean(messages.length);
@@ -374,12 +353,19 @@
       const card = node('li', 'message-card');
       card.dataset.kind = message.kind;
       card.dataset.messageId = message.id;
+      card.dataset.unread = String(!read);
       const symbol = node('span', 'message-card-icon');
       symbol.append(icon(scan ? 'scan-warning' : 'optimization'));
       const body = node('div', 'message-card-body');
       const heading = node('div', 'message-card-heading');
       heading.append(node('h2', '', scan ? '扫描未完成' : '图片优化待处理'));
       if (read) heading.append(node('span', 'message-read-status', '已读'));
+      else {
+        const unreadDot = node('span', 'message-unread-dot');
+        unreadDot.setAttribute('aria-hidden', 'true');
+        heading.prepend(unreadDot);
+        heading.append(node('span', 'sr-only', '未读'));
+      }
       body.append(
         heading,
         node('p', '', scan ? `「${message.libraryName}」有 ${message.count} 个项目未能完整扫描。` : `有 ${message.count} 本作品需要选择图片优化方式。`)
@@ -539,7 +525,7 @@
     }
   }
   function showProfileForm() {
-    closeAccountMenu();
+    accountMenu.close();
     const user = state.session?.user;
     if (!user) return;
     profileFormGeneration += 1; profileMutationBusy = false;
@@ -582,20 +568,33 @@
   function libraryIcon(library) { return icon(isMagazine(library) ? 'book' : 'scallop'); }
   const sidebarItems = ['home', 'libraries', 'magazines', 'recent', 'bookmarks', 'favorite', 'search', 'models'];
   const hideableSidebarItems = ['libraries', 'magazines', 'recent', 'bookmarks'];
-  let sidebarPreferences, sidebarDraft;
-  function applySidebarPreferences(preferences) {
-    if (!preferences) {
-      try { preferences = JSON.parse(stored('sidebar-items')); }
-      catch (_) { preferences = null; }
-    }
+  const homeSections = {
+    libraries: { id: 'home-libraries', label: '写真库' },
+    magazines: { id: 'home-magazines', label: '杂志库' },
+    continue: { id: 'continue-section', label: '继续阅读' },
+    latest: { id: 'catalog-section', label: '最近加入' },
+  };
+  const homeSectionIds = Object.keys(homeSections);
+  let sidebarPreferences, displayDraft;
+  let homePreferences = { order: homeSectionIds, hidden: [] };
+  function readDisplayPreferences(key) {
+    try { return JSON.parse(stored(key)); } catch (_) { return null; }
+  }
+  function displayPreferences(items, hideable, preferences) {
+    const savedOrder = Array.isArray(preferences?.order) ? [...new Set(preferences.order.filter(item => items.includes(item)))] : [];
+    const hidden = Array.isArray(preferences?.hidden) ? hideable.filter(item => preferences.hidden.includes(item)) : [];
+    return { order: [...new Set([...savedOrder, ...items])], hidden };
+  }
+  function applySidebarPreferences(preferences = readDisplayPreferences('sidebar-items')) {
+    const normalized = displayPreferences(sidebarItems, hideableSidebarItems, preferences);
+    let { order } = normalized;
+    const { hidden } = normalized;
     const savedOrder = Array.isArray(preferences?.order) ? preferences.order.filter(item => sidebarItems.includes(item)) : [];
-    let order = [...new Set([...savedOrder, ...sidebarItems])];
     if (savedOrder.length && savedOrder.every(item => hideableSidebarItems.includes(item))) {
       // Older preferences ordered only the four optional entries.
       const optionalOrder = order.filter(item => hideableSidebarItems.includes(item));
       order = sidebarItems.map(item => hideableSidebarItems.includes(item) ? optionalOrder.shift() : item);
     }
-    const hidden = Array.isArray(preferences?.hidden) ? hideableSidebarItems.filter(item => preferences.hidden.includes(item)) : [];
     sidebarPreferences = { order, hidden };
     const navigation = $('#side-nav');
     order.forEach((item, index) => {
@@ -605,56 +604,77 @@
       if (current !== group) navigation.insertBefore(group, current ?? null);
     });
   }
-  function renderSidebarOrder() {
-    const { order, hidden } = sidebarDraft;
+  function renderDisplayOrder() {
+    const { order, hidden, initial, hideable, label } = displayDraft;
     const settings = $('#sidebar-item-settings');
-    $('#sidebar-display-save').disabled = order.every((item, index) => item === sidebarPreferences.order[index]) &&
-      hidden.length === sidebarPreferences.hidden.length && hidden.every(item => sidebarPreferences.hidden.includes(item));
+    $('#sidebar-display-save').disabled = order.every((item, index) => item === initial.order[index]) &&
+      hidden.length === initial.hidden.length && hidden.every(item => initial.hidden.includes(item));
     settings.replaceChildren(...order.map((item, index) => {
       const row = node('li', 'sidebar-setting-row');
-      row.append(orderHandle(viewLabels[item]), node('span', 'sidebar-setting-name', viewLabels[item]));
-      if (hideableSidebarItems.includes(item)) {
-        const label = node('label', 'sidebar-setting-toggle');
+      const name = label(item);
+      row.append(orderHandle(name), node('span', 'sidebar-setting-name', name));
+      if (hideable.includes(item)) {
+        const toggleLabel = node('label', 'sidebar-setting-toggle');
         const toggle = node('input', 'visibility-input');
         toggle.type = 'checkbox';
         toggle.checked = !hidden.includes(item);
         toggle.setAttribute('role', 'switch');
-        toggle.setAttribute('aria-label', '显示' + viewLabels[item]);
+        toggle.setAttribute('aria-label', '显示' + name);
         toggle.addEventListener('change', () => {
-          sidebarDraft.hidden = toggle.checked ? hidden.filter(key => key !== item) : [...hidden, item];
-          renderSidebarOrder();
+          displayDraft.hidden = toggle.checked ? hidden.filter(key => key !== item) : [...hidden, item];
+          renderDisplayOrder();
           $('input', settings.children[index]).focus({ preventScroll: true });
         });
         const track = node('span', 'visibility-switch');
         track.setAttribute('aria-hidden', 'true');
-        label.append(toggle, track);
-        row.append(label);
+        toggleLabel.append(toggle, track);
+        row.append(toggleLabel);
       } else {
         row.append(node('span', 'sidebar-setting-fixed', '始终显示'));
       }
       const actions = node('div', 'sidebar-setting-actions');
-      for (const [step, text, name] of [[-1, '上移', 'up'], [1, '下移', 'down']]) {
+      for (const [step, text, direction] of [[-1, '上移', 'up'], [1, '下移', 'down']]) {
         const button = node('button', 'icon-button sidebar-move-button');
         button.type = 'button';
-        button.dataset.move = name;
-        button.title = text + viewLabels[item];
-        button.setAttribute('aria-label', text + viewLabels[item]);
-        button.append(icon(name));
+        button.dataset.move = direction;
+        button.title = text + name;
+        button.setAttribute('aria-label', text + name);
+        button.append(icon(direction));
         const target = index + step;
         button.disabled = target < 0 || target >= order.length;
-        button.addEventListener('click', () => moveSidebarEntry(index, target, `[data-move="${name}"]`));
+        button.addEventListener('click', () => moveDisplayEntry(index, target, `[data-move="${direction}"]`));
         actions.append(button);
       }
       row.append(actions);
       return row;
     }));
   }
-  function moveSidebarEntry(from, to, focus) {
-    if (!sidebarDraft) return;
-    const [item] = sidebarDraft.order.splice(from, 1);
-    sidebarDraft.order.splice(to, 0, item);
-    renderSidebarOrder();
-    finishOrderMove($('#sidebar-item-settings'), $('#sidebar-order-status'), viewLabels[item], to, focus);
+  function moveDisplayEntry(from, to, focus) {
+    if (!displayDraft) return;
+    const [item] = displayDraft.order.splice(from, 1);
+    displayDraft.order.splice(to, 0, item);
+    renderDisplayOrder();
+    finishOrderMove($('#sidebar-item-settings'), $('#sidebar-order-status'), displayDraft.label(item), to, focus);
+  }
+  function openDisplaySettings(home = false) {
+    const initial = home ? homePreferences : sidebarPreferences;
+    displayDraft = {
+      home, initial, order: [...initial.order], hidden: [...initial.hidden],
+      hideable: home ? homeSectionIds : hideableSidebarItems,
+      label: item => home ? homeSections[item].label : viewLabels[item],
+    };
+    $('#sidebar-display-title').textContent = home ? '首页设置' : '侧边栏显示';
+    $('#sidebar-order-status').textContent = '';
+    renderDisplayOrder();
+    $('#sidebar-display-dialog').showModal();
+  }
+  function orderBrowseSections() {
+    const container = $('#browse-sections');
+    const order = state.view === 'home' ? homePreferences.order : homeSectionIds;
+    order.forEach((item, index) => {
+      const section = $('#' + homeSections[item].id);
+      if (container.children[index] !== section) container.insertBefore(section, container.children[index]);
+    });
   }
   function orderHandle(label, disabled = false) {
     const handle = node('button', 'icon-button order-drag-handle');
@@ -780,16 +800,23 @@
     if (state.view === 'recent') return state.books.filter(isReading);
     return state.books;
   }
-  function filteredBooks() {
+  function splitSearchResults(books, preferredMedia = state.searchMedia) {
+    const photo = [], magazine = [];
+    for (const book of books) (isMagazine(book) ? magazine : photo).push(book);
+    const media = preferredMedia || (photo.length || !magazine.length ? 'photo' : 'magazine');
+    return { photo, magazine, media, visible: media === 'photo' ? photo : magazine };
+  }
+  function filteredBooks({ allSearchMedia = false } = {}) {
     const query = state.query.trim().toLocaleLowerCase();
-    return scopedBooks().filter(book => {
+    const matches = scopedBooks().filter(book => {
       if (state.series && book.series !== state.series) return false;
       if (query && ![book.title, book.series, book.path, book.author, book.library_name, book.magazine_info, ...(book.models || []).map(model => model.name)].some(value => String(value || '').toLocaleLowerCase().includes(query))) return false;
       return true;
     }).sort((a, b) => End.compareBooks(a, b, state.view === 'home' ? 'added' : state.view === 'recent' ? 'updated' : state.sort));
+    return state.view === 'search' && !allSearchMedia ? splitSearchResults(matches).visible : matches;
   }
   function currentViewRoute() {
-    return Routes.normalize({ view: state.view, id: state.view === 'library' ? state.libraryId : state.modelId, section: state.settingsSection, tab: state.settingsTab, image: state.view === 'search' && searchMode === 'image', query: state.query, sort: state.sort, series: state.series });
+    return Routes.normalize({ view: state.view, id: state.view === 'library' ? state.libraryId : state.modelId, section: state.settingsSection, tab: state.settingsTab, image: state.view === 'search' && searchMode === 'image', media: state.searchMedia, query: state.query, sort: state.sort, series: state.series });
   }
   function listRoute(route) {
     const base = Routes.base(route);
@@ -875,7 +902,7 @@
     try {
       ['library-dialog', 'metadata-dialog', 'model-dialog', 'bookmark-dialog', 'profile-dialog', 'user-dialog', 'users-dialog', 'batch-model-dialog'].forEach(id => { if ($('#' + id).open) $('#' + id).close(); });
       const base = Routes.base(route);
-      navigate(base.view, { libraryId: base.view === 'library' ? base.id : undefined, modelId: base.view === 'model' ? base.id : undefined, section: base.section || '', tab: base.tab || '', image: base.image === true, query: base.query || '', sort: base.sort, series: base.series || '', fromRoute: true });
+      navigate(base.view, { libraryId: base.view === 'library' ? base.id : undefined, modelId: base.view === 'model' ? base.id : undefined, section: base.section || '', tab: base.tab || '', image: base.image === true, media: base.media, query: base.query || '', sort: base.sort, series: base.series || '', fromRoute: true });
       if (reader.open && !(route.view === 'reader' && String(reader.book?.id) === route.id)) closeReader(true, { fromRoute: true });
       if ($('#book-detail').open && !(route.view === 'book' && String(state.detailBook?.id) === route.id)) $('#book-detail').close();
       if (resolved.unavailable) toast('作品或写真库不存在，或当前账号无权访问。');
@@ -902,19 +929,24 @@
     const settingsSection = view === 'settings' && ['interface', 'performance', 'reading', 'transcoding', 'image-search', 'cache', 'shares', 'network'].includes(options.section) && (!['transcoding', 'image-search', 'cache', 'shares', 'network'].includes(options.section) || isAdmin()) ? options.section : '';
     const settingsTab = settingsSection === 'transcoding' && ['rules', 'ignored'].includes(options.tab) ? options.tab : '';
     const nextSearchMode = options.image === undefined ? searchMode : options.image ? 'image' : 'text';
+    const nextSearchMedia = options.media || (!options.fromRoute && state.view === 'search' ? state.searchMedia : '') || '';
     const samePage = state.view === view && (view !== 'library' || libraryId === String(state.libraryId)) && (view !== 'model' || modelId === String(state.modelId)) && (view !== 'search' || searchMode === nextSearchMode) && (view !== 'settings' || state.settingsSection === settingsSection && state.settingsTab === settingsTab);
     if (selection.busy && !samePage) { toast('批量操作进行中，请稍候。'); return; }
     if (!options.fromRoute) { cancelListRestoration(); routing.generation += 1; routing.restoring = false; }
-    closeAccountMenu();
+    accountMenu.close();
     $('#sidebar').classList.remove('is-open'); $('#nav-backdrop').hidden = true; $('#nav-toggle').setAttribute('aria-expanded', 'false');
-    const sameFilters = state.query === (options.query || '') && state.series === (options.series || '') && state.sort === (options.sort ? End.normalizeSort(options.sort) : view === 'library' ? librarySort(libraryId) : state.sort);
-    if (samePage && (!options.fromRoute || sameFilters && !listRestoration)) {
+    const sameFilters = (nextSearchMode === 'image' || view !== 'search' || state.searchMedia === nextSearchMedia) &&
+      state.query === (options.query || '') && state.series === (options.series || '') && state.sort === (options.sort ? End.normalizeSort(options.sort) : view === 'library' ? librarySort(libraryId) : state.sort);
+    // Clicking a library overview shortcut opens the complete list.
+    const resetOverviewSearch = !options.fromRoute && !selection.busy && state.query && ['libraries', 'magazines'].includes(view);
+    if (samePage && !resetOverviewSearch && (!options.fromRoute || sameFilters && !listRestoration)) {
       if (['book', 'reader'].includes(routing.current.view)) syncViewRoute();
       if (view === 'search') $(searchMode === 'image' ? '#search-tab-image' : '#search').focus({ preventScroll: true }); return;
     }
     resetSelection();
-    state.view = view; state.query = options.query || ''; state.series = options.series || ''; $('#search').value = state.query;
-    if (view === 'search') searchMode = nextSearchMode;
+    state.view = view; state.query = options.query || ''; state.series = options.series || '';
+    $('#search').value = $('#library-name-search').value = state.query;
+    if (view === 'search') { searchMode = nextSearchMode; state.searchMedia = nextSearchMedia; }
     state.settingsSection = settingsSection; state.settingsTab = settingsTab;
     if (options.fromRoute && view === 'settings' && options.section && options.section !== settingsSection) commitRoute(currentViewRoute(), { replace: true });
     if (view !== 'settings' || settingsSection !== 'transcoding') transcodingUI?.hide();
@@ -987,13 +1019,14 @@
     const cover = makeCover(book, 'cover-wrap'); const pages = node('span', 'book-pages'); const progress = node('span', 'cover-progress'); cover.append(pages, progress);
     const title = node('span', 'book-title'); const subtitle = node('span', 'book-series'); const meta = node('span', 'book-date');
     open.append(cover, title, subtitle, meta);
-    const favorite = node('button', 'favorite-button'); favorite.type = 'button'; favorite.dataset.bookId = String(book.id); favorite.append(icon('heart'));
+    const favorite = node('button', 'favorite-button'); favorite.type = 'button'; favorite.dataset.bookId = String(book.id);
+    const favoriteIcon = icon('heart'); favorite.append(favoriteIcon);
     favorite.addEventListener('click', async () => {
       article.favoriteBusy = favorite.disabled = true;
       try { await toggleFavorite(article.catalogBook); } catch (error) { if (error.status !== 401) toast(error.message); }
       finally { article.favoriteBusy = favorite.disabled = false; }
     }); article.append(open, favorite);
-    article.catalogParts = { open, cover, pages, progress, title, subtitle, meta, favorite, select: null, coverKey: book.cover_version || book.cover_page || 0 };
+    article.catalogParts = { open, cover, pages, progress, title, subtitle, meta, favorite, favoriteIcon, select: null, coverKey: book.cover_version || book.cover_page || 0 };
     return article;
   }
   function makeCatalogItem(item) { return item.catalogSpacer ? node('div', 'catalog-grid-spacer') : makeBookCard(item); }
@@ -1019,6 +1052,7 @@
     setText(parts.meta, meta); parts.meta.hidden = !meta;
     parts.meta.title = showAdded ? `加入时间 · ${formatAddedDate(book.added_at)}${book.release_date ? ` / 发布日期 · ${book.release_date}` : ''}` : '';
     parts.favorite.setAttribute('aria-label', `${book.favorite ? '取消收藏' : '收藏'}《${book.title}》`); parts.favorite.setAttribute('aria-pressed', String(Boolean(book.favorite))); parts.favorite.disabled = Boolean(article.favoriteBusy);
+    parts.favoriteIcon.firstElementChild?.setAttribute('href', book.favorite ? '#i-heart-filled' : '#i-heart');
     if (Batch.kind(state.view, isAdmin()) === 'books') {
       if (!parts.select) { parts.select = selectionCheckbox(book.id, book.title, 'book-select'); article.append(parts.select); }
       parts.select.hidden = !selection.enabled; parts.select.checked = selection.enabled && selection.ids.has(id); parts.select.disabled = selection.busy; parts.select.setAttribute('aria-label', `选择 ${book.title}`);
@@ -1026,30 +1060,62 @@
     article.classList.toggle('is-selected', Boolean(parts.select?.checked));
   }
   function renderContinue() {
-    const candidates = state.view === 'library' ? scopedBooks() : state.books;
-    const book = candidates.filter(isReading).sort((a, b) => (b.progress.updated_at || 0) - (a.progress.updated_at || 0))[0];
-    const visible = Boolean(book) && ['home', 'recent'].includes(state.view) && !state.query.trim() && !state.series; $('#continue-section').hidden = !visible; if (!visible) return;
+    const enabled = state.view === 'recent' || (state.view === 'home' && !homePreferences.hidden.includes('continue'));
+    $('#continue-section').hidden = true;
+    if (!enabled || state.query.trim() || state.series) return;
+    const book = state.books.filter(isReading).sort((a, b) => (b.progress.updated_at || 0) - (a.progress.updated_at || 0))[0];
+    if (!book) return;
+    $('#continue-section').hidden = false;
     const card = node('div', 'continue-card'); const info = node('div', 'continue-info'); info.append(node('h3', '', book.title), node('span', 'continue-subtitle', joinDistinctText([...(book.models || []).map(model => model.name), book.library_name])));
     const progress = node('div', 'continue-progress'); const track = node('div', 'continue-progress-track'); const fill = node('span'); fill.style.width = Math.min(100, (book.progress.page + 1) / book.page_count * 100) + '%'; track.append(fill); progress.append(track, node('span', '', `上次读到第 ${book.progress.page + 1} / ${book.page_count} 页`)); info.append(progress);
     const resume = node('button', 'button button-primary', '继续阅读'); resume.setAttribute('aria-label', `继续阅读《${book.title}》`); resume.addEventListener('click', () => openBook(book)); card.append(makeCover(book, 'continue-cover', false), info, resume); $('#continue-card').replaceChildren(card);
   }
-  function renderLibraryTiles() {
+  function filterLibraries(group = state.view) {
+    const query = state.query.trim().normalize('NFKC').toLocaleLowerCase();
+    return groupLibraries(group).filter(library => library.name.normalize('NFKC').toLocaleLowerCase().includes(query));
+  }
+  function renderLibraryOverview() {
+    const overview = ['libraries', 'magazines'].includes(state.view);
+    $('#library-overview').hidden = !overview;
+    if (!overview) return;
+    const label = viewLabels[state.view];
+    const libraries = filterLibraries();
+    $('#library-name-search').setAttribute('aria-label', `搜索${label}名称`);
+    const results = $('#library-name-results');
+    const message = libraries.length ? `找到 ${libraries.length} 个${label}` : `没有找到匹配的${label}。`;
+    results.hidden = !state.query.trim() || state.loading;
+    if (results.textContent !== message) results.textContent = message;
+    renderLibraryTiles($('#library-tiles'), libraries, true);
+  }
+  function renderHomeLibraries() {
     const home = state.view === 'home';
-    const libraries = home ? groupLibraries('libraries') : groupLibraries();
-    $('#library-home').hidden = !libraries.length;
-    $('#library-tiles').replaceChildren(...libraries.map(library => {
+    for (const [group, tiles] of [['libraries', '#home-library-tiles'], ['magazines', '#home-magazine-tiles']]) {
+      const section = $('#' + homeSections[group].id);
+      section.hidden = !home || homePreferences.hidden.includes(group);
+      if (!section.hidden) {
+        const grid = $(tiles);
+        const libraries = groupLibraries(group);
+        grid.hidden = !libraries.length;
+        renderLibraryTiles(grid, libraries, false);
+      }
+    }
+  }
+  function renderLibraryTiles(grid, libraries, selectable) {
+    const booksByLibrary = new Map(libraries.map(library => [String(library.id), []]));
+    for (const book of state.books) booksByLibrary.get(String(book.library_id))?.push(book);
+    grid.replaceChildren(...libraries.map(library => {
       const card = node('article', 'library-tile-card');
-      card.classList.toggle('is-selected', selection.enabled && selection.ids.has(String(library.id)));
+      card.classList.toggle('is-selected', selectable && selection.enabled && selection.ids.has(String(library.id)));
       const button = node('button', 'library-tile'); button.type = 'button'; button.setAttribute('aria-label', `打开${libraryLabel(library)} ${library.name}`);
-      const books = state.books.filter(book => String(book.library_id) === String(library.id)); const montage = node('div', 'library-montage');
+      const books = booksByLibrary.get(String(library.id)); const montage = node('div', 'library-montage');
       if (library.cover?.url) {
         montage.classList.add('is-composite'); const image = node('img'); image.alt = ''; image.decoding = 'async';
         Performance.loadCover(image, library.cover.url + '?v=' + encodeURIComponent(library.cover.version || 'pending'));
         image.addEventListener('error', () => { image.replaceWith(libraryIcon(library)); }, { once: true }); montage.append(image);
       } else if (books.length) { montage.dataset.count = Math.min(books.length, 4); books.slice(0, 4).forEach(book => montage.append(makeCover(book, 'tile-cover'))); } else montage.append(libraryIcon(library));
       const info = node('div', 'library-tile-info'); info.append(node('strong', '', library.name), node('span', '', `${typeLabels[library.media_type] || '日漫'} · ${books.length} 本作品`));
-      button.append(montage, info); button.addEventListener('click', () => selection.enabled && !home ? toggleSelection(library.id) : selectLibrary(library.id)); card.append(button);
-      if (!home) card.append(selectionCheckbox(library.id, library.name, 'library-select'));
+      button.append(montage, info); button.addEventListener('click', () => selection.enabled && selectable ? toggleSelection(library.id) : selectLibrary(library.id)); card.append(button);
+      if (selectable) card.append(selectionCheckbox(library.id, library.name, 'library-select'));
       return card;
     }));
   }
@@ -1059,9 +1125,9 @@
     batchModels.context = null; batchModels.generation += 1; batchModels.busy = false; batchModels.ids = []; batchModels.selected.clear();
     if ($('#batch-model-dialog').open) $('#batch-model-dialog').close();
   }
-  function selectionItems() {
+  function selectionItems(books = null) {
     const kind = Batch.kind(state.view, isAdmin());
-    return kind === 'libraries' ? groupLibraries() : kind === 'books' ? filteredBooks() : [];
+    return kind === 'libraries' ? filterLibraries() : kind === 'books' ? (books ?? filteredBooks()) : [];
   }
   function selectionContext() { return { auth: authGeneration, revision: selection.revision, view: state.view, libraryId: state.libraryId, modelId: state.modelId }; }
   function isSelectionCurrent(context) {
@@ -1082,15 +1148,17 @@
     const key = String(id); if (selection.ids.has(key)) selection.ids.delete(key); else selection.ids.add(key);
     renderSelection();
   }
-  function renderSelection() {
+  function renderSelection(books = null) {
     const visible = Boolean(Batch.kind(state.view, isAdmin())) && !(state.view === 'search' && searchMode === 'image');
     const active = visible && selection.enabled;
     $('#selection-toolbar').hidden = !active; $('#app').dataset.selecting = String(active);
-    ['search', 'sort', 'series-filter'].forEach(id => { $('#' + id).disabled = selection.busy; });
+    ['search', 'library-name-search', 'sort', 'series-filter'].forEach(id => { $('#' + id).disabled = selection.busy; });
+    for (const media of ['photo', 'magazine']) $('#search-group-' + media).disabled = selection.busy;
     $('#selection-manage').hidden = !visible; $('#selection-manage').disabled = selection.busy;
     $('#selection-manage').setAttribute('aria-pressed', String(active));
     if (!visible) return;
-    selection.ids = Batch.retain(selection.ids, selectionItems());
+    const items = selectionItems(books);
+    selection.ids = Batch.retain(selection.ids, items);
     $$('.selection-checkbox').forEach(input => {
       input.hidden = !active; input.checked = active && selection.ids.has(input.value); input.disabled = selection.busy;
       input.closest('article')?.classList.toggle('is-selected', input.checked);
@@ -1098,12 +1166,13 @@
     $('#selection-toggle').textContent = '完成管理';
     $('#selection-toggle').setAttribute('aria-pressed', String(selection.enabled)); $('#selection-toggle').disabled = selection.busy;
     $('#selection-count').hidden = !selection.enabled; $('#selection-count').textContent = `已选择 ${selection.ids.size} 项`;
-    const items = selectionItems(); const all = items.length > 0 && items.every(item => selection.ids.has(String(item.id)));
+    const all = items.length > 0 && items.every(item => selection.ids.has(String(item.id)));
     $('#selection-all').textContent = all ? '取消全选' : '全选'; $('#selection-all').hidden = !selection.enabled; $('#selection-all').disabled = selection.busy || !items.length;
     const order = $('#selection-order');
     order.hidden = !active || Batch.kind(state.view, isAdmin()) !== 'libraries';
-    order.disabled = selection.busy || items.length < 2;
-    order.title = items.length < 2 ? '至少有两个媒体库时可以调整顺序' : '';
+    const libraryCount = groupLibraries().length;
+    order.disabled = selection.busy || libraryCount < 2;
+    order.title = libraryCount < 2 ? '至少有两个媒体库时可以调整顺序' : '';
     const actions = Batch.actions(state.view, isAdmin());
     ['models', 'remove', 'scan', 'favorite', 'random'].forEach(action => {
       const button = $('#selection-' + action);
@@ -1358,9 +1427,14 @@
     const label = magazine ? '杂志库' : '写真库';
     const group = magazine ? 'magazines' : 'libraries';
     const onboarding = !groupLibraries(group).length && ['home', 'libraries', 'magazines'].includes(state.view);
-    const raw = !state.query.trim() && !state.series;
+    const raw = ['libraries', 'magazines'].includes(state.view) || (!state.query.trim() && !state.series);
     $('#empty-title').textContent = onboarding ? `从第一个${label}开始。` : !raw ? '没有找到匹配的作品。' : { library: state.scanning ? `正在扫描${label}…` : `这个${label}还没有作品。`, recent: '阅读记录将从这里开始。', favorite: '把喜欢的作品留在这里。', search: '没有找到匹配的作品。', bookmarks: '为喜欢的页面留一个位置。', models: '认识藏馆中的每一位模特。', model: '还没有关联这位模特的作品。' }[state.view] || '这里暂时没有内容。';
     $('#empty-description').textContent = onboarding ? `创建${label}，设置目录与阅读习惯。` : !raw ? '试试作品名称、杂志资料或模特名称，或调整筛选条件。' : { library: `将作品放入 ${library?.path || '/library'}，扫描后会自动入库。`, recent: '打开任意作品，Gravelle会记录每次阅读的位置和时间。', favorite: '点击作品旁的爱心，或在详情页收藏作品。', search: '在上方搜索写真和杂志。', bookmarks: '阅读时点击书签按钮，保存当前页并添加备注。', models: '新建模特，再到作品的“编辑资料”中关联。一部作品可以关联多位模特。', model: '在作品的“编辑资料”中选择这位模特。' }[state.view] || '';
+    if (state.view === 'search') {
+      const selected = state.searchMedia === 'magazine' ? '杂志库' : '写真库';
+      $('#empty-title').textContent = `${selected}中没有匹配结果`;
+      $('#empty-description').textContent = '可以切换分类，或修改搜索词。';
+    }
     const showGuide = ['home', 'libraries', 'magazines', 'library'].includes(state.view) && raw && isAdmin();
     $('#folder-guide').hidden = !showGuide; $('#empty-scan').hidden = !showGuide || !can('scan_libraries'); $('#empty-hint').hidden = !showGuide;
     $('#empty-scan').disabled = state.scanning;
@@ -1467,12 +1541,43 @@
   function ensureImageSearchUI() {
     if (imageSearchUI) return;
     imageSearchSettings = node('section'); imageSearchSettings.id = 'image-search-settings'; imageSearchSettings.hidden = true;
-    imageSearchUI = window.GravelleImageSearchUI.create({ searchHost: $('#image-search-panel'), settingsHost: imageSearchSettings, api, post, openBook, isAdmin, toast, onManage: () => navigate('settings', { section: 'image-search' }), onOpenFailure: async (bookId, page) => { const generation = authGeneration; try { const book = await api(bookUrl(bookId)); if (generation === authGeneration && isAdmin()) await openBook(book, page); } catch (error) { if (generation === authGeneration && error.status !== 401) toast(error.message); } } });
+    const spinner = $('#sidebar-index-spinner');
+    window.GravelleIndexControls.mountSpinner(spinner);
+    imageSearchUI = window.GravelleImageSearchUI.create({
+      searchHost: $('#image-search-panel'), settingsHost: imageSearchSettings, api, post, openBook, isAdmin, toast,
+      mountScope: window.GravelleIndexControls.mountScope,
+      onActivity: working => {
+        spinner.hidden = !working;
+        if (working) spinner.parentElement.setAttribute('aria-label', '搜索，正在建立图片索引');
+        else spinner.parentElement.removeAttribute('aria-label');
+      },
+      onManage: () => navigate('settings', { section: 'image-search' }),
+      onOpenFailure: async (bookId, page) => { const generation = authGeneration; try { const book = await api(bookUrl(bookId)); if (generation === authGeneration && isAdmin()) await openBook(book, page); } catch (error) { if (generation === authGeneration && error.status !== 401) toast(error.message); } },
+    });
   }
   function changeSearchMode(mode) {
     catalogSearch?.cancel(); $('#search').value = state.query;
     if (selection.busy) return;
-    navigate('search', { image: mode === 'image', query: state.query });
+    navigate('search', { image: mode === 'image', query: state.query, series: state.series });
+  }
+  function changeSearchMedia(media) {
+    if (selection.busy || state.view !== 'search' || searchMode !== 'text') return;
+    catalogSearch?.flush();
+    if (state.searchMedia === media) return;
+    saveListPosition();
+    cancelListRestoration();
+    state.searchMedia = media;
+    renderLibrary();
+    syncViewRoute();
+  }
+  function renderSearchGroups(results) {
+    $('#search-result-groups').hidden = !results;
+    if (!results) return;
+    for (const media of ['photo', 'magazine']) {
+      const button = $('#search-group-' + media);
+      button.setAttribute('aria-pressed', String(media === results.media));
+      $('span', button).textContent = state.loading ? '' : String(results[media].length);
+    }
   }
   function ensureSettingsLayout() {
     if (settingsLayout) return;
@@ -1491,7 +1596,7 @@
     const cache = node('section'); cache.id = 'cache-management-settings'; cache.hidden = true;
     host.replaceChildren(back, panels[0], panels[1], index, ...panels.slice(2), transcode, imageSearchSettings, cache, sharingSettings, networkSettings);
     settingsLayout = { index, back, items, panels: Object.fromEntries(sections.map((section, position) => [section, panels[position]])), transcode, cache };
-    transcodingUI = window.GravelleTranscodingUI.create({ host: transcode, api, post, toast, onCatalogChange: () => refreshLibrary(), onFiltersChange: () => { cancelListRestoration(); saveListPosition(); }, onRender: restoreListPosition, onTabChange: tab => { state.settingsTab = tab === 'tasks' ? '' : tab; syncViewRoute(); } });
+    transcodingUI = window.GravelleTranscodingUI.create({ host: transcode, api, post, toast, mountFilter: window.GravelleOptimizationFilter.mount, onCatalogChange: () => refreshLibrary(), onFiltersChange: () => { cancelListRestoration(); saveListPosition(); }, onRender: restoreListPosition, onTabChange: tab => { state.settingsTab = tab === 'tasks' ? '' : tab; syncViewRoute(); } });
     cacheManagementUI = window.GravelleCacheManagementUI.create({ host: cache, api, post, toast, onCatalogChange: () => refreshLibrary() });
   }
   function renderSettings() {
@@ -1503,7 +1608,7 @@
     settingsLayout.items['image-search'].entry.hidden = !isAdmin();
     settingsLayout.items.cache.entry.hidden = !isAdmin();
     settingsLayout.items.network.entry.hidden = !isAdmin();
-    const subtitles = { service: '版本、连接与访问地址', users: state.session?.user?.username || '当前账户与子账户', interface: (document.documentElement.dataset.interfaceSkin === 'board' ? 'Board' : '经典') + ' · ' + (interfaceTheme() === 'light' ? '亮色主题' : '暗色主题'), performance: '后台任务、自动扫描与加载', reading: '图片适配与阅读背景', transcoding: '规则、作品与后台任务', 'image-search': '图片索引与后台任务', cache: '空间占用与缓存清理', network: 'HTTPS、安全入口与分享设置' };
+    const subtitles = { service: '版本、连接与访问地址', users: state.session?.user?.username || '当前账户与子账户', interface: interfaceTheme() === 'light' ? '亮色主题' : '暗色主题', performance: '后台任务、自动扫描与加载', reading: '图片适配与阅读背景', transcoding: '规则、作品与后台任务', 'image-search': '图片索引与后台任务', cache: '空间占用与缓存清理', network: 'HTTPS、安全入口与分享设置' };
     Object.entries(settingsLayout.items).forEach(([key, value]) => { value.detail.textContent = subtitles[key]; });
     $('#subaccounts-setting').hidden = !isAdmin();
     renderSubaccountSummary();
@@ -1514,7 +1619,6 @@
     $('#settings-connection').textContent = state.libraryError ? '连接异常 · ' + state.libraryError : '已连接';
     $('#settings-connection').classList.toggle('connection-error', Boolean(state.libraryError));
     $('#interface-theme').value = interfaceTheme();
-    syncInterfaceSkinPicker();
     renderAccount();
     if (!section) loadSettingsAccess();
     if (section === 'performance') window.GravellePerformance?.render();
@@ -1724,7 +1828,8 @@
   }
 
   function updateCatalogCount(books, page) {
-    $('#results-label').textContent = state.loading ? '正在读取写真库…' : `${books.length} 本作品${page.flow && page.hasMore ? ` · 已显示 ${page.end}` : page.count > 1 ? ` · 当前 ${page.start + 1}–${page.end}` : ''}`;
+    const label = state.view === 'search' && $('#search-group-magazine').getAttribute('aria-pressed') === 'true' ? '杂志' : '作品';
+    $('#results-label').textContent = state.loading ? '正在读取媒体库…' : `${books.length} 本${label}${page.flow && page.hasMore ? ` · 已显示 ${page.end}` : page.count > 1 ? ` · 当前 ${page.start + 1}–${page.end}` : ''}`;
   }
 
   function watchCatalogFlow(sentinel) {
@@ -1780,19 +1885,28 @@
     const active = document.activeElement; const focusBookId = active?.closest('#book-grid') ? active.dataset.bookId : null; const focusClass = active?.classList.contains('favorite-button') ? '.favorite-button' : '.book-open';
     $('#app').dataset.view = state.view; document.documentElement.dataset.view = state.view;
     const overview = ['libraries', 'magazines'].includes(state.view);
-    const visibleIds = new Set(state.view === 'library' ? [String(state.libraryId)] : groupLibraries().map(library => String(library.id)));
-    renderSelection(); updateCounts(); renderContinue(); renderNotice(); renderLibraryTiles();
+    const home = state.view === 'home';
+    orderBrowseSections();
+    updateCounts(); renderContinue(); renderNotice(); renderLibraryOverview(); renderHomeLibraries();
+    $('#home-empty-preferences').hidden = !home || homePreferences.hidden.length !== homeSectionIds.length;
     $('#message-center').hidden = state.view !== 'messages';
     renderMessages();
-    const catalog = !overview && !['bookmarks', 'models', 'settings', 'messages'].includes(state.view) && !imageSearch; $('#catalog-section').hidden = !catalog || (state.view === 'home' && !state.books.length && !state.loading); $('#bookmark-section').hidden = state.view !== 'bookmarks'; $('#models-section').hidden = state.view !== 'models'; $('#settings-page').hidden = state.view !== 'settings';
+    const catalog = !overview && !['bookmarks', 'models', 'settings', 'messages'].includes(state.view) && !imageSearch &&
+      (!home || (!homePreferences.hidden.includes('latest') && (state.books.length > 0 || state.loading)));
+    $('#catalog-section').hidden = !catalog; $('#bookmark-section').hidden = state.view !== 'bookmarks'; $('#models-section').hidden = state.view !== 'models'; $('#settings-page').hidden = state.view !== 'settings';
     $('#loading-state').hidden = !state.loading; $('#shelf-heading').textContent = { home: '最近加入', library: '', recent: '阅读记录', favorite: '收藏的作品', search: '', model: '关联作品' }[state.view] ?? '作品';
     $('#shelf-heading').hidden = ['library', 'search'].includes(state.view);
-    $('.search-box').hidden = !['library', 'search', 'model', 'favorite', 'recent'].includes(state.view); $('#sort').closest('label').hidden = ['home', 'recent'].includes(state.view);
+    $('#search').closest('.search-box').hidden = !['library', 'search', 'model', 'favorite', 'recent'].includes(state.view); $('#sort').closest('label').hidden = ['home', 'recent'].includes(state.view);
     $('.select-tools').hidden = state.view === 'home' || $$('label', $('.select-tools')).every(label => label.hidden);
     $('.shelf-meta').hidden = state.view === 'home';
-    const books = filteredBooks();
+    const textSearch = state.view === 'search' && !imageSearch;
+    const matches = catalog ? filteredBooks({ allSearchMedia: textSearch }) : [];
+    const results = textSearch ? splitSearchResults(matches) : null;
+    const books = results?.visible ?? matches;
+    renderSearchGroups(results);
+    renderSelection(catalog ? books : null);
     const capacity = Performance.get().bookPageSize;
-    const signature = JSON.stringify([state.view, state.libraryId, state.modelId, state.query, state.series, state.sort, capacity]);
+    const signature = JSON.stringify([state.view, state.libraryId, state.modelId, state.query, state.series, state.sort, results?.media, capacity]);
     if (catalogPaging.signature !== signature || listRestoration?.key === Routes.hash(currentViewRoute())) {
       const saved = listRestoration?.key === Routes.hash(currentViewRoute()) ? listRestoration.saved : null;
       catalogPaging.signature = signature; catalogPaging.page = saved?.page || 0; catalogPaging.revealed = saved?.revealed || 0;
@@ -1820,7 +1934,9 @@
     if (state.view === 'bookmarks') renderBookmarks(); else $('#bookmark-list').replaceChildren();
     if (state.view === 'models') renderModels(); else $('#models-grid').replaceChildren();
     if (state.view === 'settings') renderSettings();
-    const empty = state.view === 'bookmarks' ? !state.bookmarks.length : state.view === 'models' ? !state.models.length : overview ? !visibleIds.size : state.view === 'home' ? !state.libraries.length : catalog ? !books.length : false;
+    const empty = state.view === 'bookmarks' ? !state.bookmarks.length : state.view === 'models' ? !state.models.length :
+      overview ? !groupLibraries().length && !state.query.trim() :
+      home ? !state.libraries.length && !homePreferences.hidden.includes('libraries') : catalog && !books.length;
     $('#empty-state').hidden = state.loading || !empty || Boolean(state.libraryError && !state.loaded); if (!$('#empty-state').hidden) renderEmpty();
     if (focusBookId && !reader.open) $$(focusClass).find(element => element.dataset.bookId === focusBookId)?.focus({ preventScroll: true });
     renderedLibraryData = libraryDataSignature();
@@ -1875,6 +1991,7 @@
     if (!state.session?.authenticated) { try { state.session = await api('/api/session'); if (!state.session.authenticated) { showLogin(); return; } showLibrary(); } catch (error) { if (error.status !== 401) { state.libraryError = error.message; renderNotice(); } return; } } await refreshLibrary();
   }
   function renderLibraryNavigation() {
+    const shortcutLimit = 5;
     const libraryButton = library => {
       const button = node('button', 'library-nav-item'); button.type = 'button';
       button.append(node('span', '', library.name));
@@ -1882,8 +1999,24 @@
       if (button.classList.contains('active')) button.setAttribute('aria-current', 'page');
       button.addEventListener('click', () => selectLibrary(library.id)); return button;
     };
-    $('#library-nav').replaceChildren(...groupLibraries('libraries').map(libraryButton));
-    $('#magazine-nav').replaceChildren(...groupLibraries('magazines').map(libraryButton));
+    for (const [group, nav] of [['libraries', '#library-nav'], ['magazines', '#magazine-nav']]) {
+      const libraries = groupLibraries(group);
+      const shortcuts = libraries.slice(0, shortcutLimit);
+      if (state.view === 'library') {
+        const active = libraries.findIndex(library => String(library.id) === String(state.libraryId));
+        if (active >= shortcutLimit) shortcuts[shortcutLimit - 1] = libraries[active];
+      }
+      const items = shortcuts.map(libraryButton);
+      if (libraries.length > shortcutLimit) {
+        const label = `查看全部 ${libraries.length} 个${viewLabels[group]}`;
+        const more = node('button', 'library-nav-item library-nav-more');
+        more.type = 'button';
+        more.append(node('span', '', label), icon('right'));
+        more.addEventListener('click', () => navigate(group));
+        items.push(more);
+      }
+      $(nav).replaceChildren(...items);
+    }
   }
   function selectLibrary(id) { navigate('library', { libraryId: id }); }
   let libraryBrowseInput = null;
@@ -2028,10 +2161,10 @@
       if (lines.some(line => line.trim())) groups.push({ label, lines });
     };
     for (const line of value.split('\n')) {
-      const heading = /^\s*【(介绍|目录)】\s*(.*)$/.exec(line);
+      const heading = /^\s*【(简介|介绍|目录)】\s*(.*)$/.exec(line);
       if (heading) {
         addGroup();
-        label = heading[1];
+        label = heading[1] === '介绍' ? '简介' : heading[1];
         lines = heading[2] ? [heading[2]] : [];
       } else {
         lines.push(line);
@@ -2046,7 +2179,7 @@
       const text = group.lines.join('\n').trim();
       const entries = isContents ? group.lines.filter(line => line.trim()) : [];
       const previewLimit = 5;
-      const expandLabel = isContents ? `展开全部 ${entries.length} 条` : group.label === '介绍' ? '展开介绍' : '展开全部';
+      const expandLabel = isContents ? `展开全部 ${entries.length} 条` : group.label === '简介' ? '展开简介' : '展开全部';
       function renderBody(expanded) {
         if (isContents) {
           const visible = expanded ? entries : entries.slice(0, previewLimit);
@@ -2094,7 +2227,9 @@
     }
     if (book.author && joinDistinctText([...(book.models || []).map(model => model.name), book.author]) !== joinDistinctText((book.models || []).map(model => model.name))) info.append(node('p', 'detail-author', `作者 · ${book.author}`));
     const actions = node('div', 'detail-actions'); const read = node('button', 'button button-primary', book.progress ? '▶ 继续阅读' : '▶ 开始阅读'); read.id = 'detail-read'; read.addEventListener('click', () => { $('#book-detail').close(); openBook(book); });
-    const favorite = node('button', 'button button-secondary', book.favorite ? '♥ 已收藏' : '♡ 收藏'); favorite.id = 'detail-favorite'; favorite.setAttribute('aria-pressed', String(Boolean(book.favorite))); favorite.addEventListener('click', async () => { favorite.disabled = true; try { await toggleFavorite(book); } catch (error) { toast(error.message); favorite.disabled = false; } });
+    const favorite = node('button', 'button button-secondary');
+    favorite.append(icon(book.favorite ? 'heart-filled' : 'heart'), node('span', '', book.favorite ? '已收藏' : '收藏'));
+    favorite.id = 'detail-favorite'; favorite.setAttribute('aria-pressed', String(Boolean(book.favorite))); favorite.addEventListener('click', async () => { favorite.disabled = true; try { await toggleFavorite(book); } catch (error) { toast(error.message); favorite.disabled = false; } });
     const edit = node('button', 'button button-secondary', '编辑资料'); edit.id = 'detail-edit'; edit.addEventListener('click', () => showMetadataForm(book)); actions.append(read, favorite); if (can('edit_metadata')) actions.append(edit);
     if (isAdmin()) { const share = node('button', 'button button-secondary', '分享'); share.id = 'detail-share'; share.addEventListener('click', () => sharingUI.showCreate(book)); actions.append(share); }
     info.append(actions);
@@ -3009,7 +3144,11 @@
       finally { favorite.disabled = false; }
     });
     favorite.id = 'reader-end-favorite';
-    const updateFavorite = () => { favorite.setAttribute('aria-pressed', String(Boolean(book.favorite))); $('span', favorite).textContent = book.favorite ? '取消收藏' : '收藏作品'; };
+    const updateFavorite = () => {
+      favorite.setAttribute('aria-pressed', String(Boolean(book.favorite)));
+      $('use', favorite)?.setAttribute('href', book.favorite ? '#i-heart-filled' : '#i-heart');
+      $('span', favorite).textContent = book.favorite ? '取消收藏' : '收藏作品';
+    };
     updateFavorite();
     const nextButton = action('arrow', '阅读下一本', async () => {
       if (nextButton.disabled) return;
@@ -3241,39 +3380,26 @@
     } finally { button.disabled = false; }
   });
 
-  $('#logout').addEventListener('click', async () => {
-    try { await flushProgress(true); state.session = await post('/api/logout', {}); handleUnauthorized(); $('#login-error').hidden = true; }
-    catch (error) { if (error.status !== 401) toast(error.message); }
-  });
-  $('#account-toggle').addEventListener('click', () => {
-    const open = $('#account-menu').hidden;
-    $('#account-menu').hidden = !open;
-    $('#account-toggle').setAttribute('aria-expanded', String(open));
-  });
-  document.addEventListener('click', event => { if (!event.target.closest('.account-area')) closeAccountMenu(); });
-  document.addEventListener('keydown', event => { if (event.key === 'Escape' && !$('#account-menu').hidden) { closeAccountMenu(); $('#account-toggle').focus(); } });
-  ['account-settings', 'sidebar-settings'].forEach(id => { $('#' + id).addEventListener('click', () => navigate('settings')); });
-  $('#account-messages').addEventListener('click', () => { navigate('messages'); if (state.view === 'messages') $('#library-title').focus({ preventScroll: true }); });
+  $('#sidebar-settings').addEventListener('click', () => navigate('settings'));
   $('#manage-shares').addEventListener('click', () => { if (requireAccess() && isAdmin()) navigate('settings', { section: 'shares' }); });
   $('#interface-theme').addEventListener('change', event => applyInterfaceTheme(event.target.value));
-  $('#sidebar-display-open').addEventListener('click', () => {
-    sidebarDraft = { order: [...sidebarPreferences.order], hidden: [...sidebarPreferences.hidden] };
-    $('#sidebar-order-status').textContent = '';
-    renderSidebarOrder();
-    $('#sidebar-display-dialog').showModal();
-  });
+  $('#sidebar-display-open').addEventListener('click', () => openDisplaySettings());
+  $('#home-display-open').addEventListener('click', () => openDisplaySettings(true));
+  $('#home-edit-display').addEventListener('click', () => openDisplaySettings(true));
   $('#sidebar-display-save').addEventListener('click', () => {
-    if (!sidebarDraft) return;
-    storePreference('sidebar-items', JSON.stringify(sidebarDraft));
-    applySidebarPreferences(sidebarDraft);
+    if (!displayDraft) return;
+    const { home, order, hidden } = displayDraft;
+    const preferences = { order, hidden };
+    storePreference(home ? 'home-sections' : 'sidebar-items', JSON.stringify(preferences));
+    if (home) {
+      homePreferences = preferences;
+      if (state.view === 'home') renderLibrary();
+    } else applySidebarPreferences(preferences);
     $('#sidebar-display-dialog').close();
   });
   ['sidebar-display-close', 'sidebar-display-cancel'].forEach(id => $('#' + id).addEventListener('click', () => $('#sidebar-display-dialog').close()));
-  $('#sidebar-display-dialog').addEventListener('close', event => { if (!event.currentTarget.open) sidebarDraft = null; });
-  bindOrderDrag($('#sidebar-item-settings'), moveSidebarEntry);
-  $('#interface-skin-picker').addEventListener('change', event => {
-    if (event.target.matches('input[name="interface-skin"]') && event.target.checked) applyInterfaceSkin(event.target.value);
-  });
+  $('#sidebar-display-dialog').addEventListener('close', event => { if (!event.currentTarget.open) displayDraft = null; });
+  bindOrderDrag($('#sidebar-item-settings'), moveDisplayEntry);
   $('#check-updates').addEventListener('click', checkUpdates);
   $('#manage-users').addEventListener('click', showUsersList);
   ['users-close', 'users-done'].forEach(id => $('#' + id).addEventListener('click', () => { if (!userManagement.busy) $('#users-dialog').close(); }));
@@ -3355,6 +3481,7 @@
   });
   $('#create-library').addEventListener('click', () => showLibraryForm());
   $('#home-all-libraries').addEventListener('click', () => navigate('libraries'));
+  $('#home-all-magazines').addEventListener('click', () => navigate('magazines'));
   ['selection-manage', 'selection-toggle'].forEach(id => $('#' + id).addEventListener('click', () => {
     if (selection.busy || !Batch.kind(state.view, isAdmin())) return;
     selection.enabled = !selection.enabled; selection.ids.clear(); renderSelection();
@@ -3451,12 +3578,32 @@
     finally { button.disabled = false; }
   });
   $$('.scan-trigger').forEach(button => button.addEventListener('click', scanLibrary));
-  catalogSearch = Catalog.createSearchInput(value => { state.query = value; renderLibrary(); syncViewRoute(true); });
-  $('#search').addEventListener('input', event => catalogSearch.input(event.target.value, event.isComposing));
-  $('#search').addEventListener('compositionstart', () => catalogSearch.compositionStart());
-  $('#search').addEventListener('compositionend', event => catalogSearch.compositionEnd(event.target.value));
-  $('#search').addEventListener('keydown', event => { if (event.key === 'Enter' && !event.isComposing) catalogSearch.flush(); });
+  catalogSearch = Catalog.createSearchInput(value => {
+    if (selection.busy) return;
+    state.query = value;
+    if (['libraries', 'magazines'].includes(state.view)) {
+      renderLibraryOverview();
+      renderSelection();
+    } else renderLibrary();
+    syncViewRoute(true);
+  });
+  for (const input of [$('#search'), $('#library-name-search')]) {
+    input.addEventListener('input', event => catalogSearch.input(input.value, event.isComposing));
+    input.addEventListener('compositionstart', () => catalogSearch.compositionStart());
+    input.addEventListener('compositionend', () => catalogSearch.compositionEnd(input.value));
+    input.addEventListener('keydown', event => {
+      if (event.isComposing) return;
+      if (event.key === 'Enter') catalogSearch.flush();
+      if (event.key === 'Escape' && input.value && input.id === 'library-name-search') {
+        event.preventDefault();
+        input.value = '';
+        catalogSearch.input('');
+        catalogSearch.flush();
+      }
+    });
+  }
   ['text', 'image'].forEach(mode => $('#search-tab-' + mode).addEventListener('click', () => changeSearchMode(mode)));
+  ['photo', 'magazine'].forEach(media => $('#search-group-' + media).addEventListener('click', () => changeSearchMedia(media)));
   $('#search-tabs').addEventListener('keydown', event => { if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return; event.preventDefault(); changeSearchMode(event.key === 'Home' ? 'text' : event.key === 'End' ? 'image' : searchMode === 'text' ? 'image' : 'text'); });
   $('#series-filter').addEventListener('change', event => { catalogSearch.flush(); state.series = event.target.value; renderLibrary(); syncViewRoute(true); });
   $('#sort').addEventListener('change', event => { catalogSearch.flush(); state.sort = End.normalizeSort(event.target.value); if (state.view === 'library') saveLibrarySort(state.libraryId, state.sort); renderLibrary(); syncViewRoute(true); });
@@ -3741,7 +3888,11 @@
       else if (event.key === 'PageUp') { event.preventDefault(); if (state.prefs.mode === 'webtoon') scrollReader(-1); else if (verticalPaging()) verticalKeyPage(-1, event); else movePage(-1); }
       else if (event.key === 'Home') { event.preventDefault(); setReaderPage(0); }
       else if (event.key === 'End') { event.preventDefault(); setReaderPage(reader.book.page_count - 1); }
-    } else if (event.key === '/' && !editable && !$('dialog[open]') && $('#login-screen').hidden) { event.preventDefault(); navigate('search'); }
+    } else if (event.key === '/' && !editable && !$('dialog[open]') && $('#login-screen').hidden) {
+      event.preventDefault();
+      if (['libraries', 'magazines'].includes(state.view)) $('#library-name-search').focus();
+      else navigate('search');
+    }
   });
 
   function refreshOnReturn() {

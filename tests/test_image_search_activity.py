@@ -78,7 +78,17 @@ class ImageSearchActivityTests(unittest.TestCase):
         child = self.library.save_user({"username": "activity-child", "password": "disposable-child-password", "enabled": True,
                                         "library_ids": [self.library_id]})["user"]["id"]
         with self.library.acting_as(child):
-            self.assertEqual(set(self.manager.snapshot()), {"enabled", "available", "indexing"})
+            self.assertEqual(set(self.manager.snapshot()), {"enabled", "available", "indexing", "working"})
+
+    def test_sidebar_activity_excludes_queued_and_paused_tasks(self):
+        generation = self.enable()
+        with patch.object(self.manager, "thread", Mock(is_alive=Mock(return_value=True))):
+            for stage, expected in (("waiting", False), ("reconciling", True), ("reading", True), ("decoding", True), ("idle", False)):
+                self.manager._set_activity(stage, generation)
+                self.assertEqual(self.manager.activity_status(), {"working": expected})
+            self.manager.configure({"action": "pause"})
+            self.manager._set_activity("decoding", generation)
+            self.assertEqual(self.manager.activity_status(), {"working": False})
 
     def test_activity_advances_only_for_real_progress_and_polling_does_not_reset_timestamps(self):
         generation = self.enable()

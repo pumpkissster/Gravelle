@@ -1,0 +1,103 @@
+/* Compile only the menu utilities. The existing application owns the page reset. */
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" source(none);
+@import "./styles/theme.css";
+@import "./styles/typography.css";
+@source "./account-menu.jsx";
+@source "./optimization-filters.jsx";
+@source "./index-controls.jsx";
+@source "./components/base/dropdown";
+@source "./components/base/select";
+@source "./components/base/checkbox";
+@source "./components/base/spinner";
+@source "./components/foundations/scroll-fade";
+
+.image-index-scope-choices {
+  --color-background-primary-default: var(--surface);
+  --color-text-primary: var(--ink);
+  --color-text-secondary: var(--muted);
+  --color-border-focus-ring: var(--board-focus);
+  --color-border-checkbox-default: var(--line);
+  --color-border-checkbox-hover: var(--board-border-hover);
+  --color-accent-400: var(--board-primary-top);
+  --color-accent-500: var(--board-primary-top);
+  --color-accent-600: var(--board-primary-bottom);
+}
+
+/* The standalone app compiles BoardUI utilities without its global reset. */
+.image-index-scope-choices .animate-check-draw {
+  stroke-dasharray: 1;
+  animation: check-draw 200ms cubic-bezier(0.65, 0, 0.35, 1) forwards;
+}
+@keyframes check-draw { from { stroke-dashoffset: 1; } to { stroke-dashoffset: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .image-index-scope-choices .animate-check-draw { animation: none; }
+}
+
+/* The popup is portaled to body, so map its tokens using the active skin on html. */
+.account-dropdown {
+  --color-background-primary-default: var(--surface);
+  --color-border-button-default: var(--line);
+  --color-text-primary: var(--ink);
+  --color-foreground-icon-secondary: var(--muted);
+  --color-dropdown-item-hover-background: var(--accent-soft);
+  font-family: var(--sans);
+}
+
+html[data-interface-theme="dark"] .account-dropdown {
+  --shadow-dropdown: var(--shadow-lg);
+}
+
+html[data-interface-skin="board"] .account-dropdown {
+  --color-background-primary-default: var(--board-raised);
+  --color-dropdown-item-hover-background: var(--board-hover);
+  --shadow-dropdown: var(--board-shadow-hover);
+}
+
+.account-menu-host {
+  flex: 1;
+  min-width: 0;
+  --color-border-focus-ring: var(--accent);
+}
+
+html[data-interface-skin="board"] .account-menu-host {
+  --color-border-focus-ring: var(--board-focus);
+}
+
+.account-menu-host .account-toggle { width: 100%; }
+
+.optimization-select,
+.optimization-select-popover {
+  --color-background-primary-default: var(--board-select);
+  --color-background-primary-hover: var(--board-hover);
+  --color-border-button-default: var(--line);
+  --color-border-button-hover: var(--board-border-hover);
+  --color-border-focus-ring: var(--board-focus);
+  --color-text-primary: var(--ink);
+  --color-text-secondary: var(--muted);
+  --color-dropdown-item-hover-background: var(--board-hover);
+  font-family: var(--sans);
+}
+
+.optimization-select-trigger {
+  min-width: min(122px, 100%);
+}
+
+.optimization-select-trigger [data-rac][data-placeholder],
+.optimization-select-trigger .truncate { display: block; }
+
+.optimization-select-popover {
+  --color-background-primary-default: var(--board-raised);
+  --shadow-dropdown: var(--board-shadow-hover);
+}
+
+.optimization-select-item[aria-selected="true"] {
+  color: var(--text-accent);
+  background: var(--accent-soft);
+}
+
+.optimization-select-item { overflow-wrap: anywhere; }
+
+@media (prefers-reduced-motion: reduce) {
+  :is(.account-dropdown, .optimization-select-popover, .optimization-select-trigger) { transition: none; }
+}

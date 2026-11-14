@@ -34,7 +34,19 @@ function optimizationFixture() {
   const document = { activeElement: null, hidden: false, listeners: {}, createElement: tag => new Element(tag, document), addEventListener(type, handler) { this.listeners[type] = handler; } };
   document.body = new Element('body', document); const host = new Element('section', document); document.body.append(host);
   function find(root, predicate) { if (predicate(root)) return root; for (const child of root.children) { const result = find(child, predicate); if (result) return result; } return null; }
-  return { document, host, find };
+  const filters = new Map();
+  function mountFilter(_host, name, select) {
+    const control = { select, renders: 0 };
+    filters.set(name, control);
+    return {
+      update(options, value) {
+        if (control.options !== options || control.value !== value) control.renders += 1;
+        Object.assign(control, { options, value });
+      },
+      hide() { control.options = undefined; },
+    };
+  }
+  return { document, host, find, mountFilter, filters };
 }
 const optimizationFlush = () => new Promise(resolve => setImmediate(resolve));
 
@@ -135,7 +147,7 @@ test('optimization polling pauses while hidden and resumes immediately with the 
 
 test('restored optimization filters wait for available libraries and render only matching works', async () => {
   const fixture = optimizationFixture(); let resolveSnapshot; let renders = 0;
-  const ui = Transcoding.create({ host: fixture.host, api: () => new Promise(resolve => { resolveSnapshot = resolve; }), post: async () => ({}), toast() {}, onRender: () => { renders += 1; } });
+  const ui = Transcoding.create({ ...fixture, api: () => new Promise(resolve => { resolveSnapshot = resolve; }), post: async () => ({}), toast() {}, onRender: () => { renders += 1; } });
   assert.equal(ui.isLoaded(), false);
   assert.deepEqual(ui.restoreFilters({ query: '目标', status: 'pending', library: 'a' }), { query: '目标', status: 'pending', library: 'a' });
   assert.equal(renders, 0);
@@ -157,16 +169,18 @@ test('restored optimization filters wait for available libraries and render only
 
 test('filter changes notify after rendering and unchanged polls preserve filter controls', async () => {
   const fixture = optimizationFixture(); const snapshot = { rules: Transcoding.defaultRules, books: [] }; const events = [];
-  const ui = Transcoding.create({ host: fixture.host, api: async () => snapshot, post: async () => ({}), toast() {}, onRender: () => events.push('render'), onFiltersChange: filters => events.push(filters) });
+  const ui = Transcoding.create({ ...fixture, api: async () => snapshot, post: async () => ({}), toast() {}, onRender: () => events.push('render'), onFiltersChange: filters => events.push(filters) });
   ui.restoreFilters({ library: 'missing' }); assert.equal(ui.getFilters().library, 'missing');
   ui.show(); await optimizationFlush(); assert.equal(ui.getFilters().library, '');
   const query = fixture.find(fixture.host, item => item.placeholder === '搜索作品');
-  const status = fixture.find(fixture.host, item => item.tagName === 'select' && item.children.some(option => option.textContent === '全部状态'));
+  const status = fixture.filters.get('筛选状态');
   query.value = '新搜索'; events.length = 0; await query.dispatch('input');
   assert.deepEqual(events, ['render', { query: '新搜索', status: '', library: '' }]);
-  status.value = 'failed'; events.length = 0; await status.dispatch('change');
+  events.length = 0; status.select('failed');
   assert.deepEqual(events, ['render', { query: '新搜索', status: 'failed', library: '' }]);
+  const renders = status.renders;
   events.length = 0; await ui.refresh(); assert.equal(events.length, 0);
+  assert.equal(status.value, 'failed'); assert.equal(status.renders, renders);
   assert.equal(fixture.find(fixture.host, item => item.placeholder === '搜索作品'), query);
   assert.deepEqual(ui.getFilters(), { query: '新搜索', status: 'failed', library: '' }); ui.reset(); ui.hide();
 });

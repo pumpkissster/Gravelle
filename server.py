@@ -62,7 +62,7 @@ from network_settings import (NetworkSettings, ENTRY_COOKIE, ENTRY_SECONDS,
                               SHARE_STATIC, SHARE_PAGE, SHARE_GET, SHARE_POST)
 from https_settings import HTTPSSettingsError, MAX_CERTIFICATE_BODY_BYTES, load_context
 
-VERSION = "0.9.5"
+VERSION = "0.9.6"
 MEDIA_TYPES = {"manga_jp", "manga_kr", "comic_us", "photo", "magazine"}
 LIBRARY_ORDER_SQL = "l.display_order IS NULL,l.display_order,l.created_at,l.id"
 IMAGE_TYPES = {
@@ -87,6 +87,9 @@ SESSION_SECONDS = 30 * 24 * 60 * 60
 COOKIE_NAME = "sumi_session"
 PASSWORD_ITERATIONS = 600_000
 STATIC_FILES = {
+    "/account-menu.js": "account-menu.js",
+    "/account-menu.css": "account-menu.css",
+    "/account-menu-LICENSE.txt": "account-menu-LICENSE.txt",
     "/catalog-render.js": "catalog-render.js",
     "/release-date-model.js": "release-date-model.js",
     "/release-date-picker.js": "release-date-picker.js",
@@ -3475,6 +3478,11 @@ class ReaderHandler(BaseHTTPRequestHandler):
         super().setup()
         self.connection.settimeout(20)
 
+    def log_request(self, code="-", size="-"):
+        if code == 200 and self.path == "/api/image-search/activity":
+            return
+        super().log_request(code, size)
+
     def log_message(self, format_string, *args):
         message = re.sub(r"(/(?:api/)?share/)[A-Za-z0-9_-]{43}", r"\1[redacted]", format_string % args)
         current = self.library.network.current()
@@ -3891,6 +3899,11 @@ class ReaderHandler(BaseHTTPRequestHandler):
                     raise ReaderError("图片搜索不接受外部路径或查询参数。")
                 self.respond(self.library.image_search.snapshot())
                 return
+            if path == "/api/image-search/activity":
+                if request.query:
+                    raise ReaderError("图片索引状态不接受查询参数。")
+                self.respond(self.library.image_search.activity_status())
+                return
             search_preview = re.fullmatch(r"/api/image-search/thumbnail/([a-f0-9]{24})/([0-9]{1,6})", path)
             if search_preview:
                 if request.query:
@@ -4236,8 +4249,8 @@ class ReaderHandler(BaseHTTPRequestHandler):
             if urlsplit(self.path).query:
                 raise ReaderError("图片搜索管理不接受查询参数。")
             body = self.read_body()
-            expected = {"enabled"} if path.endswith("/settings") else {"action"}
-            if set(body) != expected:
+            expected = ({"enabled"}, {"library_ids"}) if path.endswith("/settings") else ({"action"},)
+            if set(body) not in expected:
                 raise ReaderError("图片搜索配置包含不支持的字段。")
             self.respond(self.library.image_search.configure(body))
             return

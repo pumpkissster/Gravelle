@@ -23,12 +23,15 @@
     if (['library', 'model', 'book', 'reader'].includes(route.view)) {
       route.id = id(String(input.id ?? '')); if (!route.id) return home();
     }
+    if ((listViews.includes(route.view) || ['libraries', 'magazines'].includes(route.view)) && typeof input.query === 'string' && input.query) {
+      route.query = input.query.slice(0, 500);
+    }
     if (listViews.includes(route.view)) {
-      if (typeof input.query === 'string' && input.query) route.query = input.query.slice(0, 500);
       if (sorts.includes(input.sort)) route.sort = input.sort;
       if (typeof input.series === 'string' && input.series) route.series = input.series.slice(0, 500);
     }
     if (route.view === 'search' && input.image === true) route.image = true;
+    if (route.view === 'search' && !route.image && ['photo', 'magazine'].includes(input.media)) route.media = input.media;
     if (route.view === 'reader' && Number.isSafeInteger(Number(input.page)) && Number(input.page) > 0 && Number(input.page) <= 1000000) route.page = Number(input.page);
     if (route.view === 'reader' && input.position !== undefined && input.position !== null && input.position !== '' && Number.isFinite(Number(input.position)) && Number(input.position) >= 0 && Number(input.position) <= 1) route.position = Math.round(Number(input.position) * 1000000) / 1000000;
     if (route.view === 'reader' && typeof input.fragment === 'string' && input.fragment.length <= 500 && !/[\x00-\x1f\x7f]/.test(input.fragment)) { if (input.fragment) route.fragment = input.fragment; }
@@ -52,7 +55,7 @@
     if (!view) return home();
     const params = new URLSearchParams(query);
     if (decoded[0] === 'settings' && decoded.length === 2 && !settingsSections.includes(decoded[1])) return home();
-    return normalize({ view, id: decoded[1], section: decoded[0] === 'settings' ? decoded[1] : undefined, tab: params.get('tab'), image: params.get('type') === 'image', query: params.get('q'), sort: params.get('sort'), series: params.get('series'), page: params.get('page'), position: params.get('position'), fragment: params.get('fragment'), from: params.has('from') ? parse(params.get('from'), depth + 1) : undefined }, depth);
+    return normalize({ view, id: decoded[1], section: decoded[0] === 'settings' ? decoded[1] : undefined, tab: params.get('tab'), image: params.get('type') === 'image', media: params.get('media'), query: params.get('q'), sort: params.get('sort'), series: params.get('series'), page: params.get('page'), position: params.get('position'), fragment: params.get('fragment'), from: params.has('from') ? parse(params.get('from'), depth + 1) : undefined }, depth);
   }
   function path(input, depth = 0) {
     const route = normalize(input, depth);
@@ -66,6 +69,7 @@
     if (route.from) params.set('from', path(route.from, depth + 1));
     if (route.tab) params.set('tab', route.tab);
     if (route.image) params.set('type', 'image');
+    if (route.media) params.set('media', route.media);
     return '/' + paths[route.view] + (route.section ? '/' + route.section : route.id ? '/' + encodeURIComponent(route.id) : '') + (params.size ? '?' + params : '');
   }
   const hash = route => '#' + path(route);

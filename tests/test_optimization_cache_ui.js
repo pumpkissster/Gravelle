@@ -2,6 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const Transcoding = require('../static/transcoding-ui.js');
+const mountFilter = () => ({ update() {}, hide() {} });
 const Cache = require('../static/cache-management-ui.js');
 const flush = () => new Promise(resolve => setImmediate(resolve));
 
@@ -54,7 +55,7 @@ function detailPage(page) {
 
 test('optimization detail requests one page at a time and never loads image thumbnails', async () => {
   const f = fixture(); const urls = [];
-  const ui = Transcoding.create({ host: f.host, api: async url => { urls.push(url); return url.includes('/details?') ? detailPage(url.includes('page=2') ? 2 : 1) : optimization; }, post: async () => ({}), toast() {} });
+  const ui = Transcoding.create({ host: f.host, mountFilter, api: async url => { urls.push(url); return url.includes('/details?') ? detailPage(url.includes('page=2') ? 2 : 1) : optimization; }, post: async () => ({}), toast() {} });
   ui.show(); await flush(); await f.byText('优化详情').dispatch('click'); await flush();
   const dialog = f.find(f.document.body, item => item.className.includes('transcode-details-dialog'));
   assert.equal(dialog.open, true); assert.equal(urls.filter(url => url.includes('/details?')).length, 1);
@@ -68,7 +69,7 @@ test('optimization detail requests one page at a time and never loads image thum
 
 test('late detail response cannot restore private paths after an account reset', async () => {
   const f = fixture(); let resolveDetails;
-  const ui = Transcoding.create({ host: f.host, api: url => url.includes('/details?') ? new Promise(resolve => { resolveDetails = resolve; }) : Promise.resolve(optimization), post: async () => ({}), toast() {} });
+  const ui = Transcoding.create({ host: f.host, mountFilter, api: url => url.includes('/details?') ? new Promise(resolve => { resolveDetails = resolve; }) : Promise.resolve(optimization), post: async () => ({}), toast() {} });
   ui.show(); await flush(); await f.byText('优化详情').dispatch('click'); ui.reset(); resolveDetails(detailPage(1)); await flush();
   assert.equal(f.find(f.document.body, item => item.tagName === 'code' && String(item.textContent).includes('/library/private-')), null);
   ui.hide();

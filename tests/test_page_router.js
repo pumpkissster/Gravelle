@@ -25,6 +25,20 @@ test('search and sorting round-trip without interpreting user input as a path', 
   assert.deepEqual(Routes.parse('#/search?q=a&password=secret&sort=bad'), { view: 'search', query: 'a' });
   assert.equal(Routes.hash(Routes.parse('#/search?username=person&password=secret')), '#/search');
 });
+test('library overviews preserve library-name searches without accepting book filters', () => {
+  for (const view of ['libraries', 'magazines']) {
+    const route = { view, query: '撮影 & 作品' };
+    assert.deepEqual(Routes.parse(Routes.hash({ ...route, sort: 'title', series: '特集' })), route);
+    assert.equal(Routes.parse(Routes.hash({ view, query: '写'.repeat(501) })).query.length, 500);
+  }
+});
+test('opening a work from magazine search preserves the selected result group', () => {
+  const from = { view: 'search', media: 'magazine', query: '撮影', sort: 'title' };
+  const route = { view: 'book', id: 'work', from };
+  assert.deepEqual(Routes.parse(Routes.hash(route)), route);
+  assert.deepEqual(Routes.parse('#/search?media=unknown'), { view: 'search' });
+  assert.deepEqual(Routes.parse('#/search?type=image&media=magazine'), { view: 'search', image: true });
+});
 test('cache settings use a stable second-level route', () => {
   const route = { view: 'settings', section: 'cache' };
   assert.equal(Routes.hash(route), '#/settings/cache');

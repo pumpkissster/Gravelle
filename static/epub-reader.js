@@ -298,8 +298,8 @@
     };
   }
   function icon(name) {
-    const paths = { back: '<path d="m14 5-7 7 7 7"/>', next: '<path d="m10 5 7 7-7 7"/>', close: '<path d="m6 6 12 12M6 18 18 6"/>', contents: '<path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5"/>', theme: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/>', bookmark: '<path d="M6 3h12v18l-6-4-6 4Z"/>' };
-    return `<svg viewBox="0 0 24 24" aria-hidden="true">${paths[name] || ''}</svg>`;
+    const symbols = { back: 'left', next: 'right', close: 'close', contents: 'contents', theme: 'sun', bookmark: 'bookmark' };
+    return `<svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-${symbols[name]}"/></svg>`;
   }
   return { create, preferences, position, chapterIndex, scrollPosition, linkTarget, chapterDocument };
 });

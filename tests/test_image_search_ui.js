@@ -116,6 +116,50 @@ function browserFixture() {
   return { document, searchHost, settingsHost, find };
 }
 const flush = () => new Promise(resolve => setImmediate(resolve));
+
+test('sidebar uses lightweight status outside image search and clears it on reset', async () => {
+  const fixture = browserFixture();
+  const calls = []; const activity = [];
+  let working = true;
+  const ui = Search.create({ ...fixture, openBook: () => {}, isAdmin: () => true,
+    api: async path => { calls.push(path); return { working, enabled: true }; },
+    onActivity: value => activity.push(value) });
+  ui.watchActivity(); await flush();
+  assert.deepEqual(calls, ['/api/image-search/activity']);
+  assert.deepEqual(activity, [true]);
+  working = false;
+  ui.showSettings(); await flush();
+  assert.equal(calls.at(-1), '/api/image-search/status');
+  assert.deepEqual(activity, [true, false]);
+  ui.hideSettings(); working = true; fixture.document.listeners.visibilitychange(); await flush();
+  assert.equal(calls.at(-1), '/api/image-search/activity');
+  ui.reset();
+  assert.deepEqual(activity, [true, false, true, false]);
+});
+
+test('saving a library scope uses the draft after polling and keeps the last saved selection', async () => {
+  const fixture = browserFixture();
+  const libraries = [{ id: 'photos', name: '写真' }, { id: 'magazines', name: '杂志', media_type: 'magazine' }];
+  let saved = null; let scope; let choose;
+  const snapshot = () => ({ enabled: false, libraries, library_ids: saved });
+  const ui = Search.create({ ...fixture, openBook: () => {}, isAdmin: () => true, api: async () => snapshot(),
+    post: async (path, body) => {
+      assert.equal(path, '/api/image-search/settings');
+      assert.deepEqual(body, { library_ids: ['magazines'] });
+      saved = body.library_ids; return snapshot();
+    },
+    mountScope: (_host, onChange) => { choose = onChange; return { update: value => { scope = value; }, clear() {} }; } });
+  ui.showSettings(); await flush();
+  const save = fixture.find(fixture.settingsHost, item => item.textContent === '保存索引范围');
+  assert.equal(scope.selection, null); assert.equal(save.disabled, true);
+  choose(['magazines']);
+  await fixture.find(fixture.settingsHost, item => item.textContent === '刷新').dispatch('click'); await flush();
+  assert.deepEqual(scope.selection, ['magazines']); assert.equal(save.disabled, false);
+  await save.dispatch('click'); await flush();
+  assert.deepEqual(scope.selection, ['magazines']); assert.equal(save.disabled, true);
+  ui.reset();
+});
+
 function pngFile() { const file = new Blob([Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 0])], { type: 'image/png' }); file.name = 'sample.png'; return file; }
 
 test('reset revokes preview and blocks an upload that finishes after switching accounts', async () => {
@@ -158,6 +202,26 @@ test('catalog permission changes discard visible matches and pending responses',
   ui.syncCatalog('revoked'); assert.equal(results.children.length, 0);
   run.dispatch('click'); ui.syncCatalog('changed-again'); resolveQuery({ results: [{ book: { id: 'private', title: 'Private' }, page: 0, match: 'exact' }] }); await flush(); assert.equal(results.children.length, 0);
   ui.reset();
+});
+
+test('image matches from both types stay visible in separate groups with their original page links', async () => {
+  const fixture = browserFixture();
+  const photo = { id: 'photo', title: 'Photo album', media_type: 'photo' };
+  const magazine = { id: 'magazine', title: 'Magazine', media_type: 'magazine' };
+  const matches = [{ book: magazine, page: 3, match: 'exact' }, { book: photo, page: 0, match: 'similar' }];
+  const opened = [];
+  const ui = Search.create({ ...fixture, api: async path => path.endsWith('/query') ? { results: matches } : { enabled: true, available: true },
+    openBook: (book, page) => opened.push([book.id, page]), isAdmin: () => false });
+  try {
+    ui.showSearch(); await flush();
+    const input = fixture.find(fixture.searchHost, item => item.id === 'image-search-file');
+    input.files = [pngFile()]; await input.dispatch('change'); await flush();
+    await fixture.find(fixture.searchHost, item => item.textContent === '开始搜索').dispatch('click');
+    const results = fixture.find(fixture.searchHost, item => item.className === 'image-search-results');
+    assert.deepEqual(results.children.map(group => group.children[0].textContent), ['写真库', '杂志库']);
+    for (const group of results.children) await group.children[1].children[0].dispatch('click');
+    assert.deepEqual(opened, [['photo', 0], ['magazine', 3]]);
+  } finally { ui.reset(); }
 });
 
 test('hidden image search stops status polling and refreshes immediately when visible again', async () => {

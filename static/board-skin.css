@@ -1,7 +1,7 @@
 @charset "UTF-8";
-/* Gravelle's optional Board skin. Independently authored from BoardUI's public
+/* Gravelle's Board skin. Independently authored from BoardUI's public
    visual language: neutral surfaces, inset navigation and soft edged controls.
-   All collection styles are opt-in; the reader keeps its own display theme.
+   The reader keeps its own display theme.
    Metrics follow BoardUI's public free component tokens (2026-10-23,
    source ec5c5eb3e29c2441be63b9422cd54f411ef23466):
    14/20 body, 13/18 secondary, 12/16 caption; 36px regular controls;
@@ -9,138 +9,11 @@
    Component surfaces and states checked through BoardUI MCP 0.5.8 on
    2026-10-26, mapped to the existing native controls and pink accent. */
 
-/* These inherited variables also reach SVG <use> instance trees. */
-.classic-icon { display: var(--classic-icon-display, inline); }
-.board-icon { display: var(--board-icon-display, none); fill: currentColor; stroke: none; }
-.board-icon > * { fill: currentColor; stroke: none; }
+/* The library scallop uses a custom stroke; Remix shapes use the shared fill rule. */
 .scallop-outline { stroke-width: var(--scallop-outline-width, inherit); }
 .scallop-ribs { stroke-width: var(--scallop-rib-width, inherit); }
-.classic-icon-text { display: var(--classic-icon-display, inline); }
-.board-icon-only { display: var(--board-icon-display, none); width: 20px; height: 20px; }
-
-/* Skin choices remain usable while the original skin is selected. */
-.skin-picker {
-  display: block;
-  min-width: 0;
-  padding: 0;
-  border: 0;
-  margin: 20px 0 8px;
-}
-.skin-picker > legend { padding: 0; font-size: 14px; font-weight: 600; }
-.skin-picker > .settings-intro { margin: 8px 0 16px; }
-.skin-options {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-}
-.skin-option {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  min-width: 0;
-  padding: 12px;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  background: var(--paper);
-  color: var(--ink);
-  cursor: pointer;
-  transition: border-color .15s, box-shadow .15s;
-}
-.skin-option:has(input:checked) {
-  border-color: var(--text-accent, var(--accent));
-  box-shadow: 0 0 0 1px var(--text-accent, var(--accent));
-}
-.skin-option:has(input:focus-visible) {
-  outline: 2px solid var(--accent);
-  outline-offset: 4px;
-}
-.skin-option > input {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: 0;
-  opacity: 0;
-}
-.skin-option-content { display: block; padding-right: 28px; }
-.skin-option-check {
-  position: absolute;
-  right: 12px;
-  bottom: 20px;
-  display: grid;
-  place-items: center;
-  width: 20px;
-  height: 20px;
-  border: 1px solid var(--line);
-  border-radius: 50%;
-  background: var(--surface);
-  color: transparent;
-}
-.skin-option-check svg { width: 12px; height: 12px; stroke-width: 2; }
-.skin-option:has(input:checked) .skin-option-check { background: var(--accent); border-color: var(--accent); color: #fff; }
-.skin-preview-sidebar > i {
-  display: block;
-  height: 5px;
-  border-radius: 4px;
-  background: color-mix(in srgb, var(--muted) 30%, transparent);
-}
-.skin-preview {
-  display: flex;
-  gap: 10px;
-  height: 104px;
-  padding: 10px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--paper);
-  overflow: hidden;
-  pointer-events: none;
-}
-.skin-preview-sidebar {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  flex: 0 0 26%;
-  padding: 9px 6px;
-  border-radius: 5px;
-  background: color-mix(in srgb, var(--ink) 6%, var(--paper));
-}
-.skin-preview-sidebar > i:first-child { background: var(--accent); }
-.skin-preview-main {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  min-width: 0;
-  gap: 10px;
-  padding-top: 4px;
-}
-.skin-preview-toolbar { width: 53%; height: 5px; border-radius: 3px; background: var(--muted); opacity: .35; }
-.skin-preview-cards {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 6px;
-}
-.skin-preview-cards > i {
-  height: 54px;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  background: color-mix(in srgb, var(--muted) 14%, var(--surface));
-}
-.skin-option[data-skin="board"] .skin-preview { background: var(--surface); }
-.skin-option[data-skin="board"] .skin-preview-sidebar {
-  background: var(--surface);
-  border: 1px solid var(--line);
-  box-shadow: 0 2px 4px #0000000a;
-  border-radius: 8px;
-}
-.skin-option[data-skin="board"] .skin-preview-sidebar > i:first-child { height: 9px; }
-.skin-option[data-skin="board"] .skin-preview-cards > i { border-radius: 7px; }
-.skin-option strong { font-size: 13px; font-weight: 600; line-height: 1.5; }
-.skin-option small { display: block; color: var(--muted); font-size: 12px; line-height: 1.65; }
 
 html[data-interface-skin="board"] {
-  --classic-icon-display: none;
-  --board-icon-display: inline;
   --scallop-outline-width: 2;
   --scallop-rib-width: 1.8;
   --paper: #121212;
@@ -266,10 +139,6 @@ html[data-interface-skin="board"] .sidebar-user-area { padding-top: 24px; }
 html[data-interface-skin="board"] .sidebar-bottom.account-area { border-color: var(--line); padding-top: 12px; }
 html[data-interface-skin="board"] .account-toggle { border-radius: 10px; }
 html[data-interface-skin="board"] .account-toggle:hover { background: var(--board-hover); }
-html[data-interface-skin="board"] .account-menu { padding: 10px; border-radius: 16px; box-shadow: var(--board-shadow-hover); background: var(--board-raised); }
-html[data-interface-skin="board"] .account-menu button { min-height: var(--board-control-height); padding: 8px; gap: 8px; border-radius: 10px; font: 500 14px/20px var(--sans); }
-html[data-interface-skin="board"] .account-menu button + button { margin-top: 4px; }
-html[data-interface-skin="board"] .account-menu button:is(:hover, :focus-visible) { background: var(--board-hover); }
 html[data-interface-skin="board"] .main-content { max-width: none; padding: 0 36px 36px; }
 html[data-interface-skin="board"] .library-heading { padding: 32px 0 28px; gap: 20px; }
 html[data-interface-skin="board"] .library-heading h1 { font: 600 24px/34px var(--sans); letter-spacing: -.4px; }
@@ -339,14 +208,6 @@ html[data-interface-skin="board"] :is(#app, #login-screen, .settings-dialog, .sh
   cursor: not-allowed;
 }
 html[data-interface-skin="board"] :is(#app, #login-screen, .settings-dialog, .sharing-dialog) .button:active:not(:disabled) { transform: scale(.98); }
-html[data-interface-skin="board"] .search-box {
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--board-input);
-  padding: 8px 12px;
-  box-shadow: 0 1px 2px #00000004;
-}
-html[data-interface-skin="board"] .search-box:focus-within { border-color: var(--board-focus); box-shadow: 0 0 0 3px var(--accent-soft); }
 html[data-interface-skin="board"] #app .search-box :is(input, svg, kbd) { color: var(--muted); }
 html[data-interface-skin="board"] #app .search-box input { color: var(--ink); background: transparent; }
 html[data-interface-skin="board"] .search-box kbd { border-color: var(--line); background: var(--paper); border-radius: 4px; }
@@ -359,21 +220,10 @@ html[data-interface-skin="board"] #app .shelf-tools:has(> .search-box:not([hidde
   padding-bottom: 16px;
 }
 html[data-interface-skin="board"] #app .shelf-tools > .search-box {
-  height: var(--board-control-height);
-  min-height: var(--board-control-height);
   margin: 0;
-  padding: 0 10px;
+  padding-inline: 10px;
   gap: 8px;
-  border-radius: 10px;
-  box-sizing: border-box;
   transition: border-color .15s, box-shadow .15s;
-  border-color: transparent;
-  box-shadow: none;
-}
-html[data-interface-skin="board"] #app .shelf-tools > .search-box:hover { box-shadow: inset 0 0 0 2px var(--board-border-hover); }
-html[data-interface-skin="board"] #app .shelf-tools > .search-box:focus-within {
-  border-color: transparent;
-  box-shadow: inset 0 0 0 2px var(--board-focus);
 }
 html[data-interface-skin="board"] #app .shelf-tools > .search-box input {
   appearance: none;
@@ -408,12 +258,8 @@ html[data-interface-skin="board"] #app .shelf-tools > .search-box kbd {
   font: 400 11px/16px var(--sans);
 }
 html[data-interface-skin="board"] #app .shelf-tools > .select-tools select {
-  height: var(--board-control-height);
-  min-height: var(--board-control-height);
-  box-sizing: border-box;
-  padding: 0 10px;
+  padding-inline: 10px;
   font: 400 14px/20px var(--sans);
-  border-radius: 10px;
 }
 html[data-interface-skin="board"] :is(#app, #login-screen, .settings-dialog, .sharing-dialog) :where(
   .select-tools select, .setting-row select, .library-switcher > select,
@@ -435,7 +281,7 @@ html[data-interface-skin="board"] :is(#app, #login-screen, .settings-dialog, .sh
   line-height: 20px;
   box-shadow: none;
 }
-html[data-interface-skin="board"] :is(#app, #login-screen, .settings-dialog, .sharing-dialog) :where(select) {
+html[data-interface-skin="board"] :is(#app, #login-screen, .settings-dialog, .sharing-dialog) :where(select, .display-settings-open) {
   background-color: var(--board-select);
   border-color: var(--line);
   box-shadow: 0 1px 2px #00000004;
@@ -459,7 +305,7 @@ html[data-interface-skin="board"] :is(#app, #login-screen, .settings-dialog, .sh
 }
 html[data-interface-skin="board"] :is(#app, #login-screen, .settings-dialog, .sharing-dialog) :is(input, textarea)::placeholder { color: var(--muted); opacity: .85; }
 html[data-interface-skin="board"] :is(.select-tools select, .setting-row select) { min-height: var(--board-control-height); }
-html[data-interface-skin="board"] body select:not([multiple]):not([size]) {
+html[data-interface-skin="board"] body :is(select:not([multiple]):not([size]), .display-settings-open) {
   border-radius: 10px;
   border: 1px solid var(--line);
   background-color: var(--board-select);
@@ -469,7 +315,8 @@ html[data-interface-skin="board"] body select:not([multiple]):not([size]) {
   font: 400 14px/20px var(--sans);
 }
 html[data-interface-skin="board"] body select:not([multiple]):not([size]):hover:not(:disabled),
-html[data-interface-skin="board"] body select:not([multiple]):not([size]):open { border-color: var(--board-border-hover); }
+html[data-interface-skin="board"] body select:not([multiple]):not([size]):open,
+html[data-interface-skin="board"] .display-settings-open:hover { border-color: var(--board-border-hover); }
 @supports (appearance: base-select) {
   html[data-interface-skin="board"] body select:not([multiple]):not([size])::picker(select) {
     border-radius: 16px;
@@ -638,6 +485,22 @@ html[data-interface-skin="board"] #app :is(.setting-row strong, .service-panel d
 html[data-interface-skin="board"] :is(.setting-row, .settings-library, .service-panel dl) { border-color: var(--line); }
 html[data-interface-skin="board"] .settings-panel .setting-row { padding: 16px 0; gap: 24px; }
 html[data-interface-skin="board"] .settings-panel .setting-row:last-child { padding-bottom: 0; }
+html[data-interface-skin="board"] .interface-settings .setting-row > :is(select, .display-settings-open) {
+  box-sizing: border-box;
+  flex: 0 0 auto;
+  width: 132px;
+  max-width: 48%;
+  min-width: 0;
+}
+html[data-interface-skin="board"] .display-settings-open {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  text-align: start;
+  white-space: nowrap;
+}
+html[data-interface-skin="board"] .display-settings-open svg { width: 16px; height: 16px; flex: none; color: var(--muted); }
 html[data-interface-skin="board"] .service-panel dl { grid-template-columns: 152px minmax(0, 1fr); row-gap: 16px; }
 html[data-interface-skin="board"] .service-panel dt { align-self: center; }
 html[data-interface-skin="board"] :is(.service-panel code, .field-hint code, .empty-state code) { background: var(--board-hover); border-color: var(--line); color: var(--ink); border-radius: 6px; }
@@ -709,6 +572,30 @@ html[data-interface-skin="board"] .transcode-preview-button:hover { background: 
 html[data-interface-skin="board"] .transcode-book-list { gap: 16px; }
 html[data-interface-skin="board"] .transcode-disabled { background: var(--surface); border-color: var(--line); }
 html[data-interface-skin="board"] .transcode-path code { padding: 5px 8px; border-radius: 6px; background: var(--board-input); color: var(--muted); }
+/* Search and filter groups share the same surface as the optimization Select. */
+html[data-interface-skin="board"] :is(#app, #metadata-dialog, #batch-model-dialog)
+  :is(.shelf-tools, .transcode-filter-bar, .metadata-model-tools)
+  :is(.search-box, .select-tools select, input[type="search"]:not(.search-box input), .optimization-select-trigger, .button-secondary) {
+  height: var(--board-control-height);
+  min-height: var(--board-control-height);
+  padding-block: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background-color: var(--board-select);
+  box-shadow: var(--shadow-xs, none);
+}
+html[data-interface-skin="board"] :is(#app, #metadata-dialog, #batch-model-dialog)
+  :is(.shelf-tools, .transcode-filter-bar, .metadata-model-tools)
+  :is(.search-box, .select-tools select, input[type="search"]:not(.search-box input), .optimization-select-trigger, .button-secondary):hover:not(:disabled) {
+  background-color: var(--board-hover);
+  border-color: var(--board-border-hover);
+}
+html[data-interface-skin="board"] :is(#app, #metadata-dialog, #batch-model-dialog)
+  :is(.shelf-tools, .transcode-filter-bar, .metadata-model-tools)
+  :is(.search-box:focus-within, .select-tools select:focus, input[type="search"]:not(.search-box input):focus) {
+  border-color: transparent;
+  box-shadow: inset 0 0 0 2px var(--board-focus);
+}
 html[data-interface-skin="board"] .image-search-drop { background: var(--surface); border-color: var(--board-border-hover); border-radius: var(--board-radius); }
 html[data-interface-skin="board"] .image-search-drop.is-dragging { background: var(--accent-soft); border-color: var(--text-accent); }
 html[data-interface-skin="board"] .image-search-result:hover { border-color: var(--board-border-hover); box-shadow: var(--board-shadow-hover); }
@@ -835,13 +722,9 @@ html[data-interface-skin="board"] .reader .icon-button { border-radius: 9px; }
   html[data-interface-skin="board"] .transcode-book { padding: 16px; }
   html[data-interface-skin="board"] :is(.settings-dialog, .sharing-dialog) { border-radius: 20px; }
   html[data-interface-skin="board"] .dialog-header h2 { font-size: 20px; }
-  .skin-options { gap: 12px; }
-  .skin-option { padding: 8px; gap: 8px; }
-  .skin-preview { height: 94px; padding: 8px; gap: 8px; }
 }
 @media (prefers-reduced-motion: reduce) {
   html[data-interface-skin="board"] *,
   html[data-interface-skin="board"] *::before,
-  html[data-interface-skin="board"] *::after,
-  .skin-option { transition-duration: 0s; }
+  html[data-interface-skin="board"] *::after { transition-duration: 0s; }
 }

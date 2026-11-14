@@ -72,9 +72,9 @@
       const key = failureKey(item); if (seen.has(key)) return false; seen.add(key); return true;
     });
   }
-  function create({ searchHost, settingsHost, api, post, openBook, isAdmin, toast = () => {}, onManage = () => {}, onOpenFailure = () => {} }) {
+  function create({ searchHost, settingsHost, api, post, openBook, isAdmin, toast = () => {}, onManage = () => {}, onOpenFailure = () => {}, mountScope, onActivity = () => {} }) {
     const document = searchHost.ownerDocument;
-    const state = { active: false, managing: false, status: null, file: null, mime: '', url: '', results: [], searched: false, searching: false, busy: false, timer: null, statusRequest: null, generation: 0, fileGeneration: 0, catalog: '' };
+    const state = { active: false, managing: false, watching: false, working: false, status: null, file: null, mime: '', url: '', results: [], searched: false, searching: false, busy: false, timer: null, statusRequest: null, generation: 0, fileGeneration: 0, catalog: '' };
     const queryGate = createRequestGate(); const search = {}; const settings = {};
     const failures = { expanded: false, page: 1, pageSize: 20, items: [], total: 0, selected: new Set(), request: null, generation: 0, loading: false, busy: false, loaded: false, observedCount: null };
     function el(tag, cls, text) { const item = document.createElement(tag); if (cls) item.className = cls; if (text !== undefined) item.textContent = String(text); return item; }
@@ -84,7 +84,16 @@
     function cancelQuery() { queryGate.cancel(); state.searching = false; renderSearch(); }
     function clearResults() { state.results = []; state.searched = false; renderResults(); }
     function stopStatus() { clearTimeout(state.timer); state.timer = null; }
-    function scheduleStatus() { stopStatus(); if (!document.hidden && (state.active || state.managing)) state.timer = setTimeout(() => loadStatus(), state.status?.indexing ? 2500 : 7000); }
+    function setActivity(working) {
+      const value = working === true;
+      if (state.working !== value) { state.working = value; onActivity(value); }
+    }
+    function scheduleStatus() {
+      stopStatus();
+      if (document.hidden) return;
+      const full = state.active || state.managing;
+      if (full || state.watching) state.timer = setTimeout(() => loadStatus(), full ? (state.status?.indexing ? 2500 : 7000) : (state.working ? 3500 : 12000));
+    }
     function renderSearch() {
       search.message.textContent = statusMessage(state.status, isAdmin());
       search.manage.hidden = !isAdmin() || Boolean(state.status?.enabled && state.status?.available);
@@ -103,7 +112,7 @@
       search.resultHeading.textContent = state.results.length ? `找到 ${state.results.length} 个匹配页面${state.results.length >= 30 ? '（最多显示 30 个）' : ''}` : '没有找到匹配的图片';
       search.empty.hidden = !state.searched || Boolean(state.results.length);
       search.empty.textContent = state.status?.indexing ? '索引仍在更新，可以稍后再试。' : '可尝试保留更多画面，或使用更清晰的图片。';
-      state.results.forEach(result => {
+      function resultCard(result) {
         const card = el('button', 'image-search-result'); card.type = 'button';
         card.setAttribute('aria-label', `阅读《${result.book.title || '作品'}》第 ${result.page + 1} 页`);
         const thumbnail = el('div', 'image-search-thumbnail'); const image = el('img'); image.alt = ''; image.loading = 'lazy'; image.decoding = 'async'; image.src = '/api/image-search/thumbnail/' + encodeURIComponent(result.book.id) + '/' + result.page;
@@ -112,8 +121,19 @@
         const info = el('div', 'image-search-result-info'); const title = el('strong', '', result.book.title || '未命名作品'); title.title = title.textContent;
         const models = (result.book.models || []).map(model => model.name).filter(Boolean).join(' / ');
         info.append(title, el('span', '', [models, result.book.library_name].filter(Boolean).join(' · ')), el('small', '', `第 ${result.page + 1} 页`));
-        card.append(thumbnail, info); card.addEventListener('click', () => openBook(result.book, result.page)); search.results.append(card);
-      });
+        card.append(thumbnail, info); card.addEventListener('click', () => openBook(result.book, result.page));
+        return card;
+      }
+      const photos = [], magazines = [];
+      for (const result of state.results) (result.book.media_type === 'magazine' ? magazines : photos).push(result);
+      for (const [label, results] of [['写真库', photos], ['杂志库', magazines]]) {
+        if (!results.length) continue;
+        const group = el('section', 'image-search-result-group');
+        const grid = el('div', 'image-search-result-grid');
+        grid.append(...results.map(resultCard));
+        group.append(el('h3', '', label), grid);
+        search.results.append(group);
+      }
     }
     async function chooseFile(file) {
       const generation = ++state.fileGeneration; cancelQuery();
@@ -176,6 +196,41 @@
     tools.append(settings.pause, settings.retry, settings.rebuild, settings.clear, settings.refresh);
     settings.error = el('p', 'notice error'); settings.error.hidden = true; settings.error.setAttribute('role', 'alert');
     panel.append(enableRow, settings.message, settings.progress, settings.counts, tools, settings.error); settingsHost.append(panel);
+    const scopePanel = el('section', 'settings-panel image-index-scope'); scopePanel.hidden = true;
+    const scopeHeading = el('h2', '', '索引范围');
+    const scopeIntro = el('p', 'image-search-status', '选择哪些媒体库参与以图搜图。取消选择只会移除该库的图片索引，不会改动原图。');
+    const scopeHost = el('div', 'image-index-scope-choices');
+    const scopeInfo = el('small', 'image-search-status'); scopeInfo.setAttribute('role', 'status');
+    const scopeError = el('p', 'notice error'); scopeError.hidden = true; scopeError.setAttribute('role', 'alert');
+    const scopeSave = button('保存索引范围', 'button button-primary', () => {
+      const scope = scopeSnapshot();
+      if (scope && scope.dirty) mutate('/api/image-search/settings', { library_ids: scope.selection });
+    });
+    const scopeActions = el('div', 'image-index-scope-actions'); scopeActions.append(scopeInfo, scopeSave);
+    scopePanel.append(scopeHeading, scopeIntro, scopeHost, scopeActions, scopeError); settingsHost.append(scopePanel);
+    const scopeUI = mountScope?.(scopeHost, selection => { scopeDraft = selection; renderScope(); });
+    let scopeDraft, scopeRendered = '';
+    function scopeSnapshot() {
+      const snapshot = state.status;
+      if (!Array.isArray(snapshot?.libraries) || !(snapshot.library_ids === null || Array.isArray(snapshot.library_ids))) return null;
+      const libraries = snapshot.libraries;
+      const normalize = value => value === null ? null : libraries.map(({ id }) => id).filter(id => value.includes(id)).sort();
+      const saved = normalize(snapshot.library_ids);
+      const selection = scopeDraft === undefined ? saved : normalize(scopeDraft);
+      return { libraries, selection, dirty: JSON.stringify(saved) !== JSON.stringify(selection) };
+    }
+    function renderScope() {
+      const scope = state.managing && isAdmin() ? scopeSnapshot() : null;
+      scopePanel.hidden = !scope;
+      if (!scope) { if (scopeRendered) scopeUI?.clear(); scopeRendered = ''; return; }
+      const { libraries, selection, dirty } = scope;
+      const disabled = state.busy || failures.busy;
+      const key = JSON.stringify([libraries, selection, disabled]);
+      if (scopeRendered !== key) { scopeRendered = key; scopeUI?.update({ libraries, selection, disabled }); }
+      scopeSave.disabled = disabled || !dirty;
+      const info = selection === null ? '新添加的媒体库会自动纳入。' : selection.length ? `已选 ${selection.length} 个媒体库。` : '未选中媒体库，不会建立图片索引。';
+      if (scopeInfo.textContent !== info) scopeInfo.textContent = info;
+    }
     const failurePanel = el('section', 'settings-panel image-search-failures'); failurePanel.id = 'image-search-failure-panel'; failurePanel.hidden = true;
     const failureHeading = el('div', 'image-search-failure-heading'); failureHeading.append(el('h2', '', '索引失败明细'));
     settings.failureRefresh = button('刷新列表', 'button button-secondary', () => loadFailures(failures.page)); failureHeading.append(settings.failureRefresh);
@@ -254,7 +309,7 @@
       try {
         const payload = await post('/api/image-search/retry', { items: chosen.map(({ book_id, page_key }) => ({ book_id, page_key })) });
         if (generation !== failures.generation || !state.managing || !isAdmin()) return;
-        if (payload.snapshot) state.status = payload.snapshot;
+        if (payload.snapshot) { state.status = payload.snapshot; setActivity(payload.snapshot.working); }
         failures.selected.clear(); toast(`已重试 ${Number(payload.retried) || 0} 张图片${Number(payload.skipped) ? `，跳过 ${Number(payload.skipped)} 张` : ''}`);
         failures.busy = false; await loadFailures(failures.page);
       } catch (failure) { if (generation === failures.generation && failure.status !== 401) error(settings.failureError, failure.message || '图片重试失败。'); }
@@ -275,41 +330,55 @@
       settings.pause.textContent = snapshot?.paused ? '继续' : '暂停'; settings.pause.hidden = !snapshot?.indexing && !snapshot?.paused; settings.retry.hidden = !Number(summary.failed);
       settings.pause.disabled = settings.retry.disabled = busy || !snapshot?.enabled; settings.rebuild.disabled = busy || !snapshot?.enabled; settings.clear.disabled = busy || !snapshot || !(Number(summary.indexed) + Number(summary.pending) + Number(summary.failed)); settings.refresh.disabled = busy;
       updateFailureControls();
+      renderScope();
     }
     async function loadStatus(manual = false) {
       if (document.hidden) { stopStatus(); return; }
-      if (!(state.active || state.managing) || state.statusRequest || state.busy || failures.busy) { scheduleStatus(); return; }
+      const full = state.active || state.managing;
+      if (!(full || state.watching) || state.statusRequest || state.busy || failures.busy) { scheduleStatus(); return; }
       const generation = state.generation; const request = new AbortController(); state.statusRequest = request;
       try {
-        const payload = await api('/api/image-search/status', { signal: request.signal });
+        const payload = await api(full ? '/api/image-search/status' : '/api/image-search/activity', { signal: request.signal });
         if (generation !== state.generation || request.signal.aborted) return;
+        setActivity(payload.working);
+        if (!full) return;
         state.status = payload; error(settings.error, payload.error || ''); if (manual) error(search.error, ''); renderSearch(); renderSettings();
         const count = Number(payload.summary?.failed) || 0;
         if (state.managing && failures.expanded && !failures.loading && (count || failures.loaded) && (manual || !failures.loaded || (count !== failures.observedCount && !failures.selected.size && !failurePanel.contains(document.activeElement)))) loadFailures(failures.page);
         if (!payload.enabled) { cancelQuery(); clearResults(); }
-      } catch (failure) { if (generation === state.generation && !request.signal.aborted && failure.status !== 401) { error(state.managing ? settings.error : search.error, failure.message || '无法读取图片搜索状态。'); } }
+      } catch (failure) { if (generation === state.generation && !request.signal.aborted && failure.status !== 401) { if (full) error(state.managing ? settings.error : search.error, failure.message || '无法读取图片搜索状态。'); else setActivity(false); } }
       finally { if (state.statusRequest === request) { state.statusRequest = null; scheduleStatus(); } }
     }
     async function mutate(path, body) {
       if (!isAdmin() || state.busy || failures.busy) return;
       cancelFailures(true);
-      const generation = ++state.generation; state.statusRequest?.abort(); state.statusRequest = null; stopStatus(); state.busy = true; error(settings.error, ''); renderSettings();
-      try { const payload = await post(path, body); if (generation !== state.generation) return; state.status = payload; if (!payload.enabled || body.action === 'clear') { cancelQuery(); clearResults(); } toast(body.action === 'clear' ? '图片索引已清理。' : body.action === 'rebuild' ? '已开始重建图片索引。' : '图片搜索设置已更新。'); }
-      catch (failure) { if (generation === state.generation && failure.status !== 401) error(settings.error, failure.message || '操作失败，请重试。'); }
+      const scopeChange = 'library_ids' in body;
+      const target = scopeChange ? scopeError : settings.error;
+      const generation = ++state.generation; state.statusRequest?.abort(); state.statusRequest = null; stopStatus(); state.busy = true; error(target, ''); renderSettings();
+      try {
+        const payload = await post(path, body);
+        if (generation !== state.generation) return;
+        state.status = payload; setActivity(payload.working);
+        if (!payload.enabled || body.action === 'clear' || scopeChange) { cancelQuery(); clearResults(); }
+        if (scopeChange) scopeDraft = undefined;
+        toast(scopeChange ? '索引范围已保存。' : body.action === 'clear' ? '图片索引已清理。' : body.action === 'rebuild' ? '已开始重建图片索引。' : '图片搜索设置已更新。');
+      }
+      catch (failure) { if (generation === state.generation && failure.status !== 401) error(target, failure.message || '操作失败，请重试。'); }
       finally { if (generation === state.generation) { state.busy = false; renderSearch(); renderSettings(); if (state.managing && Number(state.status?.summary?.failed)) loadFailures(1); scheduleStatus(); } }
     }
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) { stopStatus(); state.statusRequest?.abort(); state.statusRequest = null; }
-      else if (state.active || state.managing) loadStatus(true);
+      else if (state.active || state.managing || state.watching) loadStatus(true);
     });
     renderSearch(); renderSettings();
     return {
-      showSearch() { if (state.active) return; state.active = true; loadStatus(true); },
-      hideSearch() { if (!state.active) return; state.active = false; cancelQuery(); if (!state.managing) { stopStatus(); state.statusRequest?.abort(); state.statusRequest = null; } },
-      showSettings() { if (!isAdmin() || state.managing) return; state.managing = true; loadStatus(true); },
-      hideSettings() { if (!state.managing) return; state.managing = false; cancelFailures(true); if (confirm.open) confirm.close(); if (!state.active) { stopStatus(); state.statusRequest?.abort(); state.statusRequest = null; } },
+      watchActivity() { if (!state.watching) { state.watching = true; loadStatus(); } },
+      showSearch() { if (state.active) return; if (!state.managing) { state.statusRequest?.abort(); state.statusRequest = null; } state.active = true; loadStatus(true); },
+      hideSearch() { if (!state.active) return; state.active = false; cancelQuery(); if (!state.managing) { state.statusRequest?.abort(); state.statusRequest = null; scheduleStatus(); } },
+      showSettings() { if (!isAdmin() || state.managing) return; if (!state.active) { state.statusRequest?.abort(); state.statusRequest = null; } state.managing = true; renderSettings(); loadStatus(true); },
+      hideSettings() { if (!state.managing) return; state.managing = false; scopeDraft = undefined; error(scopeError, ''); renderScope(); cancelFailures(true); if (confirm.open) confirm.close(); if (!state.active) { state.statusRequest?.abort(); state.statusRequest = null; scheduleStatus(); } },
       syncCatalog(signature) { if (state.catalog && state.catalog !== signature) { cancelQuery(); clearResults(); } state.catalog = signature; },
-      reset() { state.generation += 1; state.fileGeneration += 1; state.active = state.managing = state.busy = false; cancelFailures(true); stopStatus(); state.statusRequest?.abort(); state.statusRequest = null; cancelQuery(); releasePreview(); Object.assign(state, { file: null, mime: '', status: null, catalog: '' }); clearResults(); error(search.error, ''); error(settings.error, ''); search.input.value = ''; if (confirm.open) confirm.close(); renderSearch(); renderSettings(); }
+      reset() { state.generation += 1; state.fileGeneration += 1; state.active = state.managing = state.watching = state.busy = false; setActivity(false); scopeDraft = undefined; cancelFailures(true); stopStatus(); state.statusRequest?.abort(); state.statusRequest = null; cancelQuery(); releasePreview(); Object.assign(state, { file: null, mime: '', status: null, catalog: '' }); clearResults(); error(search.error, ''); error(settings.error, ''); error(scopeError, ''); search.input.value = ''; if (confirm.open) confirm.close(); renderSearch(); renderSettings(); }
     };
   }
   return { maxBytes, fileError, imageType, statusMessage, indexProgress, normalizeResults, normalizeFailures, failureKey, createRequestGate, create };

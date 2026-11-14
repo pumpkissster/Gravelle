@@ -1,0 +1,19 @@
+{
+  "name": "gravelle-account-menu",
+  "private": true,
+  "scripts": {
+    "build": "esbuild account-menu.jsx --bundle --minify --target=es2020 --legal-comments=eof --outfile=../../static/account-menu.js && tailwindcss -i account-menu.css -o ../../static/account-menu.css --minify"
+  },
+  "dependencies": {
+    "@remixicon/react": "4.9.0",
+    "react": "19.3.1",
+    "react-aria-components": "1.17.0",
+    "react-dom": "19.3.1",
+    "tailwind-merge": "3.6.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "4.3.5",
+    "esbuild": "0.28.2",
+    "tailwindcss": "4.3.5"
+  }
+}

@@ -171,14 +171,52 @@ class ImageSearchAPITests(unittest.TestCase):
     def test_login_and_admin_boundaries_include_head_and_mutations(self):
         for method in ("GET", "HEAD"):
             self.assertEqual(self.request("/api/image-search/status", actor=None, method=method)[0], 401)
+            self.assertEqual(self.request("/api/image-search/activity", actor=None, method=method)[0], 401)
         self.assertEqual(self.query(actor=None)[0], 401)
         for path, body in (("/api/image-search/settings", {"enabled": True}),
+                           ("/api/image-search/settings", {"library_ids": []}),
                            ("/api/image-search/actions", {"action": "clear"})):
             self.assertEqual(self.request(path, body, actor=None)[0], 401)
             self.assertEqual(self.request(path, body, actor="child")[0], 403)
         status, payload, _ = self.request("/api/image-search/status", actor="child")
         self.assertEqual(status, 200, payload)
-        self.assertEqual(set(payload), {"enabled", "available", "indexing"})
+        self.assertEqual(set(payload), {"enabled", "available", "indexing", "working"})
+        self.assertEqual(self.request("/api/image-search/activity", actor="child")[:2], (200, {"working": False}))
+
+    def test_index_scope_keeps_selected_features_and_only_rebuilds_eligible_pages(self):
+        self.enable_index()
+        path = "/api/image-search/settings"
+        visible, private = self.visible["id"], self.private["id"]
+        book = self.secret_book["id"]
+        thumbnail = f"/api/image-search/thumbnail/{book}/0"
+        self.assertEqual(self.request(thumbnail)[0], 200)
+        status = self.request("/api/image-search/status")[1]
+        self.assertIsNone(status["library_ids"])
+        self.assertEqual({item["id"] for item in status["libraries"]}, {visible, private})
+        self.assertEqual(self.request(path, {"library_ids": ["/outside"]})[0], 400)
+        self.assertEqual(self.request(path, {"library_ids": [visible], "enabled": True})[0], 400)
+
+        with closing(self.app.connect()) as connection:
+            before = connection.execute("SELECT digest,updated_at FROM is_pages WHERE book_id=? AND page_index=1",
+                                        (self.album_book["id"],)).fetchone()
+        status, payload, _ = self.request(path, {"library_ids": [visible, visible]})
+        self.assertEqual((status, payload["library_ids"], payload["summary"]["indexed"]), (200, [visible], 3))
+        self.assertEqual(self.request(thumbnail)[0], 404)
+        self.assertNotIn(book, {item["book"]["id"] for item in self.query()[1]["results"]})
+        self.app.image_search.run_once()
+        with closing(self.app.connect()) as connection:
+            after = connection.execute("SELECT digest,updated_at FROM is_pages WHERE book_id=? AND page_index=1",
+                                       (self.album_book["id"],)).fetchone()
+            self.assertEqual(tuple(after), tuple(before))
+            self.assertIsNone(connection.execute("SELECT 1 FROM is_pages WHERE book_id=?", (book,)).fetchone())
+
+        payload = self.request(path, {"library_ids": []})[1]
+        self.assertEqual(payload["summary"]["total"], 0)
+        self.assertFalse(payload["indexing"])
+        self.assertIsNone(self.request(path, {"library_ids": None})[1]["library_ids"])
+        self.enable_index()
+        self.assertEqual(self.request(thumbnail)[0], 200)
+        self.assertEqual(self.hash_sources(), self.source_hashes)
 
     def test_disabled_feature_rejects_query_without_modifying_sources(self):
         self.assertFalse(self.request("/api/image-search/status")[1]["enabled"])

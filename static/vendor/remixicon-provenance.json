@@ -9,95 +9,84 @@
   "license_url": "https://raw.githubusercontent.com/Remix-Design/RemixIcon/v4.9.0/License",
   "license_file": "remixicon-LICENSE.txt",
   "license_sha256": "6f2f21c5f8db34635d31848e9ff831d5dc421bb83ffc9d37f82651364047ae58",
-  "usage": "Selected SVG paths embedded in static/index.html for functional navigation and controls in the optional Board interface skin. Original classic icon paths remain available. No complete icon library is distributed.",
+  "usage": "Selected SVG paths embedded in the main web app and standalone share reader. Menu and filter components use the official React package at the same version. The photo library scallop is original artwork.",
   "symbols": {
     "i-book": {
       "official_name": "book-open-line",
       "official_symbol_id": "ri-book-open-line",
       "source_url": "https://raw.githubusercontent.com/Remix-Design/RemixIcon/v4.9.0/fonts/remixicon.symbol.svg",
       "source_symbol_sha256": "b339486b8a2e2b3a8717a159d2453e0298e4174c86f0780f5f99854a2f07e401",
-      "paths_sha256": "eb97ed6ff0562816be04342779cee005d76ad8d8bcfdd20a32fce8f3ff13ab49",
-      "classic_contents_sha256": "9a978fce879d311b1910794bcb5da902ea33733260364c161a253201a58f422b"
+      "paths_sha256": "eb97ed6ff0562816be04342779cee005d76ad8d8bcfdd20a32fce8f3ff13ab49"
     },
     "i-grid": {
       "official_name": "folder-image-line",
       "official_symbol_id": "ri-folder-image-line",
       "source_url": "https://raw.githubusercontent.com/Remix-Design/RemixIcon/v4.9.0/fonts/remixicon.symbol.svg",
       "source_symbol_sha256": "58654f16db1073709316180319311e3cb6a5a94043d949f92ac248f07c3cb811",
-      "paths_sha256": "a90d3f5e74da8bf823ffbcba548d71f880d1d496bcf6373bc62f2ded72996f20",
-      "classic_contents_sha256": "a7b7a46d01aa29629040bb24e3cbf492cc37f81f547e10334840598ce52890ed"
+      "paths_sha256": "a90d3f5e74da8bf823ffbcba548d71f880d1d496bcf6373bc62f2ded72996f20"
     },
     "i-home": {
       "official_name": "home-5-line",
       "official_symbol_id": "ri-home-5-line",
       "source_url": "https://raw.githubusercontent.com/Remix-Design/RemixIcon/v4.9.0/fonts/remixicon.symbol.svg",
       "source_symbol_sha256": "05d9cd25be09422a9a9f09f51ecb416beb8679187807a5900992423c2bcc9c75",
-      "paths_sha256": "97836a4893bb8c9307eedc28cfb08f233e2bc515ee44a10bb49fa1736adacb9a",
-      "classic_contents_sha256": "805720356f01b5b89a041be55d014ae687e6b827a2a80de4a37dba982d680475"
+      "paths_sha256": "97836a4893bb8c9307eedc28cfb08f233e2bc515ee44a10bb49fa1736adacb9a"
     },
     "i-heart": {
       "official_name": "heart-line",
       "official_symbol_id": "ri-heart-line",
       "source_url": "https://raw.githubusercontent.com/Remix-Design/RemixIcon/v4.9.0/fonts/remixicon.symbol.svg",
       "source_symbol_sha256": "4de934d919ade83b5738c834a96d270c05a55f263ebb463f548438da7ca7ca22",
-      "paths_sha256": "c67654f5070c9f2efcc4a76bf431e81b49b798c7e921ef7dff7ff2a4b2070651",
-      "classic_contents_sha256": "4c26a91ff9fa213d47b6c5ab3fc0dba847f2d118587062d22701f1cdeca06d6f"
+      "paths_sha256": "c67654f5070c9f2efcc4a76bf431e81b49b798c7e921ef7dff7ff2a4b2070651"
     },
     "i-clock": {
       "official_name": "time-line",
       "official_symbol_id": "ri-time-line",
       "source_url": "https://raw.githubusercontent.com/Remix-Design/RemixIcon/v4.9.0/fonts/remixicon.symbol.svg",
       "source_symbol_sha256": "68ad9e84c87d13468b36806b030f7b211f4355d565658690037b03c4a4f99fe9",
-      "paths_sha256": "44ed2701cfd6917599cd7f145a8a39195a4ed9386819a74965c31a678e8aeab8",
-      "classic_contents_sha256": "32de08ede9f1e390bb0d6b8f104f1d1a71cfd3bb91cb3da498c8adf2dcda5e1b"
+      "paths_sha256": "44ed2701cfd6917599cd7f145a8a39195a4ed9386819a74965c31a678e8aeab8"
     },
     "i-check": {
       "official_name": "check-line",
       "official_symbol_id": "ri-check-line",
       "source_url": "https://raw.githubusercontent.com/Remix-Design/RemixIcon/v4.9.0/fonts/remixicon.symbol.svg",
       "source_symbol_sha256": "1ee346776ea4ca588f3c497835c61f4996611de0477ce6a0aeb117faa7dd8354",
-      "paths_sha256": "0511f25880489b30466150e60a399bc25e7b56d09b5b2c02469c71fe908dccc5",
-      "classic_contents_sha256": "b60974c2f187ac6623561b7645089016448202e9139306811214197a95bdd2dc"
+      "paths_sha256": "0511f25880489b30466150e60a399bc25e7b56d09b5b2c02469c71fe908dccc5"
     },
     "i-edit": {
       "official_name": "edit-line",
       "official_symbol_id": "ri-edit-line",
       "source_url": "https://raw.githubusercontent.com/Remix-Design/RemixIcon/v4.9.0/fonts/remixicon.symbol.svg",
       "source_symbol_sha256": "3e125dc75c3d988f74146c7730bf9b7c1b8040d2e1fa334389e5f7c699a09007",
-      "paths_sha256": "358e5dbe812b15db28cd169a967ce6d330d7e62b5dad37f49404f2eb8749212f",
-      "classic_contents_sha256": "2fbba6819513ead9d5178be9e158920ff6ba8346888c11100c920438ab99fdab"
+      "paths_sha256": "358e5dbe812b15db28cd169a967ce6d330d7e62b5dad37f49404f2eb8749212f"
     },
     "i-search": {
       "official_name": "search-line",
       "official_symbol_id": "ri-search-line",
       "source_url": "https://raw.githubusercontent.com/Remix-Design/RemixIcon/v4.9.0/fonts/remixicon.symbol.svg",
       "source_symbol_sha256": "e5f9997b26e8591241d3739d481a33b32eb8e2e8f986ef1e7f036fc36f3f5bb7",
-      "paths_sha256": "2f0eeb84b0c17f8c9a002263ab1135fd956ae65f792baef88b700eb205e521a7",
-      "classic_contents_sha256": "28114050fce86ccc84b29fdfe8343476bac9f88af241f7b86690aee425fb5c1b"
+      "paths_sha256": "2f0eeb84b0c17f8c9a002263ab1135fd956ae65f792baef88b700eb205e521a7"
     },
     "i-refresh": {
       "official_name": "refresh-line",
       "official_symbol_id": "ri-refresh-line",
       "source_url": "https://raw.githubusercontent.com/Remix-Design/RemixIcon/v4.9.0/fonts/remixicon.symbol.svg",
       "source_symbol_sha256": "f425210bed4362e644bb5efdc0930d211f334360b8391a19cc69c267e8417b94",
-      "paths_sha256": "90a75773a90c97fbf6b3716fc1e2ea597c528f6cd584700f5e7187cd03f6ccae",
-      "classic_contents_sha256": "771658dcb2bcfbb4f7bc5a40a95096f03aed98e271ca54add579979cda543340"
+      "paths_sha256": "90a75773a90c97fbf6b3716fc1e2ea597c528f6cd584700f5e7187cd03f6ccae"
     },
     "i-settings": {
       "official_name": "settings-3-line",
       "official_symbol_id": "ri-settings-3-line",
       "source_url": "https://raw.githubusercontent.com/Remix-Design/RemixIcon/v4.9.0/fonts/remixicon.symbol.svg",
       "source_symbol_sha256": "8d317d484092f22abc0a904f1586b3a194217aa14bd6eb2291b16bdd806bc9d8",
-      "paths_sha256": "8b15fe859e9210dc4b8ad397df18a3e4e77796ff2e048cc56f5c573a404ee31e",
-      "classic_contents_sha256": "dd7b5a6c21ddc4a09fe712dbbfc6fedfd2bb2017875b6bfea20e885dbb3a5f51"
+      "paths_sha256": "8b15fe859e9210dc4b8ad397df18a3e4e77796ff2e048cc56f5c573a404ee31e"
     },
     "i-arrow": {
       "official_name": "arrow-right-line",
       "official_symbol_id": "ri-arrow-right-line",
       "source_url": "https://raw.githubusercontent.com/Remix-Design/RemixIcon/v4.9.0/fonts/remixicon.symbol.svg",
       "source_symbol_sha256": "498338dcb8a49c1dacaf3857853c3bfe53a8a9fe1d7aa9c2c0802b0c637c64c4",
-      "paths_sha256": "c0309d0a899664ae596e228d3a622864f89dfcde35869969cfd95aea108d36c8",
-      "classic_contents_sha256": "dafa534fea330b10229c216bbbd73fc61a46671c0021c437f50c9a179fe6063e"
+      "paths_sha256": "c0309d0a899664ae596e228d3a622864f89dfcde35869969cfd95aea108d36c8"
     },
     "i-left": {
       "official_name": "arrow-left-s-line",
@@ -105,7 +94,7 @@
       "source_url": "https://raw.githubusercontent.com/Remix-Design/RemixIcon/v4.9.0/fonts/remixicon.symbol.svg",
       "source_symbol_sha256": "441bfc4992974cbabf08748268f5e098e671f09663bcd6d51ad5436cba5d3b32",
       "paths_sha256": "9705fec341f9704b5599ec3db9c7aa3ece2e98fc589dce10015fc9071c3adccf",
-      "classic_contents_sha256": "7b40a0e8c022b177d4a1c9513e354e3e1bfa6a144314f0e94f2bb8610f36c343"
+      "additional_usage": "Same artwork included in the standalone share reader."
     },
     "i-right": {
       "official_name": "arrow-right-s-line",
@@ -113,23 +102,21 @@
       "source_url": "https://raw.githubusercontent.com/Remix-Design/RemixIcon/v4.9.0/fonts/remixicon.symbol.svg",
       "source_symbol_sha256": "6996e9f5ea70b29c37dec6e911e8431c321c4cff2a833059b7c3d3c6478434a0",
       "paths_sha256": "36c5d3c9834c924f9b2efa5857180013617a8986f39c1c703b558d05cb3f2cde",
-      "classic_contents_sha256": "7e35baa4e01cfb5aa198d2cd6cace273f0d8a88a40e89c299229b313a8adffb0"
+      "additional_usage": "Same artwork included in the standalone share reader."
     },
     "i-up": {
       "official_name": "arrow-up-s-line",
       "official_symbol_id": "ri-arrow-up-s-line",
       "source_url": "https://raw.githubusercontent.com/Remix-Design/RemixIcon/v4.9.0/fonts/remixicon.symbol.svg",
       "source_symbol_sha256": "657b9dcf836fa30319de4ad65a2d0ae65fbf1c8b2ba35cc3ff20ffb1cca8a15c",
-      "paths_sha256": "0d8f2334f928127775b6150fd977d5995eeb1a85f9acc971004cd80d0ba99fdf",
-      "classic_contents_sha256": "1d62685245a5f111428fe1768a341f1fc38a73bdd44d6a3969ad696ba4b93938"
+      "paths_sha256": "0d8f2334f928127775b6150fd977d5995eeb1a85f9acc971004cd80d0ba99fdf"
     },
     "i-down": {
       "official_name": "arrow-down-s-line",
       "official_symbol_id": "ri-arrow-down-s-line",
       "source_url": "https://raw.githubusercontent.com/Remix-Design/RemixIcon/v4.9.0/fonts/remixicon.symbol.svg",
       "source_symbol_sha256": "2d194839673df1dc29bac39a0d9a85f8bde96ae4f9c55a00d032a16160c5d208",
-      "paths_sha256": "3f3050db36585d177a67f729864789f8cc2878f3b27993561287d7f3a6c60c6b",
-      "classic_contents_sha256": "9175c517785f5fb30cc58da365a8805a6f9d768850a142ec0160eeb35f4d11c6"
+      "paths_sha256": "3f3050db36585d177a67f729864789f8cc2878f3b27993561287d7f3a6c60c6b"
     },
     "i-close": {
       "official_name": "close-line",
@@ -137,16 +124,14 @@
       "source_url": "https://raw.githubusercontent.com/Remix-Design/RemixIcon/v4.9.0/fonts/remixicon.symbol.svg",
       "source_symbol_sha256": "b09689af8f3bf1d3fdc89c1e65bf097338417b13b71bbed7e7be98475372af42",
       "paths_sha256": "ab09bbb061d6b30045f604d9be3ec0e560ac6559ff24b110ffc1155800dd0ac1",
-      "classic_contents_sha256": "bb271d944a192335044a9e340268200dd07ad5ab924e87786342f197eefad59e",
-      "additional_usage": "Same unmodified paths used as a local CSS mask for the Board search-field clear control."
+      "additional_usage": "Same unmodified paths used as a local CSS mask for the Board search-field clear control. Same artwork included in the standalone share reader."
     },
     "i-folder": {
       "official_name": "folder-line",
       "official_symbol_id": "ri-folder-line",
       "source_url": "https://raw.githubusercontent.com/Remix-Design/RemixIcon/v4.9.0/fonts/remixicon.symbol.svg",
       "source_symbol_sha256": "8f497875f5d4cd7842fc5b688ead81818319ae6907f73e7bf664275524c8d364",
-      "paths_sha256": "a384b9c96b440d4429b76a7ea66232987bec6b22570fd2857f9e335554304dec",
-      "classic_contents_sha256": "3703c792d228c98b92d3cb5440e8db39aee25559c2b98009c288f70e62e99b05"
+      "paths_sha256": "a384b9c96b440d4429b76a7ea66232987bec6b22570fd2857f9e335554304dec"
     },
     "i-sun": {
       "official_name": "sun-line",
@@ -154,87 +139,135 @@
       "source_url": "https://raw.githubusercontent.com/Remix-Design/RemixIcon/v4.9.0/fonts/remixicon.symbol.svg",
       "source_symbol_sha256": "c67b3231c429192eb43fce70bf175a22080f5cd8a2d82fbe93b39c994beff030",
       "paths_sha256": "c7c5a74be642667cc88f2811600a353c7ed9e948117d8f7ce488241f8dc5aa2c",
-      "classic_contents_sha256": "fbacea1763b801ee7e7f312a3b2da2d6bb4cf4d8c67591a916c742c56438781e"
+      "additional_usage": "Same artwork included in the standalone share reader."
     },
     "i-logout": {
       "official_name": "logout-box-r-line",
       "official_symbol_id": "ri-logout-box-r-line",
       "source_url": "https://raw.githubusercontent.com/Remix-Design/RemixIcon/v4.9.0/fonts/remixicon.symbol.svg",
       "source_symbol_sha256": "1f400ca2ab576b2a82e359b914627916aa6c5aa9d24f143e6b8958d35e02c5fc",
-      "paths_sha256": "b48225c298425df110cca144901d9620a9989b38ea5c2a363f9b8ffd2f56caeb",
-      "classic_contents_sha256": "6348d42733a0a82cd35c85bac997520b40a3a85ecd9b27a8b64e67b832842e13"
+      "paths_sha256": "b48225c298425df110cca144901d9620a9989b38ea5c2a363f9b8ffd2f56caeb"
     },
     "i-bookmark": {
       "official_name": "bookmark-line",
       "official_symbol_id": "ri-bookmark-line",
       "source_url": "https://raw.githubusercontent.com/Remix-Design/RemixIcon/v4.9.0/fonts/remixicon.symbol.svg",
       "source_symbol_sha256": "6839925ced07404e608b5946700c08bb791b2fe0142a1136559d027bc6c09dbf",
-      "paths_sha256": "0bf8a97b7c119cad48ce6734ecccba9e4dfa38e7fdb8bc5fb523b3a4285ae443",
-      "classic_contents_sha256": "bbdc794aa2e7a3ee4b5265e8b8c660dcdb29b977b8536f5204812580921d8389"
+      "paths_sha256": "0bf8a97b7c119cad48ce6734ecccba9e4dfa38e7fdb8bc5fb523b3a4285ae443"
     },
     "i-person": {
       "official_name": "user-3-line",
       "official_symbol_id": "ri-user-3-line",
       "source_url": "https://raw.githubusercontent.com/Remix-Design/RemixIcon/v4.9.0/fonts/remixicon.symbol.svg",
       "source_symbol_sha256": "deff31b97c4e410caaf22dcef0bd23252e5f2bc755a83dd9b6762eabbec8b322",
-      "paths_sha256": "33b84019e9c4037540bf44e935cbb648105e1b3159822404cb682a43f581b0e0",
-      "classic_contents_sha256": "56500a990a85cb299f341e7a715cbfdb9a5a89f4952ee97ea3e6d9bd06d6485a"
+      "paths_sha256": "33b84019e9c4037540bf44e935cbb648105e1b3159822404cb682a43f581b0e0"
     },
     "i-performance": {
       "official_name": "speed-up-line",
       "official_symbol_id": "ri-speed-up-line",
       "source_url": "https://raw.githubusercontent.com/Remix-Design/RemixIcon/v4.9.0/fonts/remixicon.symbol.svg",
       "source_symbol_sha256": "d4af756201250ac6762b6e5c16c7be1575e5e3ff3c8e7848675ed63dfd9d2f09",
-      "paths_sha256": "18e961747fa6309a92c3f96113eec1b994d03f0e573fba7460b3063aae3038d6",
-      "classic_contents_sha256": "dd7b5a6c21ddc4a09fe712dbbfc6fedfd2bb2017875b6bfea20e885dbb3a5f51"
+      "paths_sha256": "18e961747fa6309a92c3f96113eec1b994d03f0e573fba7460b3063aae3038d6"
     },
     "i-network": {
       "official_name": "global-line",
       "official_symbol_id": "ri-global-line",
       "source_url": "https://raw.githubusercontent.com/Remix-Design/RemixIcon/v4.9.0/fonts/remixicon.symbol.svg",
       "source_symbol_sha256": "086ebc10dd9e00e15c2152fff061c533bd27f400f9b3e82c8ddd7762bc4cf386",
-      "paths_sha256": "4bf87a0f4a18c07aa2039009dcd6bb3e517bba715f80bdda8f5457cc032bad58",
-      "classic_contents_sha256": "dd7b5a6c21ddc4a09fe712dbbfc6fedfd2bb2017875b6bfea20e885dbb3a5f51"
+      "paths_sha256": "4bf87a0f4a18c07aa2039009dcd6bb3e517bba715f80bdda8f5457cc032bad58"
     },
     "i-optimization": {
       "official_name": "image-edit-line",
       "official_symbol_id": "ri-image-edit-line",
       "source_url": "https://raw.githubusercontent.com/Remix-Design/RemixIcon/v4.9.0/fonts/remixicon.symbol.svg",
       "source_symbol_sha256": "c1ab1401e2cf361c1cde8bebe7c6448b50391273883f33fbc2999ffe37981b1f",
-      "paths_sha256": "90ade88bedd2dc7f070c9e1ecd2471f50afa6ea63d339a7581c1750c4fedc1c1",
-      "classic_contents_sha256": "771658dcb2bcfbb4f7bc5a40a95096f03aed98e271ca54add579979cda543340"
+      "paths_sha256": "90ade88bedd2dc7f070c9e1ecd2471f50afa6ea63d339a7581c1750c4fedc1c1"
     },
     "i-image-search": {
       "official_name": "image-line",
       "official_symbol_id": "ri-image-line",
       "source_url": "https://raw.githubusercontent.com/Remix-Design/RemixIcon/v4.9.0/fonts/remixicon.symbol.svg",
       "source_symbol_sha256": "bbf0d66b450aa4d8e96859dbc8bb856eab7f12b661b84cac7ab1eb2dec7a1138",
-      "paths_sha256": "107e343f8b62fa46768b7ad49205ac17976fe2e82859162812d40bf7a9e58e21",
-      "classic_contents_sha256": "28114050fce86ccc84b29fdfe8343476bac9f88af241f7b86690aee425fb5c1b"
+      "paths_sha256": "107e343f8b62fa46768b7ad49205ac17976fe2e82859162812d40bf7a9e58e21"
     },
     "i-cache": {
       "official_name": "database-2-line",
       "official_symbol_id": "ri-database-2-line",
       "source_url": "https://raw.githubusercontent.com/Remix-Design/RemixIcon/v4.9.0/fonts/remixicon.symbol.svg",
       "source_symbol_sha256": "3c815b0507fe01ab97f6f40354c6e5741e02982340aaa4f8361e2c891196226b",
-      "paths_sha256": "4ddef41ea61272fb3529041d1be7389dbd3d7c5ff88eec906c04c92012dde403",
-      "classic_contents_sha256": "3703c792d228c98b92d3cb5440e8db39aee25559c2b98009c288f70e62e99b05"
+      "paths_sha256": "4ddef41ea61272fb3529041d1be7389dbd3d7c5ff88eec906c04c92012dde403"
     },
     "i-share": {
       "official_name": "share-line",
       "official_symbol_id": "ri-share-line",
       "source_url": "https://raw.githubusercontent.com/Remix-Design/RemixIcon/v4.9.0/fonts/remixicon.symbol.svg",
       "source_symbol_sha256": "e40a8e1a2cb4f2d0b1de778443f0e75efa834f40784640537a5f47b55bab0f50",
-      "paths_sha256": "bd416558df20f6423987df793dca65ac44dc08e7e6ae419bd43d7b64372420b0",
-      "classic_contents_sha256": "dafa534fea330b10229c216bbbd73fc61a46671c0021c437f50c9a179fe6063e"
+      "paths_sha256": "bd416558df20f6423987df793dca65ac44dc08e7e6ae419bd43d7b64372420b0"
     },
     "i-menu": {
       "official_name": "menu-line",
       "official_symbol_id": "ri-menu-line",
       "source_url": "https://raw.githubusercontent.com/Remix-Design/RemixIcon/v4.9.0/fonts/remixicon.symbol.svg",
       "source_symbol_sha256": "52c72d53cae37fcf6b23d0c66690c0fe5e2277b0f235cd5228da2bd9fb546d56",
-      "paths_sha256": "185cac12b664e008b846850c3ff0fdd41ac8264fd7010c43f022d9933b0aba61",
-      "classic_contents_sha256": "7e0b968bc1cb44a371fd187a06fa8eb9b0fcdac1ab6656d4f7a284ec8bf9b6b8"
+      "paths_sha256": "185cac12b664e008b846850c3ff0fdd41ac8264fd7010c43f022d9933b0aba61"
+    },
+    "i-bell": {
+      "official_name": "notification-3-line",
+      "official_symbol_id": "ri-notification-3-line",
+      "source_url": "https://raw.githubusercontent.com/Remix-Design/RemixIcon/v4.9.0/fonts/remixicon.symbol.svg",
+      "source_symbol_sha256": "9200711e23274df3ffda2fd583aeaf056c5f649c0adf062b3bbecbb4dd23704e",
+      "paths_sha256": "0baa43a8df1d1331f48cc48c0cdd3146437999c53146ba7b7abcc20ec714e2bd"
+    },
+    "i-scan-warning": {
+      "official_name": "scan-line",
+      "official_symbol_id": "ri-scan-line",
+      "source_url": "https://raw.githubusercontent.com/Remix-Design/RemixIcon/v4.9.0/fonts/remixicon.symbol.svg",
+      "source_symbol_sha256": "180e4b3597183b368103b02d29de0224e01c1dc726ece0618d582a1b46e237aa",
+      "paths_sha256": "ce1a2d83a431a8ee82014e3214d8ac208fccb37dc03077feddf3ba72fa4b5848"
+    },
+    "i-drag-handle": {
+      "official_name": "draggable",
+      "official_symbol_id": "ri-draggable",
+      "source_url": "https://raw.githubusercontent.com/Remix-Design/RemixIcon/v4.9.0/fonts/remixicon.symbol.svg",
+      "source_symbol_sha256": "54f130d002c2faaeeb9711e9835b230d056905efbd9f80afd6c0f9a1336ec34c",
+      "paths_sha256": "1ad59a49fe71b0cab5012a637c7620af38cacd0ad266e95934198e1e7b5af956"
+    },
+    "i-fullscreen": {
+      "official_name": "fullscreen-line",
+      "official_symbol_id": "ri-fullscreen-line",
+      "source_url": "https://raw.githubusercontent.com/Remix-Design/RemixIcon/v4.9.0/fonts/remixicon.symbol.svg",
+      "source_symbol_sha256": "19215daa4de353a8f16c3c3920c68d5456e52b297bbb3060218d084385300457",
+      "paths_sha256": "bcbe00b311a4935f06cdf1e2bedba0435d016eefebe9e1df2cd61b6da4ee404c",
+      "additional_usage": "Same artwork included in the standalone share reader."
+    },
+    "i-help": {
+      "official_name": "question-line",
+      "official_symbol_id": "ri-question-line",
+      "source_url": "https://raw.githubusercontent.com/Remix-Design/RemixIcon/v4.9.0/fonts/remixicon.symbol.svg",
+      "source_symbol_sha256": "37de89f347ee9623a665627117e7ccbb46860b5ce089912c8660333017abca70",
+      "paths_sha256": "1ffa3d3cf889335b48e692b0a88f0499f8871cf733d148098ab05c4d3e11ba3b",
+      "additional_usage": "Same artwork included in the standalone share reader."
+    },
+    "i-contents": {
+      "official_name": "list-unordered",
+      "official_symbol_id": "ri-list-unordered",
+      "source_url": "https://raw.githubusercontent.com/Remix-Design/RemixIcon/v4.9.0/fonts/remixicon.symbol.svg",
+      "source_symbol_sha256": "ca1988863ae8edf583b88613c1a207efec9d62457a75d53152dec94d30709698",
+      "paths_sha256": "a17a4eed314633860eca4baed1f812c1bb85a99c18d0b84e8252dadabdc3d8d8"
+    },
+    "i-calendar": {
+      "official_name": "calendar-line",
+      "official_symbol_id": "ri-calendar-line",
+      "source_url": "https://raw.githubusercontent.com/Remix-Design/RemixIcon/v4.9.0/fonts/remixicon.symbol.svg",
+      "source_symbol_sha256": "8b638f41699e95610f21cd11c5c736ada76754c97960330b00199011ed838b18",
+      "paths_sha256": "6f9240aa6ab3cf37e773f6d07b261d87f0b8fcbeda01460d21cf9d55b78cd807"
+    },
+    "i-heart-filled": {
+      "official_name": "heart-fill",
+      "official_symbol_id": "ri-heart-fill",
+      "source_url": "https://raw.githubusercontent.com/Remix-Design/RemixIcon/v4.9.0/fonts/remixicon.symbol.svg",
+      "source_symbol_sha256": "b4ffdf976586cd96cb04be985932cf4155bdecf32cbdcd45aef9625d559cf7db",
+      "paths_sha256": "7d0541cc46eec7a1b0a089141380adc01a6013bba1901aa3e745fdb1b7d228be"
     }
   }
 }

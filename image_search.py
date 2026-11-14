@@ -52,6 +52,8 @@ INDEX_IDLE_POLL_SECONDS = 30
 INDEX_PROTOCOL = 1
 INDEX_MAX_REQUEST = 16 * 1024
 AVATAR_TIMEOUT_SECONDS = 15
+INDEX_LIBRARY_SCOPE = """((SELECT library_ids FROM is_settings WHERE id=1) IS NULL
+    OR COALESCE(b.library_id IN (SELECT value FROM json_each((SELECT library_ids FROM is_settings WHERE id=1))),0))"""
 
 
 class _UnsupportedImage(ValueError):
@@ -495,6 +497,9 @@ class ImageSearchManager:
                 CREATE INDEX IF NOT EXISTS is_pages_status ON is_pages(status,book_id,page_index);
             """)
             connection.execute("INSERT OR IGNORE INTO is_settings(id) VALUES(1)")
+            if "library_ids" not in {row[1] for row in connection.execute("PRAGMA table_info(is_settings)")}:
+                # NULL tracks all current and future libraries; [] indexes none.
+                connection.execute("ALTER TABLE is_settings ADD COLUMN library_ids TEXT")
             columns = {row[1] for row in connection.execute("PRAGMA table_info(is_pages)")}
             for name, declaration in (("local_features", "BLOB"), ("local_sketch", "BLOB"),
                                       ("local_version", "INTEGER NOT NULL DEFAULT 0"),
@@ -511,7 +516,7 @@ class ImageSearchManager:
             connection.execute("UPDATE is_pages SET status='pending' WHERE status='running'")
             connection.execute("UPDATE is_pages SET local_state='pending' WHERE local_state='running' OR local_version<>?", (LOCAL_VERSION,))
             connection.execute("UPDATE is_pages SET status='pending' WHERE algorithm<>?", (ALGORITHM_VERSION,))
-            connection.execute("UPDATE is_settings SET reconcile_pending=1")
+            connection.execute("UPDATE is_settings SET reconcile_pending=CASE WHEN library_ids='[]' THEN 0 ELSE 1 END")
         # Recover only our flat, private temporary jobs, and never follow links.
         if self.root.exists():
             try:
@@ -577,6 +582,19 @@ class ImageSearchManager:
         activity["workerAlive"] = alive
         activity["background"] = self.library.task_scheduler.snapshot_debug()
         return activity
+
+    def _working(self, settings):
+        with self.activity_lock:
+            return bool(settings["enabled"] and not settings["paused"]
+                        and not self.stop_event.is_set() and not self.library.stop_event.is_set()
+                        and self.thread and self.thread.is_alive()
+                        and self.activity["generation"] == settings["generation"]
+                        and self.activity["stage"] in ("reconciling", "reading", "decoding"))
+
+    def activity_status(self):
+        # The sidebar only needs one flag. Don't count/scan is_pages here.
+        with closing(self.library.connect()) as connection:
+            return {"working": self._working(self._settings(connection))}
 
     def _work_directory(self):
         self.root.mkdir(exist_ok=True)
@@ -649,7 +667,8 @@ class ImageSearchManager:
     def reconcile(self):
         """Catalogue mutation hook: queue work without inspecting sources here."""
         with closing(self.library.connect()) as connection, connection:
-            connection.execute("UPDATE is_settings SET reconcile_pending=1,revision=revision+1")
+            connection.execute("""UPDATE is_settings SET reconcile_pending=CASE WHEN library_ids='[]' THEN 0 ELSE 1 END,
+                revision=revision+1""")
         self.wake.set()
         if self.auto_start:
             self.start()
@@ -657,17 +676,29 @@ class ImageSearchManager:
     def configure(self, body):
         with self.lock, closing(self.library.connect()) as connection, connection:
             self.library.require_admin(connection)
-            if not isinstance(body, dict) or set(body) - {"enabled", "action"} or not body:
+            if not isinstance(body, dict) or len(body) != 1 or set(body) - {"enabled", "action", "library_ids"}:
                 raise self._error("图片搜索设置无效。")
             if "enabled" in body and type(body["enabled"]) is not bool:
                 raise self._error("图片搜索开关需要 true 或 false。")
             action = body.get("action")
             if "action" in body and (not isinstance(action, str) or action not in ("rebuild", "pause", "resume", "retry", "clear")):
                 raise self._error("不支持的图片索引操作。")
-            if "enabled" in body and action is not None:
-                raise self._error("一次只能修改图片搜索开关或索引操作。")
             connection.execute("BEGIN IMMEDIATE")
-            if "enabled" in body:
+            if "library_ids" in body:
+                selected = body["library_ids"]
+                if selected is not None:
+                    existing = {row[0] for row in connection.execute("SELECT id FROM media_libraries")}
+                    if not isinstance(selected, list) or any(not isinstance(item, str) or item not in existing for item in selected):
+                        raise self._error("请选择有效的媒体库。")
+                    selected = json.dumps(sorted(set(selected)), ensure_ascii=False)
+                if selected == self._settings(connection)["library_ids"]:
+                    connection.rollback()
+                    return self.snapshot()
+                connection.execute("UPDATE is_settings SET library_ids=?,reconcile_pending=?,error=''", (selected, int(selected != "[]")))
+                if selected is not None:
+                    connection.execute(f"""DELETE FROM is_pages WHERE book_id IN
+                        (SELECT b.id FROM books b WHERE NOT {INDEX_LIBRARY_SCOPE})""")
+            elif "enabled" in body:
                 connection.execute("UPDATE is_settings SET enabled=?,paused=0,reconcile_pending=1", (int(body["enabled"]),))
             elif action == "pause":
                 connection.execute("UPDATE is_settings SET paused=1")
@@ -687,7 +718,8 @@ class ImageSearchManager:
                 connection.execute("UPDATE is_settings SET enabled=0,paused=0,reconcile_pending=1,error=''")
             connection.execute("UPDATE is_pages SET status='pending' WHERE status='running'")
             connection.execute("UPDATE is_pages SET local_state='pending' WHERE local_state='running'")
-            connection.execute("UPDATE is_settings SET generation=generation+1,revision=revision+1")
+            connection.execute("""UPDATE is_settings SET generation=generation+1,revision=revision+1,
+                reconcile_pending=CASE WHEN library_ids='[]' THEN 0 ELSE reconcile_pending END""")
             settings = self._settings(connection)
         self._set_activity("disabled" if not settings["enabled"] else "paused" if settings["paused"] else "queued",
                            settings["generation"])
@@ -702,7 +734,7 @@ class ImageSearchManager:
         access, arguments = self.library._access_sql(connection, visible=True)
         rows = connection.execute(f"""SELECT p.status,p.local_state,COUNT(*) AS n FROM is_pages p
             JOIN books b ON b.id=p.book_id JOIN media_libraries l ON l.id=b.library_id
-            WHERE b.active=1 AND b.removed=0 AND {access} GROUP BY p.status,p.local_state""", arguments)
+            WHERE b.active=1 AND b.removed=0 AND {INDEX_LIBRARY_SCOPE} AND {access} GROUP BY p.status,p.local_state""", arguments)
         return self._counts(rows)
 
     def _failure_format(self, row):
@@ -731,7 +763,8 @@ class ImageSearchManager:
             raise self._error("失败列表分页参数无效。")
         with closing(self.library.connect()) as connection:
             self.library.require_admin(connection)
-            where = "b.active=1 AND b.removed=0 AND (p.status='failed' OR (p.status='ready' AND p.local_state='failed'))"
+            where = f"""b.active=1 AND b.removed=0 AND {INDEX_LIBRARY_SCOPE}
+                AND (p.status='failed' OR (p.status='ready' AND p.local_state='failed'))"""
             total = connection.execute("SELECT COUNT(*) FROM is_pages p JOIN books b ON b.id=p.book_id WHERE " + where).fetchone()[0]
             rows = [dict(row) for row in connection.execute("""SELECT b.*,p.page_key,p.page_index,p.source_version,
                 p.error,p.local_error,p.failure_code,p.actual_format,p.updated_at,COALESCE(NULLIF(m.title,''),b.title) AS display_title,
@@ -767,9 +800,10 @@ class ImageSearchManager:
             self.library.require_admin(connection)
             rows = []
             for book_id, key in keys:
-                row = connection.execute("""SELECT b.*,p.page_key,p.source_version,p.failure_code,p.actual_format,p.error,p.local_error
+                row = connection.execute(f"""SELECT b.*,p.page_key,p.source_version,p.failure_code,p.actual_format,p.error,p.local_error
                     FROM is_pages p JOIN books b ON b.id=p.book_id WHERE p.book_id=? AND p.page_key=?
-                    AND b.active=1 AND b.removed=0 AND (p.status='failed' OR (p.status='ready' AND p.local_state='failed'))""", (book_id, key)).fetchone()
+                    AND b.active=1 AND b.removed=0 AND {INDEX_LIBRARY_SCOPE}
+                    AND (p.status='failed' OR (p.status='ready' AND p.local_state='failed'))""", (book_id, key)).fetchone()
                 if row:
                     rows.append(dict(row))
         formats = {(row["id"], row["page_key"]): self._failure_format(row) for row in rows}
@@ -785,10 +819,10 @@ class ImageSearchManager:
                 if (row["failure_code"] == "unsupported_format" or actual in ("AVIF", "BMP", "GIF")
                         or "请选择 JPG、PNG 或 WebP 图片。" in (row["error"], row["local_error"])):
                     continue
-                cursor = connection.execute("""UPDATE is_pages SET status=CASE WHEN status='failed' THEN 'pending' ELSE status END,
+                cursor = connection.execute(f"""UPDATE is_pages SET status=CASE WHEN status='failed' THEN 'pending' ELSE status END,
                     local_state='pending',error='',local_error='',failure_code='',actual_format=''
                     WHERE book_id=? AND page_key=? AND source_version=? AND (status='failed' OR (status='ready' AND local_state='failed'))
-                    AND EXISTS(SELECT 1 FROM books b WHERE b.id=is_pages.book_id AND b.active=1 AND b.removed=0)""",
+                    AND EXISTS(SELECT 1 FROM books b WHERE b.id=is_pages.book_id AND b.active=1 AND b.removed=0 AND {INDEX_LIBRARY_SCOPE})""",
                     (row["id"], row["page_key"], row["source_version"]))
                 retried += cursor.rowcount
             if retried:
@@ -822,24 +856,34 @@ class ImageSearchManager:
             # Administrator maintenance counts include optimization-pending
             # works; ordinary availability is derived only from visible works.
             if actor["role"] == "admin":
-                rows = connection.execute("""SELECT p.status,p.local_state,COUNT(*) AS n FROM is_pages p JOIN books b ON b.id=p.book_id
-                    WHERE b.active=1 AND b.removed=0 GROUP BY p.status,p.local_state""")
+                rows = connection.execute(f"""SELECT p.status,p.local_state,COUNT(*) AS n FROM is_pages p JOIN books b ON b.id=p.book_id
+                    WHERE b.active=1 AND b.removed=0 AND {INDEX_LIBRARY_SCOPE} GROUP BY p.status,p.local_state""")
                 summary = self._counts(rows)
             access, arguments = self.library._access_sql(connection, visible=True)
             available = settings["enabled"] and connection.execute(f"""SELECT 1 FROM is_pages p JOIN books b ON b.id=p.book_id
-                WHERE p.status='ready' AND b.active=1 AND b.removed=0 AND {access} LIMIT 1""", arguments).fetchone()
-            indexing = bool(settings["enabled"] and not settings["paused"] and settings["reconcile_pending"])
+                WHERE p.status='ready' AND b.active=1 AND b.removed=0 AND {INDEX_LIBRARY_SCOPE} AND {access} LIMIT 1""", arguments).fetchone()
+            working = self._working(settings)
+            indexing = bool(settings["enabled"] and not settings["paused"] and settings["reconcile_pending"]
+                            and settings["library_ids"] != "[]")
             if settings["enabled"] and not settings["paused"] and not indexing:
                 # Ordinary callers only need a yes/no answer, never catalogue
                 # counts. Stop on the first authorized pending/running page.
                 indexing = bool(connection.execute(f"""SELECT 1 FROM is_pages p JOIN books b ON b.id=p.book_id
-                    WHERE b.active=1 AND b.removed=0 AND {access}
+                    WHERE b.active=1 AND b.removed=0 AND {INDEX_LIBRARY_SCOPE} AND {access}
                     AND (p.status IN ('pending','running')
                          OR (p.status='ready' AND p.local_state IN ('pending','running'))) LIMIT 1""", arguments).fetchone())
             result = {"enabled": bool(settings["enabled"]), "available": bool(settings["enabled"] and available),
-                      "indexing": indexing}
+                      "indexing": indexing, "working": working}
             if actor["role"] == "admin":
-                result.update(paused=bool(settings["paused"]), summary=summary,
+                libraries = [dict(row) for row in connection.execute("""SELECT id,name,media_type FROM media_libraries
+                    ORDER BY display_order IS NULL,display_order,name COLLATE NOCASE,id""")]
+                library_ids = settings["library_ids"]
+                if library_ids is not None:
+                    existing = {item["id"] for item in libraries}
+                    library_ids = [item for item in json.loads(library_ids) if item in existing]
+                indexing = indexing or working or bool(settings["enabled"] and not settings["paused"] and summary["pending"])
+                result.update(indexing=indexing, library_ids=library_ids, libraries=libraries,
+                              paused=bool(settings["paused"]), summary=summary,
                               progress={"done": summary["indexed"] + summary["failed"], "total": summary["total"]},
                               revision=settings["revision"], error=settings["error"],
                               activity=self._activity_snapshot(settings, summary))
@@ -867,7 +911,7 @@ class ImageSearchManager:
             for book, index, key, version, error in checked:
                 if book["id"] not in current_books:
                     current_books[book["id"]] = connection.execute(
-                        "SELECT signature FROM books WHERE id=? AND active=1 AND removed=0",
+                        f"SELECT signature FROM books b WHERE id=? AND active=1 AND removed=0 AND {INDEX_LIBRARY_SCOPE}",
                         (book["id"],)).fetchone()
                 current_book = current_books[book["id"]]
                 if not current_book or current_book["signature"] != book["signature"]:
@@ -900,7 +944,7 @@ class ImageSearchManager:
             current_keys = {}
             for book_id, page_key in obsolete:
                 if book_id not in current_keys:
-                    book = connection.execute("SELECT pages FROM books WHERE id=? AND active=1 AND removed=0",
+                    book = connection.execute(f"SELECT pages FROM books b WHERE id=? AND active=1 AND removed=0 AND {INDEX_LIBRARY_SCOPE}",
                                               (book_id,)).fetchone()
                     current_keys[book_id] = set(json.loads(book["pages"])) if book else set()
                 # The manifest may have changed after cleanup candidates were
@@ -921,11 +965,13 @@ class ImageSearchManager:
                 # Clear first so a concurrent scan can request another pass
                 # without its request being lost when this one completes.
                 connection.execute("UPDATE is_settings SET reconcile_pending=0 WHERE generation=?", (generation,))
-                books = [dict(row) for row in connection.execute("""SELECT id,source_root,path,format,pages,signature
-                FROM books WHERE active=1 AND removed=0 AND format NOT IN ('pdf','epub','rar') ORDER BY id""")]
+                books = [dict(row) for row in connection.execute(f"""SELECT id,source_root,path,format,pages,signature
+                FROM books b WHERE active=1 AND removed=0 AND format NOT IN ('pdf','epub','rar')
+                AND {INDEX_LIBRARY_SCOPE} ORDER BY id""")]
             total = sum(len(json.loads(book["pages"])) for book in books)
             done = 0
-            self._set_activity("reconciling", generation, done=done, total=total)
+            if total:
+                self._set_activity("reconciling", generation, done=done, total=total)
             checked = []
             for book in books:
                 for index, key in enumerate(json.loads(book["pages"])):
@@ -950,7 +996,8 @@ class ImageSearchManager:
             if not self._current(generation, connection):
                 return
             live = {row["id"]: set(json.loads(row["pages"])) for row in connection.execute(
-                "SELECT id,pages FROM books WHERE active=1 AND removed=0 AND format NOT IN ('pdf','epub','rar')")}
+                f"""SELECT id,pages FROM books b WHERE active=1 AND removed=0
+                AND format NOT IN ('pdf','epub','rar') AND {INDEX_LIBRARY_SCOPE}""")}
             obsolete = [(row["book_id"], row["page_key"]) for row in connection.execute(
                 "SELECT book_id,page_key FROM is_pages") if row["page_key"] not in live.get(row["book_id"], set())]
             for start in range(0, len(obsolete), CATALOGUE_BATCH_SIZE):
@@ -991,8 +1038,8 @@ class ImageSearchManager:
                 return True
             self._index_turn_due = None
             with self.lock, closing(self.library.connect()) as connection:
-                job = connection.execute("""SELECT b.*,p.page_key,p.page_index,p.source_version,p.status AS index_status FROM is_pages p JOIN books b ON b.id=p.book_id
-                    WHERE b.active=1 AND b.removed=0 AND (p.status='pending' OR (p.status='ready' AND p.local_state='pending'))
+                job = connection.execute(f"""SELECT b.*,p.page_key,p.page_index,p.source_version,p.status AS index_status FROM is_pages p JOIN books b ON b.id=p.book_id
+                    WHERE b.active=1 AND b.removed=0 AND {INDEX_LIBRARY_SCOPE} AND (p.status='pending' OR (p.status='ready' AND p.local_state='pending'))
                     ORDER BY CASE p.status WHEN 'pending' THEN 0 ELSE 1 END,b.id,p.page_index LIMIT 1""").fetchone()
                 if not job:
                     self._stop_index_worker()
@@ -1008,9 +1055,9 @@ class ImageSearchManager:
                     return True
                 with self.lock, closing(self.library.connect()) as connection, connection:
                     connection.execute("BEGIN IMMEDIATE")
-                    row = connection.execute("""SELECT p.status,p.local_state,p.source_version,b.signature FROM is_pages p JOIN books b ON b.id=p.book_id
-                        WHERE p.book_id=? AND p.page_key=? AND b.active=1 AND b.removed=0""", (job["id"], job["page_key"])).fetchone()
-                    if (not self._current(settings["generation"]) or not row or row["status"] != job["index_status"]
+                    row = connection.execute(f"""SELECT p.status,p.local_state,p.source_version,b.signature FROM is_pages p JOIN books b ON b.id=p.book_id
+                        WHERE p.book_id=? AND p.page_key=? AND b.active=1 AND b.removed=0 AND {INDEX_LIBRARY_SCOPE}""", (job["id"], job["page_key"])).fetchone()
+                    if (not self._current(settings["generation"], connection) or not row or row["status"] != job["index_status"]
                             or (row["status"] == "ready" and row["local_state"] != "pending")
                             or row["source_version"] != job["source_version"] or row["signature"] != job["signature"]):
                         return True
@@ -1055,10 +1102,10 @@ class ImageSearchManager:
         return True
 
     def _job_current(self, connection, job, generation):
-        if not self._current(generation):
+        if not self._current(generation, connection):
             return False
-        row = connection.execute("""SELECT b.pages,b.signature,p.source_version,p.status,p.local_state FROM is_pages p JOIN books b ON b.id=p.book_id
-            WHERE p.book_id=? AND p.page_key=? AND b.active=1 AND b.removed=0""", (job["id"], job["page_key"])).fetchone()
+        row = connection.execute(f"""SELECT b.pages,b.signature,p.source_version,p.status,p.local_state FROM is_pages p JOIN books b ON b.id=p.book_id
+            WHERE p.book_id=? AND p.page_key=? AND b.active=1 AND b.removed=0 AND {INDEX_LIBRARY_SCOPE}""", (job["id"], job["page_key"])).fetchone()
         return bool(row and row["signature"] == job["signature"] and row["source_version"] == job["source_version"]
                     and row["status"] in ("running", "ready") and row["local_state"] == "running" and job["page_key"] in json.loads(row["pages"]))
 
@@ -1443,7 +1490,7 @@ class ImageSearchManager:
         rows = connection.execute(f"""SELECT p.book_id,p.page_key,p.page_index,p.source_version,p.local_sketch,
             b.source_root,b.path,b.format,b.pages FROM is_pages p JOIN books b ON b.id=p.book_id
             WHERE p.status='ready' AND p.algorithm=? AND p.local_version=? AND p.local_state='ready'
-            AND b.active=1 AND b.removed=0 AND {access}""", [ALGORITHM_VERSION, LOCAL_VERSION, *arguments])
+            AND b.active=1 AND b.removed=0 AND {INDEX_LIBRARY_SCOPE} AND {access}""", [ALGORITHM_VERSION, LOCAL_VERSION, *arguments])
         heap = []
         for sequence, row in enumerate(rows):
             if sequence % 256 == 0:
@@ -1463,7 +1510,7 @@ class ImageSearchManager:
             # Permissions/source metadata can change during a large sketch scan.
             current = connection.execute(f"""SELECT p.local_features FROM is_pages p JOIN books b ON b.id=p.book_id
                 WHERE p.book_id=? AND p.page_key=? AND p.source_version=? AND p.status='ready'
-                AND p.local_version=? AND p.local_state='ready' AND b.active=1 AND b.removed=0 AND {access}""",
+                AND p.local_version=? AND p.local_state='ready' AND b.active=1 AND b.removed=0 AND {INDEX_LIBRARY_SCOPE} AND {access}""",
                 [row["book_id"], row["page_key"], row["source_version"], LOCAL_VERSION, *arguments]).fetchone()
             if current and local_features.validate(current["local_features"]):
                 row.pop("local_sketch")
@@ -1532,7 +1579,7 @@ class ImageSearchManager:
                 p.local_state,length(p.local_features) AS local_size,p.width,p.height,
                 b.source_root,b.path,b.format,b.pages FROM is_pages p JOIN books b ON b.id=p.book_id
                 JOIN media_libraries l ON l.id=b.library_id WHERE p.status='ready' AND p.algorithm=?
-                AND b.active=1 AND b.removed=0 AND {access}""", [ALGORITHM_VERSION, *arguments])
+                AND b.active=1 AND b.removed=0 AND {INDEX_LIBRARY_SCOPE} AND {access}""", [ALGORITHM_VERSION, *arguments])
             matches = []
             stale = False
             for sequence, row in enumerate(rows):
@@ -1576,7 +1623,8 @@ class ImageSearchManager:
                 batch = ids[offset:offset + 500]
                 marks = ",".join("?" for _ in batch)
                 visible_ids.update(row[0] for row in connection.execute(
-                    f"SELECT b.id FROM books b WHERE b.id IN ({marks}) AND b.active=1 AND b.removed=0 AND {access}", [*batch, *arguments]))
+                    f"""SELECT b.id FROM books b WHERE b.id IN ({marks}) AND b.active=1 AND b.removed=0
+                    AND {INDEX_LIBRARY_SCOPE} AND {access}""", [*batch, *arguments]))
             matches = [item for item in matches if item["book_id"] in visible_ids]
         matches.sort(key=lambda item: (item["match"] != "exact", item["distance"], item["book_id"], item["page"]))
         status = self.snapshot()
@@ -1590,7 +1638,7 @@ class ImageSearchManager:
             access, arguments = self.library._access_sql(connection, visible=True)
             row = connection.execute(f"""SELECT p.*,b.source_root,b.path,b.format,b.pages FROM is_pages p JOIN books b ON b.id=p.book_id
                 JOIN media_libraries l ON l.id=b.library_id WHERE p.book_id=? AND p.page_index=? AND p.status='ready'
-                AND p.algorithm=? AND b.active=1 AND b.removed=0 AND {access}""", [book_id, page, ALGORITHM_VERSION, *arguments]).fetchone()
+                AND p.algorithm=? AND b.active=1 AND b.removed=0 AND {INDEX_LIBRARY_SCOPE} AND {access}""", [book_id, page, ALGORITHM_VERSION, *arguments]).fetchone()
             if not self._settings(connection)["enabled"] or not row or not row["preview"]:
                 raise self._error("图片预览不存在。", 404)
             if not self._fresh(row):
@@ -1599,7 +1647,11 @@ class ImageSearchManager:
             # Recheck after filesystem inspection; permissions can change while
             # a network filesystem is slow.
             access, arguments = self.library._access_sql(connection, visible=True)
-            if not connection.execute(f"SELECT 1 FROM books b WHERE b.id=? AND b.active=1 AND b.removed=0 AND {access}", [book_id, *arguments]).fetchone():
+            if not connection.execute(f"""SELECT 1 FROM is_pages p JOIN books b ON b.id=p.book_id
+                    JOIN is_settings s ON s.id=1 AND s.enabled=1
+                    WHERE b.id=? AND p.page_key=? AND p.source_version=? AND p.status='ready'
+                    AND b.active=1 AND b.removed=0 AND {INDEX_LIBRARY_SCOPE} AND {access}""",
+                    [book_id, row["page_key"], row["source_version"], *arguments]).fetchone():
                 raise self._error("图片预览不存在。", 404)
             data = bytes(row["preview"])
             return data, "image/jpeg", '"' + hashlib.sha256(data).hexdigest() + '"'

@@ -61,7 +61,7 @@
   function bookDisplaySignature(book) {
     return JSON.stringify([book.id, book.title, book.library_id, book.library_name, book.status, book.matched_count, book.success_count, book.failed_count, book.pending_count, book.running_count, book.output_count, book.actual_bytes, book.output_path, book.error, book.needs_retranscode, book.published, book.reasons, book.page_count]);
   }
-  function create({ host, api, post, toast, onCatalogChange = () => {}, onTabChange = () => {}, onFiltersChange = () => {}, onRender = () => {} }) {
+  function create({ host, api, post, toast, mountFilter, onCatalogChange = () => {}, onTabChange = () => {}, onFiltersChange = () => {}, onRender = () => {} }) {
     const document = host.ownerDocument;
     const state = { active: false, tab: 'tasks', snapshot: null, loading: false, manualLoading: false, busy: false, selected: new Set(), filter: '', library: '', query: '', dirty: false, draft: null, generation: 0, timer: null, request: null, error: '', signature: '', published: '', rows: new Map(), librarySignature: '' };
     const controls = {};
@@ -105,14 +105,24 @@
     const tasks = el('section', 'transcode-tasks'); tasks.id = 'transcode-panel-tasks'; tasks.setAttribute('role', 'tabpanel'); tasks.setAttribute('aria-labelledby', 'transcode-tab-tasks');
     const filterBar = el('div', 'transcode-filter-bar');
     controls.query = el('input'); controls.query.type = 'search'; controls.query.placeholder = '搜索作品'; controls.query.maxLength = 200;
-    controls.status = el('select'); controls.status.append(option('', '全部状态'), ...Object.entries(statusLabels).map(([value, text]) => option(value, text)));
-    controls.library = el('select'); controls.library.append(option('', '全部媒体库'));
+    const statusHost = el('div', 'transcode-filter transcode-select-host');
+    const libraryHost = el('div', 'transcode-filter transcode-select-host');
+    const statusOptions = [['', '全部状态'], ...Object.entries(statusLabels)];
+    const allLibraries = [['', '全部媒体库']];
+    let libraryOptions = allLibraries;
+    const statusFilter = mountFilter(statusHost, '筛选状态', value => {
+      state.filter = value;
+      renderBooks();
+      onFiltersChange(getFilters());
+    });
+    const libraryFilter = mountFilter(libraryHost, '筛选媒体库', value => {
+      state.library = value;
+      renderBooks();
+      onFiltersChange(getFilters());
+    });
     controls.refresh = button('刷新', 'button button-secondary', () => load(true));
-    const statusFilter = label('筛选状态', controls.status);
-    filterBar.append(label('搜索作品', controls.query), statusFilter, label('筛选媒体库', controls.library), controls.refresh);
+    filterBar.append(label('搜索作品', controls.query), statusHost, libraryHost, controls.refresh);
     controls.query.addEventListener('input', () => { state.query = controls.query.value.slice(0, 200); renderBooks(); onFiltersChange(getFilters()); });
-    controls.status.addEventListener('change', () => { state.filter = controls.status.value; renderBooks(); onFiltersChange(getFilters()); });
-    controls.library.addEventListener('change', () => { state.library = controls.library.value; renderBooks(); onFiltersChange(getFilters()); });
     const toolbar = el('div', 'transcode-selection-tools');
     const selectLabel = el('label', 'transcode-select-all'); controls.all = el('input'); controls.all.type = 'checkbox'; controls.all.setAttribute('aria-label', '选择当前筛选的全部作品'); selectLabel.append(controls.all, el('span', '', '全选')); controls.count = el('span', 'transcode-selected-count', '未选择作品');
     controls.all.addEventListener('change', () => { filtered().forEach(book => controls.all.checked ? state.selected.add(String(book.id)) : state.selected.delete(String(book.id))); renderBooks(); });
@@ -279,14 +289,23 @@
     function renderLibraries() {
       const libraries = new Map(currentBooks().map(book => [String(book.library_id), book.library_name || '媒体库']));
       if (state.snapshot && state.library && !libraries.has(state.library)) state.library = '';
-      controls.library.value = state.library;
       const signature = JSON.stringify(Array.from(libraries).sort((a, b) => a[0].localeCompare(b[0])));
       if (signature === state.librarySignature) return;
       state.librarySignature = signature;
-      controls.library.replaceChildren(option('', '全部媒体库'), ...Array.from(libraries, ([id, name]) => option(id, name)));
-      if (!libraries.has(state.library)) state.library = ''; controls.library.value = state.library;
+      libraryOptions = [...allLibraries, ...libraries];
+    }
+    function syncFilters() {
+      if (state.active && state.tab !== 'rules') {
+        if (state.tab === 'ignored') statusFilter.hide();
+        else statusFilter.update(statusOptions, state.filter);
+        libraryFilter.update(libraryOptions, state.library);
+      } else {
+        statusFilter.hide();
+        libraryFilter.hide();
+      }
     }
     function renderBooks() {
+      syncFilters();
       const focus = document.activeElement?.dataset.transcodeId; const open = new Set(Array.from(controls.list.querySelectorAll('details[open]')).map(item => item.dataset.bookId));
       const books = filtered();
       const rows = books.map(book => {
@@ -328,7 +347,7 @@
     function restoreFilters(value) {
       const filters = normalizeFilters(value);
       state.query = filters.query; state.filter = filters.status; state.library = filters.library;
-      controls.query.value = state.query; controls.status.value = state.filter; controls.library.value = state.library;
+      controls.query.value = state.query;
       if (state.snapshot) renderLibraries();
       renderBooks();
       return getFilters();
@@ -374,12 +393,19 @@
       const ignored = state.tab === 'ignored';
       tasks.hidden = state.tab === 'rules'; rules.hidden = !tasks.hidden;
       tasks.setAttribute('aria-labelledby', ignored ? 'transcode-tab-ignored' : 'transcode-tab-tasks');
-      controls.summary.hidden = storageTools.hidden = statusFilter.hidden = ignored;
+      controls.summary.hidden = storageTools.hidden = statusHost.hidden = ignored;
       controls.list.setAttribute('aria-label', ignored ? '忽略的作品' : '优化作品');
       Object.entries(tabButtons).forEach(([key, item]) => { const selected = key === state.tab; item.setAttribute('aria-selected', String(selected)); item.tabIndex = selected ? 0 : -1; });
       if (updateRoute) onTabChange(state.tab);
       if (previous !== state.tab && (previous === 'ignored' || ignored)) state.selected.clear();
-      if (previous !== state.tab && state.tab !== 'rules') { if (state.snapshot) renderLibraries(); renderBooks(); if (state.active) load(); }
+      if (previous !== state.tab) {
+        if (state.tab === 'rules') syncFilters();
+        else {
+          if (state.snapshot) renderLibraries();
+          renderBooks();
+          if (state.active) load();
+        }
+      }
       else scheduleLoad();
     }
     async function mutate(url, payload, success, { saveRules = false } = {}) {
@@ -429,9 +455,9 @@
     document.addEventListener?.('visibilitychange', () => { if (document.hidden) stopLoad(); else if (state.active && state.tab !== 'rules') load(); });
     fillRules(defaultRules); switchTab('tasks', false); renderBooks();
     return {
-      show(tab = 'tasks') { state.active = true; host.hidden = false; switchTab(tab, false); load(); },
-      hide() { state.active = false; host.hidden = true; stopLoad(); if (dialog.open && !state.busy) dialog.close(); if (previewDialog.open) previewDialog.close(); if (detailDialog.open) detailDialog.close(); },
-      reset() { state.generation += 1; state.active = false; stopLoad(); state.snapshot = null; state.loading = state.manualLoading = state.busy = state.dirty = false; state.draft = null; state.selected.clear(); state.rows.clear(); state.filter = state.library = state.query = state.signature = state.published = state.librarySignature = ''; controls.query.value = ''; controls.status.value = ''; controls.library.value = ''; if (dialog.open) dialog.close(); if (previewDialog.open) previewDialog.close(); if (detailDialog.open) detailDialog.close(); detailRequest += 1; setError(''); controls.retryLoad.hidden = controls.ignoredTab.hidden = ignoreUnavailable.hidden = true; fillRules(defaultRules); renderBooks(); host.hidden = true; },
+      show(tab = 'tasks') { state.active = true; host.hidden = false; switchTab(tab, false); syncFilters(); load(); },
+      hide() { state.active = false; host.hidden = true; statusFilter.hide(); libraryFilter.hide(); stopLoad(); if (dialog.open && !state.busy) dialog.close(); if (previewDialog.open) previewDialog.close(); if (detailDialog.open) detailDialog.close(); },
+      reset() { state.generation += 1; state.active = false; stopLoad(); state.snapshot = null; state.loading = state.manualLoading = state.busy = state.dirty = false; state.draft = null; state.selected.clear(); state.rows.clear(); state.filter = state.library = state.query = state.signature = state.published = state.librarySignature = ''; libraryOptions = allLibraries; controls.query.value = ''; if (dialog.open) dialog.close(); if (previewDialog.open) previewDialog.close(); if (detailDialog.open) detailDialog.close(); detailRequest += 1; setError(''); controls.retryLoad.hidden = controls.ignoredTab.hidden = ignoreUnavailable.hidden = true; fillRules(defaultRules); renderBooks(); host.hidden = true; },
       refresh: () => load(true), getFilters, restoreFilters, isLoaded: () => Boolean(state.snapshot)
     };
   }

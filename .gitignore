@@ -6,6 +6,7 @@ __pycache__/
 *.py[cod]
 .DS_Store
 work/
+node_modules/
 sumi-reader-nas.zip
 gravelle-reader-nas.zip
 dist/
