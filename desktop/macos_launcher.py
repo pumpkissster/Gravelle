@@ -20,6 +20,14 @@ BUNDLE_IDENTIFIER = "com.gravelle.launcher"
 _TEXT = {
     "title": ("Gravelle 启动器", "Gravelle Launcher"),
     "version": ("版本 {version}", "Version {version}"),
+    "reader": ("阅读器", "Reader"),
+    "advanced": ("高级设置", "Advanced Settings"),
+    "service_status": ("服务状态", "Service Status"),
+    "service_stopped": ("未启动", "Stopped"),
+    "service_running": ("运行中", "Running"),
+    "service_busy": ("处理中", "Working"),
+    "service_data": ("服务与数据", "Service & Data"),
+    "storage_hint": ("账户、封面与阅读记录保存在当前用户的资料目录。", "Accounts, covers and reading history are stored in your data folder."),
     "check_update": ("检查更新", "Check for Updates"),
     "download_update": ("下载更新", "Download Update"),
     "open_update": ("打开安装包", "Open Installer"),
@@ -38,7 +46,7 @@ _TEXT = {
     "https_port": ("HTTPS 端口", "HTTPS Port"),
     "share_port_hint": ("在网页网络设置中开启 HTTPS 或独立分享端口", "Enable HTTPS or the separate share port in web Network Settings"),
     "lan": ("允许局域网设备访问", "Allow access from the local network"),
-    "diagnose": ("检查连接", "Check Connection"),
+    "diagnose": ("检查目录与网络", "Check Folders & Network"),
     "ready": ("选择写真根文件夹，启动后在浏览器阅读。", "Choose your photo folders, then start reading in your browser."),
     "starting": ("正在启动阅读器…", "Starting the reader…"),
     "running": ("阅读器正在运行。可通过菜单栏恢复启动器。", "The reader is running. Reopen this window from the menu bar."),
@@ -90,7 +98,7 @@ def text(key: str, language="zh", **values) -> str:
 
 def window_size(visible_width: float, visible_height: float) -> tuple[float, float]:
     """AppKit uses logical points, so Retina scale must not be applied again."""
-    return min(720.0, max(1.0, visible_width - 40)), min(740.0, max(1.0, visible_height - 60))
+    return min(860.0, max(1.0, visible_width - 40)), min(660.0, max(1.0, visible_height - 60))
 
 
 def normalise_roots(values) -> tuple[str, ...]:
@@ -238,7 +246,9 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
         return A.NSColor.colorWithSRGBRed_green_blue_alpha_(
             int(value[1:3], 16) / 255, int(value[3:5], 16) / 255, int(value[5:7], 16) / 255, 1)
 
-    page, card, ink, muted, accent = map(colour, ("#f7f2f4", "#fefdfd", "#2c2b2b", "#786e74", "#ea5098"))
+    page, card, ink, muted, accent = map(colour, ("#faf9fa", "#ffffff", "#29252a", "#6d656d", "#ae3064"))
+    line, sidebar, inset, selected, selected_ink = map(
+        colour, ("#e9e4e8", "#f8f5f7", "#f7f5f7", "#f7e8ef", "#8c2853"))
 
     class GravelleFlippedView(A.NSView):
         def isFlipped(self):
@@ -250,6 +260,8 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
             self.busy, self.updating, self.quitting = False, False, False
             self.exit_started = False
             self.folder_controls = []
+            self.advanced = False
+            self.page_offsets = {False: 0.0, True: 0.0}
             screen = A.NSScreen.mainScreen().visibleFrame().size
             width, height = window_size(screen.width, screen.height)
             style = (A.NSWindowStyleMaskTitled | A.NSWindowStyleMaskClosable
@@ -257,7 +269,7 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
             self.window = A.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
                 A.NSMakeRect(0, 0, width, height), style, A.NSBackingStoreBuffered, False)
             self.window.setTitle_(tr("title"))
-            self.window.setMinSize_(A.NSMakeSize(min(600, width), min(470, height)))
+            self.window.setContentMinSize_(A.NSMakeSize(min(610, width), min(420, height)))
             self.window.setReleasedWhenClosed_(False)
             self.window.setDelegate_(self)
             self.window.setAppearance_(A.NSAppearance.appearanceNamed_(A.NSAppearanceNameAqua))
@@ -265,27 +277,44 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
             self.root = GravelleFlippedView.alloc().initWithFrame_(A.NSMakeRect(0, 0, width, height))
             self.root.setAutoresizingMask_(A.NSViewWidthSizable | A.NSViewHeightSizable)
             self.window.setContentView_(self.root)
-            self.brand = A.NSImageView.alloc().initWithFrame_(A.NSMakeRect(0, 0, 216, 58))
+            self.sidebar = self.surface(self.root, sidebar)
+            self.sidebar_line = self.surface(self.sidebar, line)
+            self.brand = A.NSImageView.alloc().initWithFrame_(A.NSMakeRect(0, 0, 140, 38))
             logo = A.NSImage.alloc().initWithContentsOfFile_(str(resource_root() / "desktop" / "assets" / "gravelle-wordmark.png"))
             if logo is not None:
                 self.brand.setImage_(logo)
             self.brand.setImageScaling_(A.NSImageScaleProportionallyUpOrDown)
             self.brand.setAccessibilityLabel_("Gravelle")
-            self.root.addSubview_(self.brand)
-            self.version = self.label(tr("version", version=version), self.root, size=13, color=muted)
-            self.update_button = self.button(tr("check_update"), "update:", self.root)
-            self.update_status = self.label(tr("checking"), self.root, size=12, color=muted, wrap=True)
-            self.scroll = A.NSScrollView.alloc().initWithFrame_(A.NSMakeRect(0, 100, width, height - 260))
+            self.sidebar.addSubview_(self.brand)
+            self.version = self.label(tr("version", version=version), self.sidebar, size=12, color=muted)
+            self.home_nav = self.navigation_button(tr("reader"), "showReaderSettings:", "book")
+            self.advanced_nav = self.navigation_button(tr("advanced"), "showAdvancedSettings:", "gearshape")
+            self.update_button = self.button(tr("check_update"), "update:", self.sidebar)
+            self.scroll = A.NSScrollView.alloc().initWithFrame_(A.NSMakeRect(0, 0, width, height))
             self.scroll.setHasVerticalScroller_(True)
             self.scroll.setAutohidesScrollers_(True)
             self.scroll.setDrawsBackground_(False)
-            self.document = GravelleFlippedView.alloc().initWithFrame_(A.NSMakeRect(0, 0, width - 56, 400))
+            self.document = GravelleFlippedView.alloc().initWithFrame_(A.NSMakeRect(0, 0, width, 400))
             self.scroll.setDocumentView_(self.document)
             self.root.addSubview_(self.scroll)
-            self.roots_card = self.panel(self.document)
+            self.home = self.surface(self.document, page)
+            self.advanced_page = self.surface(self.document, page)
+            self.page_heading = self.label(tr("reader"), self.home, size=24, bold=True)
+            self.advanced_heading = self.label(tr("advanced"), self.advanced_page, size=24, bold=True)
+            self.service_card = self.panel(self.home)
+            self.service_heading = self.label(tr("service_status"), self.service_card, size=16, bold=True)
+            self.service_badge = self.surface(self.service_card, selected, radius=11)
+            self.service_status = self.label(tr("service_stopped"), self.service_badge, size=12, color=selected_ink)
+            self.service_status.setAlignment_(A.NSTextAlignmentCenter)
+            self.address_label = self.label(tr("address"), self.service_card, size=12, color=muted)
+            self.address_surface = self.surface(self.service_card, inset, radius=8, border=True)
+            self.address = self.label(
+                f"http://127.0.0.1:{state.port}/", self.address_surface, size=13, wrap=True)
+            self.address.setSelectable_(True)
+            self.roots_card = self.panel(self.home)
             self.roots_heading = self.label(tr("roots"), self.roots_card, bold=True)
             self.add_button = self.button(tr("add"), "addFolder:", self.roots_card)
-            self.network_card = self.panel(self.document)
+            self.network_card = self.panel(self.advanced_page)
             self.network_heading = self.label(tr("network"), self.network_card, bold=True)
             self.port_label = self.label(tr("port"), self.network_card)
             self.port = A.NSTextField.alloc().initWithFrame_(A.NSMakeRect(0, 0, 125, 34))
@@ -319,26 +348,29 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
             self.https_port_height = self.https_port.frame().size.height
             self.https_port.setAccessibilityLabel_(tr("https_port"))
             self.network_card.addSubview_(self.https_port)
-            self.share_port_hint = self.label(tr("share_port_hint"), self.network_card, size=12, color=muted)
+            self.share_port_hint = self.label(tr("share_port_hint"), self.network_card, size=12, color=muted, wrap=True)
             self.lan = A.NSButton.checkboxWithTitle_target_action_(tr("lan"), self, "changeLAN:")
             self.lan.setFont_(A.NSFont.systemFontOfSize_(13))
             self.lan.setState_(A.NSControlStateValueOn if state.lan_enabled else A.NSControlStateValueOff)
             self.network_card.addSubview_(self.lan)
             self.diagnose_button = self.button(tr("diagnose"), "diagnose:", self.network_card)
-            self.address_label = self.label(tr("address"), self.network_card, size=12, color=muted)
-            self.address = self.label(LauncherConfig(port=int(state.port), share_port=int(state.share_port), https_port=int(state.https_port), library_paths=state.roots).local_url,
-                                      self.network_card, size=13, wrap=True)
-            self.address.setSelectable_(True)
-            self.log_button = self.button(tr("logs"), "showLogs:", self.document)
-            self.data_button = self.button(tr("data"), "showData:", self.document)
-            self.reset_button = self.button(tr("reset"), "resetPassword:", self.document)
-            self.reset_entry_button = self.button(tr("reset_entry"), "resetSecurityEntry:", self.document)
-            self.status = self.label(state.configuration_error or tr("ready"), self.root, size=13, color=muted, wrap=True)
-            self.start_button = self.button(tr("start"), "startReader:", self.root, primary=True)
-            self.stop_button = self.button(tr("stop"), "stopReader:", self.root)
-            self.browser_button = self.button(tr("browser"), "openBrowser:", self.root)
+            self.data_card = self.panel(self.advanced_page)
+            self.data_heading = self.label(tr("service_data"), self.data_card, size=16, bold=True)
+            self.storage_hint = self.label(tr("storage_hint"), self.data_card, size=12, color=muted, wrap=True)
+            self.log_button = self.button(tr("logs"), "showLogs:", self.data_card)
+            self.data_button = self.button(tr("data"), "showData:", self.data_card)
+            self.reset_button = self.button(tr("reset"), "resetPassword:", self.data_card)
+            self.reset_entry_button = self.button(tr("reset_entry"), "resetSecurityEntry:", self.data_card)
+            self.footer = self.surface(self.root, card)
+            self.footer_line = self.surface(self.footer, line)
+            self.status = self.label(state.configuration_error or tr("ready"), self.footer, size=13, color=muted, wrap=True)
+            self.update_status = self.label(tr("checking"), self.footer, size=12, color=muted, wrap=True)
+            self.start_button = self.button(tr("start"), "startReader:", self.footer, primary=True)
+            self.stop_button = self.button(tr("stop"), "stopReader:", self.footer)
+            self.browser_button = self.button(tr("browser"), "openBrowser:", self.footer)
             self.build_menus()
             self.render_folders()
+            self.show_page(False)
             self.set_busy(False)
             self.window.center()
             self.window.makeKeyAndOrderFront_(None)
@@ -367,7 +399,8 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
 
         @objc.python_method
         def label(self, value, parent, size=14, bold=False, color=None, wrap=False):
-            field = A.NSTextField.labelWithString_(value)
+            field = (A.NSTextField.wrappingLabelWithString_(value) if wrap
+                     else A.NSTextField.labelWithString_(value))
             field.setFont_(A.NSFont.boldSystemFontOfSize_(size) if bold else A.NSFont.systemFontOfSize_(size))
             field.setTextColor_(color or ink)
             if wrap:
@@ -377,28 +410,78 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
             return field
 
         @objc.python_method
-        def panel(self, parent):
+        def surface(self, parent, background, *, radius=0, border=False):
             panel = GravelleFlippedView.alloc().initWithFrame_(A.NSMakeRect(0, 0, 1, 1))
             panel.setWantsLayer_(True)
-            panel.layer().setBackgroundColor_(card.CGColor())
-            panel.layer().setCornerRadius_(16)
-            panel.layer().setBorderWidth_(1)
-            panel.layer().setBorderColor_(colour("#e9dfe5").CGColor())
+            panel.layer().setBackgroundColor_(background.CGColor())
+            panel.layer().setCornerRadius_(radius)
+            if border:
+                panel.layer().setBorderWidth_(1)
+                panel.layer().setBorderColor_(line.CGColor())
             parent.addSubview_(panel)
             return panel
+
+        @objc.python_method
+        def panel(self, parent):
+            return self.surface(parent, card, radius=12, border=True)
 
         @objc.python_method
         def button(self, title, action, parent, primary=False):
             button = A.NSButton.buttonWithTitle_target_action_(title, self, action)
             button.setBezelStyle_(A.NSBezelStyleRounded)
             button.setFont_(A.NSFont.boldSystemFontOfSize_(14) if primary else A.NSFont.systemFontOfSize_(13))
-            button.setBezelColor_(accent if primary else colour("#efdfE8"))
+            button.setBezelColor_(accent if primary else card)
             button.setContentTintColor_(A.NSColor.whiteColor() if primary else ink)
             button.setAccessibilityLabel_(title)
             if primary:
                 button.setKeyEquivalent_("\r")
             parent.addSubview_(button)
             return button
+
+        @objc.python_method
+        def navigation_button(self, title, action, symbol):
+            button = A.NSButton.buttonWithTitle_target_action_(title, self, action)
+            button.setBordered_(False)
+            button.setAlignment_(A.NSTextAlignmentLeft)
+            button.setWantsLayer_(True)
+            button.layer().setCornerRadius_(8)
+            button.setAccessibilityLabel_(title)
+            icon = A.NSImage.imageWithSystemSymbolName_accessibilityDescription_(symbol, None)
+            if icon is not None:
+                button.setImage_(icon)
+                button.setImagePosition_(A.NSImageLeft)
+            self.sidebar.addSubview_(button)
+            return button
+
+        @objc.python_method
+        def show_page(self, advanced):
+            clip = self.scroll.contentView()
+            self.page_offsets[self.advanced] = clip.bounds().origin.y
+            self.advanced = advanced
+            self.home.setHidden_(advanced)
+            self.advanced_page.setHidden_(not advanced)
+            for button, active in ((self.home_nav, not advanced), (self.advanced_nav, advanced)):
+                button.layer().setBackgroundColor_((selected if active else sidebar).CGColor())
+                button.setContentTintColor_(selected_ink if active else muted)
+                font = A.NSFont.boldSystemFontOfSize_(13) if active else A.NSFont.systemFontOfSize_(13)
+                title = F.NSAttributedString.alloc().initWithString_attributes_(
+                    button.accessibilityLabel(), {A.NSFontAttributeName: font,
+                                                  A.NSForegroundColorAttributeName: selected_ink if active else ink})
+                button.setAttributedTitle_(title)
+            self.layout_window()
+            max_offset = max(0, self.document.frame().size.height - clip.bounds().size.height)
+            clip.scrollToPoint_(A.NSMakePoint(0, min(self.page_offsets[advanced], max_offset)))
+            self.scroll.reflectScrolledClipView_(clip)
+
+        def showReaderSettings_(self, sender):
+            if self.advanced:
+                self.window.makeFirstResponder_(sender)
+                self.show_page(False)
+
+        def showAdvancedSettings_(self, sender):
+            if not self.advanced:
+                self.window.makeFirstResponder_(sender)
+                self.show_page(True)
 
         @objc.python_method
         def menu_item(self, menu, title, action, key=""):
@@ -445,11 +528,13 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
 
         @objc.python_method
         def render_folders(self):
-            for item in self.folder_controls:
-                item.removeFromSuperview()
+            for well, _, choose, remove in self.folder_controls:
+                for item in (well, choose, remove):
+                    item.removeFromSuperview()
             self.folder_controls = []
             for index, value in enumerate(state.roots):
-                field = self.label(value, self.roots_card, size=13)
+                well = self.surface(self.roots_card, inset, radius=8, border=True)
+                field = self.label(value, well, size=13)
                 field.setSelectable_(True)
                 field.setLineBreakMode_(A.NSLineBreakByTruncatingMiddle)
                 field.setToolTip_(value)
@@ -457,7 +542,7 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
                 choose.setTag_(index)
                 remove = self.button(tr("remove"), "removeFolder:", self.roots_card)
                 remove.setTag_(index)
-                self.folder_controls.extend((field, choose, remove))
+                self.folder_controls.append((well, field, choose, remove))
             self.layout_window()
             self.set_busy(self.busy)
 
@@ -466,56 +551,123 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
             widget.setFrame_(A.NSMakeRect(x, y, max(1, width), max(1, height)))
 
         @objc.python_method
+        def label_height(self, widget, width):
+            bounds = A.NSMakeRect(0, 0, max(1, width), 10000)
+            return max(18, int(widget.cell().cellSizeForBounds_(bounds).height + 2))
+
+        @objc.python_method
+        def button_width(self, widget, minimum=60):
+            return max(minimum, int(widget.intrinsicContentSize().width + 12))
+
+        @objc.python_method
         def layout_window(self):
             width, height = self.root.bounds().size
-            self.frame(self.brand, 28, 12, 206, 51)
-            self.frame(self.version, 252, 27, 112, 22)
-            self.frame(self.update_button, width - 202, 19, 174, 40)
-            self.frame(self.update_status, 28, 69, width - 56, 34)
-            footer = 143
-            self.frame(self.scroll, 28, 107, width - 56, height - footer - 107)
-            content_width = max(1, self.scroll.contentSize().width)
-            roots_height = 76 + len(state.roots) * 46
-            document_height = roots_height + 16 + 352 + 112
-            self.document.setFrameSize_(A.NSMakeSize(content_width, document_height))
-            self.frame(self.roots_card, 0, 0, content_width, roots_height)
-            self.frame(self.roots_heading, 20, 24, content_width - 204, 26)
-            self.frame(self.add_button, content_width - 170, 17, 150, 40)
-            for index in range(len(state.roots)):
-                field, choose, remove = self.folder_controls[index * 3:index * 3 + 3]
-                y = 64 + index * 46
-                self.frame(field, 20, y + 8, content_width - 204, 24)
-                self.frame(choose, content_width - 176, y, 76, 38)
-                self.frame(remove, content_width - 96, y, 76, 38)
-            y = roots_height + 16
-            self.frame(self.network_card, 0, y, content_width, 352)
-            self.frame(self.network_heading, 20, 20, content_width - 40, 26)
-            self.frame(self.port_label, 20, 65, 108, 24)
-            self.frame(self.port, 128, 76 - self.port_height / 2, 116, self.port_height)
-            self.frame(self.diagnose_button, content_width - 170, 56, 150, 40)
-            self.frame(self.share_port_label, 20, 107, 108, 24)
-            self.frame(self.share_port, 128, 118 - self.share_port_height / 2, 116, self.share_port_height)
-            self.frame(self.https_port_label, 20, 149, 108, 24)
-            self.frame(self.https_port, 128, 160 - self.https_port_height / 2, 116, self.https_port_height)
-            self.frame(self.share_port_hint, 20, 187, content_width - 40, 20)
-            self.frame(self.lan, 20, 224, content_width - 40, 28)
-            self.frame(self.address_label, 20, 267, content_width - 40, 20)
-            self.frame(self.address, 20, 294, content_width - 40, 48)
-            self.frame(self.log_button, 0, y + 369, 115, 38)
-            self.frame(self.data_button, 123, y + 369, 115, 38)
-            self.frame(self.reset_button, content_width - 228, y + 369, 228, 38)
-            self.frame(self.reset_entry_button, content_width - 228, y + 415, 228, 38)
-            self.frame(self.status, 30, height - 127, width - 60, 49)
-            self.frame(self.start_button, 28, height - 67, width - 316, 43)
-            self.frame(self.stop_button, width - 280, height - 67, 100, 43)
-            self.frame(self.browser_button, width - 172, height - 67, 144, 43)
+            rail = min(164, max(130, int(width * .27)))
+            footer_height = 118
+            self.frame(self.sidebar, 0, 0, rail, height)
+            self.frame(self.sidebar_line, rail - 1, 0, 1, height)
+            self.frame(self.brand, 16, 16, rail - 32, 40)
+            self.frame(self.version, 17, 60, rail - 32, 18)
+            self.frame(self.home_nav, 14, 100, rail - 28, 36)
+            self.frame(self.advanced_nav, 14, 142, rail - 28, 36)
+            self.frame(self.update_button, 13, height - 49, rail - 26, 36)
+            self.frame(self.scroll, rail, 0, width - rail, height - footer_height)
+            content_width = self.scroll.contentSize().width
+            card_width = content_width - 48
+            self.frame(self.page_heading, 24, 22, card_width, 34)
+            self.frame(self.advanced_heading, 24, 22, card_width, 34)
+            home_height = self.layout_reader(card_width)
+            advanced_height = self.layout_advanced(card_width)
+            self.frame(self.home, 0, 0, content_width, home_height)
+            self.frame(self.advanced_page, 0, 0, content_width, advanced_height)
+            self.document.setFrameSize_(A.NSMakeSize(content_width, advanced_height if self.advanced else home_height))
+
+            footer_width = width - rail
+            self.frame(self.footer, rail, height - footer_height, footer_width, footer_height)
+            self.frame(self.footer_line, 0, 0, footer_width, 1)
+            self.frame(self.status, 24, 10, footer_width - 48, 33)
+            self.frame(self.update_status, 24, 45, footer_width - 48, 24)
+            x = footer_width - 24
+            for button, minimum in ((self.start_button, 124), (self.stop_button, 60), (self.browser_button, 100)):
+                size = self.button_width(button, minimum)
+                x -= size
+                self.frame(button, x, footer_height - 49, size, 36)
+                x -= 8
+
+        @objc.python_method
+        def layout_reader(self, width):
+            address_height = self.label_height(self.address, width - 56)
+            service_height = 88 + address_height
+            self.frame(self.service_card, 24, 67, width, service_height)
+            badge_width = 74
+            self.frame(self.service_heading, 16, 16, width - badge_width - 40, 24)
+            self.frame(self.service_badge, width - badge_width - 16, 16, badge_width, 23)
+            self.frame(self.service_status, 6, 3, badge_width - 12, 18)
+            self.frame(self.address_label, 16, 48, width - 32, 18)
+            self.frame(self.address_surface, 16, 68, width - 32, address_height + 12)
+            self.frame(self.address, 12, 6, width - 56, address_height)
+
+            roots_y = 67 + service_height + 12
+            roots_height = 68 + len(state.roots) * 43
+            self.frame(self.roots_card, 24, roots_y, width, roots_height)
+            add_width = self.button_width(self.add_button, 110)
+            self.frame(self.roots_heading, 16, 21, width - add_width - 40, 25)
+            self.frame(self.add_button, width - add_width - 16, 14, add_width, 36)
+            for index, (well, field, choose, remove) in enumerate(self.folder_controls):
+                remove_width = self.button_width(remove, 64)
+                choose_width = self.button_width(choose, 64)
+                remove_x = width - remove_width - 16
+                choose_x = remove_x - choose_width - 6
+                y = 59 + index * 43
+                well_width = choose_x - 24
+                self.frame(well, 16, y, well_width, 36)
+                self.frame(field, 10, 8, well_width - 20, 20)
+                self.frame(choose, choose_x, y, choose_width, 36)
+                self.frame(remove, remove_x, y, remove_width, 36)
+            return roots_y + roots_height + 20
+
+        @objc.python_method
+        def layout_advanced(self, width):
+            self.frame(self.network_heading, 16, 16, width - 32, 24)
+            field_width = int((width - 52) / 3)
+            for index, (label, control, control_height) in enumerate((
+                (self.port_label, self.port, self.port_height),
+                (self.share_port_label, self.share_port, self.share_port_height),
+                (self.https_port_label, self.https_port, self.https_port_height),
+            )):
+                x = 16 + index * (field_width + 10)
+                self.frame(label, x, 52, field_width, 20)
+                self.frame(control, x, 76, field_width, control_height)
+            checkbox_y = 82 + max(self.port_height, self.share_port_height, self.https_port_height)
+            self.frame(self.lan, 16, checkbox_y, width - 32, 28)
+            hint_height = self.label_height(self.share_port_hint, width - 32)
+            self.frame(self.share_port_hint, 16, checkbox_y + 30, width - 32, hint_height)
+            button_y = checkbox_y + 38 + hint_height
+            self.frame(self.diagnose_button, 16, button_y, self.button_width(self.diagnose_button), 36)
+            network_height = button_y + 50
+            self.frame(self.network_card, 24, 67, width, network_height)
+
+            data_y = 67 + network_height + 12
+            self.frame(self.data_heading, 16, 16, width - 32, 24)
+            description_height = self.label_height(self.storage_hint, width - 32)
+            self.frame(self.storage_hint, 16, 47, width - 32, description_height)
+            x, y = 16, 55 + description_height
+            for button in (self.log_button, self.data_button, self.reset_button, self.reset_entry_button):
+                size = self.button_width(button)
+                if x > 16 and x + size > width - 16:
+                    x, y = 16, y + 42
+                self.frame(button, x, y, size, 36)
+                x += size + 8
+            data_height = y + 50
+            self.frame(self.data_card, 24, data_y, width, data_height)
+            return data_y + data_height + 20
 
         @objc.python_method
         def set_busy(self, busy):
             self.busy = busy
             running = state.controller.running
             editing = not busy and not running
-            for field, choose, remove in zip(self.folder_controls[::3], self.folder_controls[1::3], self.folder_controls[2::3]):
+            for _, _, choose, remove in self.folder_controls:
                 choose.setEnabled_(editing)
                 remove.setEnabled_(editing and len(state.roots) > 1)
             for control in (self.port, self.share_port, self.https_port, self.lan, self.add_button):
@@ -527,6 +679,13 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
             self.reset_button.setEnabled_(not busy)
             self.reset_entry_button.setEnabled_(not busy)
             self.stop_menu.setEnabled_(running and not busy)
+            self.service_status.setStringValue_(
+                tr("service_busy" if busy else "service_running" if running else "service_stopped"))
+
+        @objc.python_method
+        def show_addresses(self, value):
+            self.address.setStringValue_(value)
+            self.layout_window()
 
         @objc.python_method
         def read_configuration(self):
@@ -777,14 +936,14 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
                     if success and not self.busy and state.controller.running:
                         addresses = [tr("local") + ": " + value["local_url"]]
                         addresses.extend(tr("lan_address") + ": " + url for url in value["lan_urls"])
-                        self.address.setStringValue_("\n".join(addresses))
+                        self.show_addresses("\n".join(addresses))
                     continue
                 self.set_busy(False)
                 if not success:
                     self.status.setStringValue_(str(value))
                 elif kind == "start":
                     self.status.setStringValue_(tr("running"))
-                    self.address.setStringValue_(value)
+                    self.show_addresses(value)
                     self.openBrowser_(None)
                     self.window.orderOut_(None)
                     config = state.controller.config
@@ -796,7 +955,7 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
                 elif kind == "reset-entry":
                     self.status.setStringValue_(tr("reset_entry_done"))
                     if state.controller.config is not None:
-                        self.address.setStringValue_(state.controller.config.local_url)
+                        self.show_addresses(state.controller.config.local_url)
                     warnings = security_entry_recovery_warnings(value, language)
                     if warnings:
                         alert = A.NSAlert.alloc().init()
@@ -808,7 +967,7 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
                     self.status.setStringValue_(value["message"])
                     addresses = [tr("local") + ": " + value["local_url"]]
                     addresses.extend(tr("lan_address") + ": " + url for url in value["lan_urls"])
-                    self.address.setStringValue_("\n".join(addresses))
+                    self.show_addresses("\n".join(addresses))
             if not self.busy and not self.quitting and state.controller.process is not None and not state.controller.running:
                 state.controller.stop()
                 self.set_busy(False)
@@ -824,11 +983,16 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
             if self.smoke_phase == 'views':
                 # Exercise actual native controls before using the same
                 # terminate event as Dock Quit. No mock or app.stop() pass.
-                self.window.setContentSize_(A.NSMakeSize(600, 480))
-                self.layout_window()
+                self.window.setContentSize_(A.NSMakeSize(610, 420))
+                divider = self.sidebar.frame().size.width
+                home_visible = not self.home.isHidden() and self.advanced_page.isHidden()
+                self.show_page(True)
+                advanced_visible = self.home.isHidden() and not self.advanced_page.isHidden()
                 port_metrics = self.capture_port_smoke()
+                self.show_page(False)
                 body_height = self.root.bounds().size.height
-                footer = self.start_button.frame()
+                footer = self.footer.frame()
+                start = self.start_button.frame()
                 checks = {"window_visible": bool(self.window.isVisible()),
                           "wordmark_loaded": self.brand.image() is not None,
                           "status_menu_present": self.status_item.menu() is not None,
@@ -838,8 +1002,14 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
                           "port_single_line": bool(self.port.cell().usesSingleLineMode()),
                           "status_icon_is_template": bool(self.status_item.button().image() is not None
                                                            and self.status_item.button().image().isTemplate()),
-                          "small_window_footer_visible": footer.origin.y >= 0 and footer.origin.y + footer.size.height <= body_height,
+                          "small_window_footer_visible": (footer.origin.y >= 0
+                              and footer.origin.y + footer.size.height <= body_height
+                              and start.origin.y >= 0 and start.origin.y + start.size.height <= footer.size.height),
                           "body_scrolls_independently": self.scroll.documentView() == self.document,
+                          "navigation_switches_pages": (home_visible and advanced_visible
+                              and not self.home.isHidden() and self.advanced_page.isHidden()),
+                          "sidebar_and_footer_separate_from_scroll": (self.scroll.frame().origin.x == divider
+                              and footer.origin.x == divider and self.scroll.frame().size.height <= footer.origin.y),
                           "labels_at_least_12pt": min(self.version.font().pointSize(), self.status.font().pointSize(),
                                                       self.update_status.font().pointSize()) >= 12,
                           "service_initially_stopped": not state.controller.running}
