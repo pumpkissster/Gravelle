@@ -35,6 +35,14 @@ from desktop.runtime import ServerController, reset_security_entry_cli, resource
 APP_MUTEX = r"Local\GravelleLauncher-6589345A87B047CE942471F892240DF7"
 
 
+def launcher_version() -> str:
+    # The Windows build derives this resource from server.VERSION.
+    if getattr(sys, "frozen", False):
+        return (resource_root() / "desktop" / "version.txt").read_text(encoding="ascii").strip()
+    from server import VERSION
+    return VERSION
+
+
 def rounded_button_surface(scale: float, fill: str, border: str, focus: str | None = None):
     """Draw a small antialiased surface for ttk's stretchable image element."""
     from PIL import Image, ImageDraw
@@ -157,8 +165,7 @@ class LauncherWindow:
         self.release = None
         self.downloaded = None
         self.release_config = None
-        from server import VERSION
-        self.version = VERSION
+        self.version = launcher_version()
         configuration_error = None
         try:
             config = load_config(config_path)
@@ -794,6 +801,7 @@ def main(argv=None):
     modes.add_argument("--diagnose", action="store_true")
     modes.add_argument("--reset-admin-password", action="store_true")
     modes.add_argument("--reset-security-entry", action="store_true")
+    modes.add_argument("--launcher-bridge", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--config", type=Path)
     parser.add_argument("--library", action="append", metavar="PATH", help="写真根文件夹，可重复指定")
     parser.add_argument("--data", type=Path)
@@ -804,6 +812,9 @@ def main(argv=None):
     parser.add_argument("--instance", default="")
     modes.add_argument("--version", action="store_true")
     arguments = parser.parse_args(argv)
+    if arguments.launcher_bridge:
+        from desktop.windows_bridge import run
+        return run(arguments.config, launcher_version())
     if arguments.reset_security_entry:
         if not arguments.data:
             parser.error("--reset-security-entry requires --data")
@@ -821,10 +832,10 @@ def main(argv=None):
             parser.error("--serve requires --library and --data")
         return serve(LauncherConfig(port=arguments.port, share_port=arguments.share_port, https_port=arguments.https_port, lan_enabled=arguments.host == "0.0.0.0",
                                     library_paths=arguments.library), arguments.data, arguments.instance)
-    from server import VERSION
+    version = launcher_version()
     if arguments.version:
         if sys.stdout is not None:
-            print(VERSION)
+            print(version)
         return 0
     storage = user_directory()
     config_path = arguments.config or storage / "launcher.json"
@@ -836,9 +847,9 @@ def main(argv=None):
                 config = LauncherConfig(port=arguments.port, share_port=arguments.share_port, https_port=arguments.https_port, lan_enabled=arguments.host == "0.0.0.0",
                                         library_paths=arguments.library)
             config.validate()
-            result = {"version": VERSION, "data_directory": str(arguments.data or storage / "data"),
+            result = {"version": version, "data_directory": str(arguments.data or storage / "data"),
                       "configuration": str(config_path), **network_diagnostics(config),
-                      "update": check_update(load_release_config(resource_root()), VERSION)}
+                      "update": check_update(load_release_config(resource_root()), version)}
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0 if result["available"] else 1
         except (LauncherError, OSError) as error:

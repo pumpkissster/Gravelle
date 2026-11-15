@@ -62,7 +62,7 @@ from network_settings import (NetworkSettings, ENTRY_COOKIE, ENTRY_SECONDS,
                               SHARE_STATIC, SHARE_PAGE, SHARE_GET, SHARE_POST)
 from https_settings import HTTPSSettingsError, MAX_CERTIFICATE_BODY_BYTES, load_context
 
-VERSION = "0.9.6"
+VERSION = "0.9.7"
 MEDIA_TYPES = {"manga_jp", "manga_kr", "comic_us", "photo", "magazine"}
 LIBRARY_ORDER_SQL = "l.display_order IS NULL,l.display_order,l.created_at,l.id"
 IMAGE_TYPES = {

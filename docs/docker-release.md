@@ -8,7 +8,7 @@
 
 镜像仓库为 [pumpkissster/gravelle](https://hub.docker.com/r/pumpkissster/gravelle)，当前版本为 `0.9.6`，也提供 `latest` 标签。Docker 会按宿主机选择 amd64 或 arm64 镜像。
 
-可从 [GitHub Releases](https://github.com/pumpkissster/Gravelle/releases/latest) 下载 `Gravelle-Docker-0.9.6.zip` 配置包，更新内容见 [0.9.6 发行页](https://github.com/pumpkissster/Gravelle/releases/tag/v0.9.6)。
+可在 [0.9.6 发行页](https://github.com/pumpkissster/Gravelle/releases/tag/v0.9.6) 查看更新内容并下载 `Gravelle-Docker-0.9.6.zip` 配置包。
 
 自动扫描间隔可在网页「设置 → 性能设置」调整，设为 0 可关闭定时扫描。
 

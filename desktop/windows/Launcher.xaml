@@ -1,0 +1,289 @@
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:ui="clr-namespace:Gravelle.Windows;assembly=Gravelle"
+        Title="Gravelle 启动器" Width="860" Height="660" MinWidth="610" MinHeight="420"
+        WindowStartupLocation="CenterScreen" FontFamily="Microsoft YaHei UI, Segoe UI"
+        FontSize="13" Foreground="#29252A" Background="#FAF9FA" UseLayoutRounding="True">
+  <Window.Resources>
+    <SolidColorBrush x:Key="Ink" Color="#29252A"/>
+    <SolidColorBrush x:Key="Muted" Color="#6D656D"/>
+    <SolidColorBrush x:Key="Line" Color="#E9E4E8"/>
+    <SolidColorBrush x:Key="Accent" Color="#AE3064"/>
+    <SolidColorBrush x:Key="FocusRing" Color="#A32F61"/>
+    <SolidColorBrush x:Key="ControlBorder" Color="#DBD4DA"/>
+    <SolidColorBrush x:Key="ControlHoverBorder" Color="#9B9099"/>
+    <SolidColorBrush x:Key="PrimarySurface" Color="White"/>
+    <SolidColorBrush x:Key="FieldSurface" Color="#FAF9FA"/>
+    <SolidColorBrush x:Key="InsetSurface" Color="#F7F5F7"/>
+    <SolidColorBrush x:Key="NavigationSurface" Color="#F8F5F7"/>
+    <SolidColorBrush x:Key="NavigationHover" Color="#F2EEF1"/>
+    <SolidColorBrush x:Key="SelectedSurface" Color="#F7E8EF"/>
+    <SolidColorBrush x:Key="SelectedText" Color="#8C2853"/>
+    <SolidColorBrush x:Key="OnAccent" Color="White"/>
+    <LinearGradientBrush x:Key="SelectedControl" StartPoint="0,0" EndPoint="0,1">
+      <GradientStop Color="#BF4076" Offset="0"/><GradientStop Color="#AE3064" Offset="1"/>
+    </LinearGradientBrush>
+    <LinearGradientBrush x:Key="SelectedControlHover" StartPoint="0,0" EndPoint="0,1">
+      <GradientStop Color="#C64D81" Offset="0"/><GradientStop Color="#B9386F" Offset="1"/>
+    </LinearGradientBrush>
+    <Style x:Key="Heading" TargetType="TextBlock">
+      <Setter Property="FontSize" Value="24"/><Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="Margin" Value="0,0,0,14"/>
+    </Style>
+    <Style x:Key="Section" TargetType="TextBlock">
+      <Setter Property="FontSize" Value="16"/><Setter Property="FontWeight" Value="SemiBold"/>
+    </Style>
+    <Style x:Key="Hint" TargetType="TextBlock">
+      <Setter Property="Foreground" Value="{StaticResource Muted}"/>
+      <Setter Property="TextWrapping" Value="Wrap"/>
+    </Style>
+    <Style x:Key="Card" TargetType="ui:ControlOutline">
+      <Setter Property="Radius" Value="12"/>
+      <Setter Property="OutlineBrush" Value="{StaticResource Line}"/>
+      <Setter Property="Background" Value="{StaticResource PrimarySurface}"/>
+    </Style>
+    <Style TargetType="Button">
+      <Setter Property="Background" Value="{StaticResource PrimarySurface}"/><Setter Property="Foreground" Value="{StaticResource Ink}"/>
+      <Setter Property="BorderBrush" Value="{StaticResource ControlBorder}"/><Setter Property="Padding" Value="12,4"/>
+      <Setter Property="FontSize" Value="14"/>
+      <Setter Property="MinHeight" Value="36"/>
+      <Setter Property="SnapsToDevicePixels" Value="True"/>
+      <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Grid x:Name="Surface" Background="Transparent" SnapsToDevicePixels="True">
+              <ui:ControlOutline x:Name="Outline" Background="{TemplateBinding Background}"
+                                 OutlineBrush="{TemplateBinding BorderBrush}" IsHitTestVisible="False"/>
+              <ContentPresenter Margin="{TemplateBinding Padding}" HorizontalAlignment="Center"
+                                VerticalAlignment="Center" RecognizesAccessKey="True"/>
+            </Grid>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Outline" Property="OutlineBrush" Value="{StaticResource ControlHoverBorder}"/></Trigger>
+              <Trigger Property="IsPressed" Value="True"><Setter TargetName="Surface" Property="Opacity" Value="0.8"/></Trigger>
+              <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Outline" Property="OutlineBrush" Value="{StaticResource FocusRing}"/></Trigger>
+              <Trigger Property="IsEnabled" Value="False"><Setter TargetName="Surface" Property="Opacity" Value="0.55"/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="Primary" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+      <Setter Property="Background" Value="{StaticResource Accent}"/>
+      <Setter Property="BorderBrush" Value="{StaticResource Accent}"/>
+      <Setter Property="Foreground" Value="{StaticResource OnAccent}"/><Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="Padding" Value="22,4"/>
+    </Style>
+    <Style TargetType="TextBox">
+      <Setter Property="Foreground" Value="{StaticResource Ink}"/><Setter Property="Background" Value="{StaticResource FieldSurface}"/>
+      <Setter Property="BorderBrush" Value="{StaticResource ControlBorder}"/><Setter Property="MinHeight" Value="36"/>
+      <Setter Property="FontSize" Value="14"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="TextBox">
+            <ui:ControlOutline x:Name="Outline" OutlineBrush="{TemplateBinding BorderBrush}" Background="{TemplateBinding Background}">
+              <ScrollViewer x:Name="PART_ContentHost" Margin="11,0" VerticalAlignment="Center"/>
+            </ui:ControlOutline>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsKeyboardFocusWithin" Value="True"><Setter TargetName="Outline" Property="OutlineBrush" Value="{StaticResource FocusRing}"/></Trigger>
+              <Trigger Property="IsEnabled" Value="False"><Setter TargetName="Outline" Property="Opacity" Value="0.58"/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style TargetType="CheckBox">
+      <Setter Property="Foreground" Value="{StaticResource Ink}"/>
+      <Setter Property="FontSize" Value="14"/><Setter Property="FontWeight" Value="Medium"/>
+      <Setter Property="MinHeight" Value="32"/>
+      <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="CheckBox">
+            <Border x:Name="Row" Background="Transparent">
+              <DockPanel LastChildFill="True" VerticalAlignment="Center">
+                <Grid Width="22" Height="22" Margin="0,0,5,0">
+                  <ui:ControlOutline x:Name="Focus" Radius="6"/>
+                  <ui:ControlOutline x:Name="Box" Margin="3" Radius="4"
+                                     OutlineBrush="{StaticResource ControlBorder}" Background="{StaticResource PrimarySurface}"/>
+                  <Path x:Name="Tick" Width="16" Height="16" Data="M 4,7.7 L 7,10.7 L 12,5.7"
+                        Stroke="{StaticResource OnAccent}" StrokeThickness="2" StrokeStartLineCap="Round"
+                        StrokeEndLineCap="Round" StrokeLineJoin="Round" Visibility="Collapsed" IsHitTestVisible="False"/>
+                </Grid>
+                <ContentPresenter VerticalAlignment="Center" RecognizesAccessKey="True"/>
+              </DockPanel>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Box" Property="OutlineBrush" Value="{StaticResource ControlHoverBorder}"/></Trigger>
+              <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="Box" Property="Background" Value="{StaticResource SelectedControl}"/>
+                <Setter TargetName="Box" Property="OutlineBrush" Value="{x:Null}"/>
+                <Setter TargetName="Tick" Property="Visibility" Value="Visible"/>
+              </Trigger>
+              <MultiTrigger>
+                <MultiTrigger.Conditions><Condition Property="IsChecked" Value="True"/><Condition Property="IsMouseOver" Value="True"/></MultiTrigger.Conditions>
+                <Setter TargetName="Box" Property="Background" Value="{StaticResource SelectedControlHover}"/>
+              </MultiTrigger>
+              <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Focus" Property="OutlineBrush" Value="{StaticResource FocusRing}"/></Trigger>
+              <Trigger Property="IsEnabled" Value="False"><Setter TargetName="Row" Property="Opacity" Value="0.5"/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="PasswordInput" TargetType="PasswordBox">
+      <Setter Property="Foreground" Value="{StaticResource Ink}"/><Setter Property="Background" Value="{StaticResource FieldSurface}"/>
+      <Setter Property="BorderBrush" Value="{StaticResource ControlBorder}"/><Setter Property="MinHeight" Value="36"/>
+      <Setter Property="FontSize" Value="14"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="PasswordBox">
+            <ui:ControlOutline x:Name="Outline" OutlineBrush="{TemplateBinding BorderBrush}" Background="{TemplateBinding Background}">
+              <ScrollViewer x:Name="PART_ContentHost" Margin="11,0" VerticalAlignment="Center"/>
+            </ui:ControlOutline>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsKeyboardFocusWithin" Value="True"><Setter TargetName="Outline" Property="OutlineBrush" Value="{StaticResource FocusRing}"/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="NavItem" TargetType="RadioButton">
+      <Setter Property="Foreground" Value="{StaticResource Muted}"/><Setter Property="Padding" Value="11,10"/>
+      <Setter Property="HorizontalContentAlignment" Value="Left"/>
+      <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="RadioButton">
+            <ui:ControlOutline x:Name="Surface" Background="Transparent">
+              <ContentPresenter Margin="{TemplateBinding Padding}"
+                                HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="Center"/>
+            </ui:ControlOutline>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Surface" Property="Background" Value="{StaticResource NavigationHover}"/></Trigger>
+              <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="Surface" Property="Background" Value="{StaticResource SelectedSurface}"/>
+                <Setter Property="Foreground" Value="{StaticResource SelectedText}"/><Setter Property="FontWeight" Value="SemiBold"/>
+              </Trigger>
+              <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Surface" Property="OutlineBrush" Value="{StaticResource FocusRing}"/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+  </Window.Resources>
+  <Grid>
+    <Grid.ColumnDefinitions><ColumnDefinition Width="159"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+    <Border Background="{StaticResource NavigationSurface}" BorderBrush="{StaticResource Line}" BorderThickness="0,0,1,0" Padding="14,18,14,14">
+      <DockPanel>
+        <StackPanel DockPanel.Dock="Top">
+          <Image x:Name="Wordmark" Height="38" HorizontalAlignment="Left" Margin="2,0,0,4" AutomationProperties.Name="Gravelle"/>
+          <TextBlock x:Name="Version" Style="{StaticResource Hint}" Margin="4,0,0,24"/>
+          <RadioButton x:Name="HomeTab" GroupName="Navigation" Style="{StaticResource NavItem}" IsChecked="True"
+                       AutomationProperties.Name="启动阅读器">
+            <StackPanel Orientation="Horizontal">
+              <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xE80F;" Margin="0,0,10,0" VerticalAlignment="Center"/>
+              <TextBlock Text="启动阅读器"/>
+            </StackPanel>
+          </RadioButton>
+          <RadioButton x:Name="AdvancedTab" GroupName="Navigation" Style="{StaticResource NavItem}" Margin="0,4,0,0"
+                       AutomationProperties.Name="高级设置">
+            <StackPanel Orientation="Horizontal">
+              <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xE713;" Margin="0,0,10,0" VerticalAlignment="Center"/>
+              <TextBlock Text="高级设置"/>
+            </StackPanel>
+          </RadioButton>
+        </StackPanel>
+        <Button x:Name="UpdateButton" DockPanel.Dock="Bottom" Content="检查更新" HorizontalAlignment="Stretch"/>
+        <Border/>
+      </DockPanel>
+    </Border>
+    <Grid Grid.Column="1">
+      <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+      <ScrollViewer x:Name="PageScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+        <Grid Margin="24,22,24,20">
+          <StackPanel x:Name="Home">
+            <TextBlock Text="阅读器" Style="{StaticResource Heading}"/>
+            <ui:ControlOutline Style="{StaticResource Card}" Margin="0,0,0,12">
+              <StackPanel Margin="16">
+                <DockPanel Margin="0,0,0,8">
+                  <Border DockPanel.Dock="Right" CornerRadius="12" Background="{StaticResource SelectedSurface}" Padding="9,3">
+                    <TextBlock x:Name="ServiceStatus" Text="未启动" Foreground="{StaticResource SelectedText}"/>
+                  </Border>
+                  <TextBlock Text="服务状态" Style="{StaticResource Section}" VerticalAlignment="Center"/>
+                </DockPanel>
+                <TextBlock Text="访问地址" Style="{StaticResource Hint}" Margin="0,0,0,5"/>
+                <ui:ControlOutline Background="{StaticResource InsetSurface}" OutlineBrush="{StaticResource Line}">
+                  <TextBlock x:Name="Address" Text="http://127.0.0.1:8080/" Margin="12,9"
+                             FontFamily="Segoe UI" TextWrapping="Wrap"/>
+                </ui:ControlOutline>
+              </StackPanel>
+            </ui:ControlOutline>
+            <ui:ControlOutline Style="{StaticResource Card}">
+              <StackPanel Margin="16">
+                <Grid Margin="0,0,0,8">
+                  <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                  <TextBlock Text="写真根文件夹" Style="{StaticResource Section}" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                  <Button x:Name="AddFolder" Grid.Column="1" Content="添加文件夹" VerticalAlignment="Center"/>
+                </Grid>
+                <StackPanel x:Name="Folders"/>
+              </StackPanel>
+            </ui:ControlOutline>
+          </StackPanel>
+          <StackPanel x:Name="Advanced" Visibility="Collapsed">
+            <TextBlock Text="高级设置" Style="{StaticResource Heading}"/>
+            <ui:ControlOutline Style="{StaticResource Card}" Margin="0,0,0,12">
+              <StackPanel Margin="16">
+                <TextBlock Text="访问设置" Style="{StaticResource Section}" Margin="0,0,0,12"/>
+                <Grid>
+                  <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition/><ColumnDefinition/></Grid.ColumnDefinitions>
+                  <StackPanel Margin="0,0,10,0">
+                    <Label Content="服务端口" Padding="0,0,0,4" Target="{Binding ElementName=Port}"/>
+                    <TextBox x:Name="Port" Text="8080"/>
+                  </StackPanel>
+                  <StackPanel Grid.Column="1" Margin="0,0,10,0">
+                    <Label Content="分享端口" Padding="0,0,0,4" Target="{Binding ElementName=SharePort}"/>
+                    <TextBox x:Name="SharePort" Text="8081"/>
+                  </StackPanel>
+                  <StackPanel Grid.Column="2">
+                    <Label Content="HTTPS 端口" Padding="0,0,0,4" Target="{Binding ElementName=HttpsPort}"/>
+                    <TextBox x:Name="HttpsPort" Text="8443"/>
+                  </StackPanel>
+                </Grid>
+                <CheckBox x:Name="Lan" Content="允许局域网访问" Margin="0,8,0,0"/>
+                <TextBlock Text="在网页的网络设置中开启 HTTPS 或独立分享端口。" Style="{StaticResource Hint}" Margin="0,0,0,10"/>
+                <Button x:Name="DiagnoseButton" Content="检查目录与网络" HorizontalAlignment="Left"/>
+              </StackPanel>
+            </ui:ControlOutline>
+            <ui:ControlOutline Style="{StaticResource Card}">
+              <StackPanel Margin="16">
+                <TextBlock Text="服务与数据" Style="{StaticResource Section}" Margin="0,0,0,8"/>
+                <TextBlock Text="账户、封面与阅读记录保存在当前用户的资料目录。" Style="{StaticResource Hint}" Margin="0,0,0,10"/>
+                <WrapPanel>
+                  <Button x:Name="LogButton" Content="服务日志" Margin="0,0,8,8"/>
+                  <Button x:Name="DataButton" Content="资料目录" Margin="0,0,8,8"/>
+                  <Button x:Name="PasswordButton" Content="重置管理员密码" Margin="0,0,8,8"/>
+                  <Button x:Name="EntryButton" Content="关闭安全入口" Margin="0,0,0,8"/>
+                </WrapPanel>
+              </StackPanel>
+            </ui:ControlOutline>
+          </StackPanel>
+        </Grid>
+      </ScrollViewer>
+      <Border Grid.Row="1" Background="{StaticResource PrimarySurface}" BorderBrush="{StaticResource Line}" BorderThickness="0,1,0,0" Padding="24,12">
+        <Grid>
+          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+          <StackPanel VerticalAlignment="Center" Margin="0,0,12,0">
+            <TextBlock x:Name="Status" Text="正在读取启动器配置…" Style="{StaticResource Hint}"/>
+            <TextBlock x:Name="UpdateStatus" Style="{StaticResource Hint}" Margin="0,3,0,0"/>
+          </StackPanel>
+          <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+            <Button x:Name="OpenButton" Content="打开网页" Margin="0,0,7,0" IsEnabled="False"/>
+            <Button x:Name="StopButton" Content="停止" Margin="0,0,7,0" IsEnabled="False"/>
+            <Button x:Name="StartButton" Content="启动阅读器" Style="{StaticResource Primary}" IsEnabled="False"/>
+          </StackPanel>
+        </Grid>
+      </Border>
+    </Grid>
+  </Grid>
+</Window>

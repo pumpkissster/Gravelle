@@ -8,17 +8,17 @@
 
 ## 安装与启动
 
-当前版本为 0.9.6，支持安装版和便携版；更新内容见 [0.9.6 更新说明](releases/0.9.6.md)。
+当前版本为 0.9.7，支持安装版和便携版。更新内容见 [0.9.7 更新说明](releases/0.9.7.md)。
 
-1. 从 [GitHub Releases](https://github.com/pumpkissster/Gravelle/releases/latest) 下载 `Gravelle-Setup-0.9.6-x64.exe` 并安装。默认仅安装给当前 Windows 用户。
+1. 从 [GitHub Releases](https://github.com/pumpkissster/Gravelle/releases/latest) 下载 `Gravelle-Setup-0.9.7-x64.exe` 并安装。默认仅安装给当前 Windows 用户。
 2. 打开“Gravelle”，选择写真根文件夹，使用“添加文件夹”继续添加其他目录。网页可从这些根文件夹内创建多个写真库。
-3. 设置端口（默认 8080）；需要手机、平板访问时，勾选“允许局域网访问”。
-4. 点击“检查目录与网络”，确认目录可读、端口未被占用。
+3. 在“高级设置”中设置端口（默认 8080）；需要手机、平板访问时，勾选“允许局域网访问”。
+4. 在“高级设置”点击“检查目录与网络”，确认目录可读、端口未被占用。
 5. 点击“启动阅读器”。服务准备好后会自动打开浏览器，启动器最小化到任务栏。首次访问注册管理员账户，再在网页创建写真库；子账号由管理员在设置中创建。
 
 恢复任务栏窗口可查看访问地址、重新打开网页或停止服务。关闭启动器会提示并停止它创建的阅读服务；只关闭浏览器不会停止服务。程序不会结束其他软件占用端口的进程，端口冲突时可改用 8081 等端口。
 
-便携包 `Gravelle-Windows-0.9.6-x64.zip` 解压后运行 `Gravelle/Gravelle.exe`，整个文件夹需要一起保留，不要单独移动 exe。便携版同样使用当前用户的资料目录。
+便携包 `Gravelle-Windows-0.9.7-x64.zip` 解压后运行 `Gravelle/Gravelle.exe`，请保留整个解压文件夹。新版将后台程序和依赖放在 `runtime` 子目录。便携版同样使用当前用户的资料目录。
 
 安装程序尚未做代码签名，Windows 可能提示“未知发布者”。请从项目 GitHub Releases 获取安装包，并核对发行页提供的 SHA-256 校验值。
 
@@ -38,7 +38,7 @@
 
 启动器打开时异步检查公开 GitHub Releases。发现新版后可以下载，下载和安装前均校验 `SHA256SUMS.txt` 中的 SHA-256；只有用户点击安装并确认后，才会停止自己启动的服务并打开安装程序。离线或 GitHub 暂不可用时仍能启动阅读器。网页设置中的“检查新版本”只检查和提示，Windows 更新由启动器完成。
 
-更新按钮位于窗口顶部版本号右侧，根据状态显示“检查更新”“下载更新”或“安装更新”。启动器采用网页同款粉色、圆角按钮与浅色卡片，次要按钮有独立填色和边框，禁用操作以灰色显示。顶部更新与底部启动操作保持固定，中部多目录与服务信息可以滚动。
+更新按钮位于侧栏底部，根据状态显示“检查更新”“下载更新”或“安装更新”。启动、停止和打开网页固定在窗口底部。“高级设置”提供网络诊断、服务日志、资料目录及本机恢复操作。
 
 安装更新时沿用原安装位置和资料目录，无需卸载或删除账户资料。便携版保留数据目录，使用完整的新便携文件夹运行。
 
@@ -53,7 +53,10 @@
 “检查目录与网络”能够确认本机绑定和连接情况，无法单靠本机检测证明其他设备已能穿过防火墙。启动器不会自动修改 Windows 防火墙；如被阻止，可由管理员仅放行本地子网、服务程序和所选端口，例如默认安装目录与端口为：
 
 ```powershell
-$gravelleServerPath = Join-Path $env:LOCALAPPDATA 'Programs\Gravelle\GravelleServer.exe'
+$gravelleServerPath = Join-Path $env:LOCALAPPDATA 'Programs\Gravelle\runtime\GravelleServer.exe'
+if (-not (Test-Path -LiteralPath $gravelleServerPath)) {
+    $gravelleServerPath = Join-Path $env:LOCALAPPDATA 'Programs\Gravelle\GravelleServer.exe'
+}
 New-NetFirewallRule -Name 'Gravelle-LAN-8080' -DisplayName 'Gravelle LAN (TCP 8080)' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8080 -RemoteAddress LocalSubnet -Program $gravelleServerPath -Profile Any
 ```
 
@@ -61,7 +64,7 @@ New-NetFirewallRule -Name 'Gravelle-LAN-8080' -DisplayName 'Gravelle LAN (TCP 80
 
 ## 从源码构建安装包
 
-在 Windows x64 安装 Python 3.12 或更新版本，以及官方 [Inno Setup](https://jrsoftware.org/isdl.php)，在项目目录运行：
+在 Windows x64 安装 Python 3.12 或更新版本，以及官方 [Inno Setup](https://jrsoftware.org/isdl.php)。构建脚本使用系统 .NET Framework 4.x 编译 WPF 界面。在项目目录运行：
 
 ```powershell
 ./desktop/build_windows.ps1 -Repository pumpkissster/Gravelle
@@ -72,7 +75,7 @@ New-NetFirewallRule -Name 'Gravelle-LAN-8080' -DisplayName 'Gravelle LAN (TCP 80
 打包后的自动验证：
 
 ```powershell
-python desktop/smoke_windows.py --executable dist/windows/portable/Gravelle/GravelleServer.exe --work-root work/windows-smoke
+python desktop/smoke_windows.py --executable dist/windows/portable/Gravelle/runtime/GravelleServer.exe --work-root work/windows-smoke
 ```
 
 此验证使用随机端口和两个独立临时图片目录，检查注册登录、多根目录、扫描、原图、封面、批量模特关联、数据库与停止流程，不读取真实资料。

@@ -59,6 +59,9 @@ chinesesimplified.OpenGravelle=打开 Gravelle
 [Tasks]
 Name: "desktopicon"; Description: "{cm:DesktopShortcut}"; GroupDescription: "{cm:ShortcutGroup}"; Flags: unchecked
 
+[InstallDelete]
+Type: files; Name: "{app}\GravelleServer.exe"
+
 [Files]
 Source: "{#BundleDirectory}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 

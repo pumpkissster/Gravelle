@@ -22,6 +22,7 @@ function Resolve-ProjectOutput([string]$Value) {
 $artifactDirectory = Resolve-ProjectOutput $OutputDirectory
 $buildDirectory = Resolve-ProjectOutput 'work/windows-build'
 $portableDirectory = Join-Path $artifactDirectory 'portable'
+$bundleDirectory = Resolve-ProjectOutput (Join-Path $OutputDirectory 'portable/Gravelle')
 New-Item -ItemType Directory -Path $artifactDirectory, $buildDirectory, $portableDirectory -Force | Out-Null
 Push-Location $projectRoot
 try {
@@ -72,16 +73,52 @@ print('Preparing Gravelle '+version+' for '+repo)
     $desktopResourceDirectory = Join-Path $buildDirectory 'resources/desktop'
     New-Item -ItemType Directory -Path $desktopResourceDirectory -Force | Out-Null
     Copy-Item -LiteralPath (Join-Path $buildDirectory 'desktop-release.json') -Destination (Join-Path $desktopResourceDirectory 'release.json') -Force
+    Copy-Item -LiteralPath (Join-Path $buildDirectory 'version.txt') -Destination $desktopResourceDirectory -Force
     Copy-Item -LiteralPath (Join-Path $buildDirectory 'release.json') -Destination (Join-Path $buildDirectory 'resources/release.json') -Force
+    # Recreate the generated bundle, including when rebuilding over the old layout.
+    if (Test-Path -LiteralPath $bundleDirectory) {
+        $resolvedBundle = (Resolve-Path -LiteralPath $bundleDirectory).Path
+        if ($resolvedBundle -ne $bundleDirectory) {
+            throw 'Unexpected portable output path.'
+        }
+        for ($folder = Get-Item -LiteralPath $resolvedBundle; $null -ne $folder; $folder = $folder.Parent) {
+            if ($folder.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                throw 'The portable output must not pass through a junction or symbolic link.'
+            }
+        }
+        Remove-Item -LiteralPath $resolvedBundle -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $bundleDirectory -Force | Out-Null
     $previousResources = $env:GRAVELLE_BUILD_RESOURCES
     try {
         $env:GRAVELLE_BUILD_RESOURCES = Join-Path $buildDirectory 'resources'
-        & $Python -m PyInstaller --noconfirm --clean --distpath $portableDirectory --workpath (Join-Path $buildDirectory 'pyinstaller') (Join-Path $PSScriptRoot 'gravelle.spec')
+        & $Python -m PyInstaller --noconfirm --clean --distpath $bundleDirectory --workpath (Join-Path $buildDirectory 'pyinstaller') (Join-Path $PSScriptRoot 'gravelle.spec')
     } finally {
         $env:GRAVELLE_BUILD_RESOURCES = $previousResources
     }
     if ($LASTEXITCODE -ne 0) { throw 'PyInstaller build failed.' }
-    $bundleDirectory = Join-Path $portableDirectory 'Gravelle'
+    $framework = Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319'
+    $compiler = Join-Path $framework 'csc.exe'
+    if (-not (Test-Path -LiteralPath $compiler)) {
+        throw 'The Windows .NET Framework 4.x compiler is required to build the WPF launcher.'
+    }
+    Push-Location -LiteralPath (Join-Path $PSScriptRoot 'windows')
+    try {
+        $references = @(
+            'WPF/PresentationFramework.dll', 'WPF/PresentationCore.dll', 'WPF/WindowsBase.dll',
+            'System.Xaml.dll', 'System.Windows.Forms.dll', 'System.Web.Extensions.dll', 'System.Core.dll'
+        ) | ForEach-Object { '/reference:' + (Join-Path $framework $_) }
+        $arguments = @(
+            '/nologo', '/utf8output', '/codepage:65001', '/target:winexe', '/platform:x64', '/optimize+',
+            "/out:$bundleDirectory/Gravelle.exe", '/win32icon:../gravelle.ico', '/win32manifest:../gravelle.manifest',
+            '/resource:Launcher.xaml,Launcher.xaml', '/resource:../assets/gravelle-wordmark.png,Wordmark.png',
+            '/resource:../../static/gravelle-icon.png,Gravelle.png'
+        )
+        & $compiler @arguments @references 'Launcher.cs' 'ControlOutline.cs'
+        if ($LASTEXITCODE -ne 0) { throw 'WPF launcher compilation failed.' }
+    } finally {
+        Pop-Location
+    }
     Copy-Item -LiteralPath (Join-Path $projectRoot 'LICENSE') -Destination $bundleDirectory -Force
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'THIRD_PARTY_NOTICES.md') -Destination $bundleDirectory -Force
     $licenseCode = @'

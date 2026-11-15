@@ -102,8 +102,8 @@ class MacLauncherTests(unittest.TestCase):
         self.assertEqual(text("check_update", "zh"), "检查更新")
 
     def test_window_dimensions_use_points_and_fit_small_displays(self):
-        self.assertEqual(window_size(3840, 2160), (720, 740))
-        self.assertEqual(window_size(1280, 800), (720, 740))
+        self.assertEqual(window_size(3840, 2160), (860, 660))
+        self.assertEqual(window_size(1280, 800), (860, 660))
         self.assertEqual(window_size(640, 480), (600, 420))
 
     def test_multiple_roots_are_canonical_and_deduplicated(self):

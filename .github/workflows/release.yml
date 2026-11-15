@@ -20,6 +20,11 @@ on:
         default: false
         required: true
         type: boolean
+      desktop_only:
+        description: "仅发布 Windows 和 macOS 安装包及校验文件"
+        default: false
+        required: true
+        type: boolean
       source_tag:
         description: "补发已有版本的 Docker 镜像时填写原标签（如 v0.8.6）；初次发布留空"
         default: ""
@@ -60,6 +65,8 @@ jobs:
         env:
           REQUESTED_VERSION: ${{ inputs.release_version }}
           PUBLISH: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
+          DESKTOP_ONLY: ${{ inputs.desktop_only }}
+          PUBLISH_DOCKER: ${{ inputs.publish_docker }}
           EVENT_NAME: ${{ github.event_name }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           SOURCE_TAG: ${{ inputs.source_tag }}
@@ -70,6 +77,7 @@ jobs:
           version = next(ast.literal_eval(n.value) for n in tree.body
                          if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'VERSION' for t in n.targets))
           assert re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', version), 'Only stable three-part versions are released'
+          assert not (os.environ['DESKTOP_ONLY'] == os.environ['PUBLISH_DOCKER'] == 'true'), 'Desktop-only releases cannot publish a Docker image'
           if os.environ['EVENT_NAME'] == 'workflow_dispatch':
               assert os.environ['REQUESTED_VERSION'] == version, 'Requested version must match server.VERSION'
           else:
@@ -90,6 +98,7 @@ jobs:
           PY
       - run: python -m pip install -r requirements.txt
       - name: Check Docker build context excludes private data
+        if: ${{ !inputs.desktop_only }}
         run: python packaging/check_docker_context.py
       - name: Backend regression tests
         run: python -m unittest discover -s tests -p 'test_*.py' -v
@@ -125,10 +134,10 @@ jobs:
         run: ./desktop/build_windows.ps1 -Repository $env:RELEASE_REPOSITORY -OutputDirectory 'dist/windows'
       - name: Smoke test the frozen Windows server
         shell: pwsh
-        run: ./work/windows-build/venv/Scripts/python.exe desktop/smoke_windows.py --executable dist/windows/portable/Gravelle/GravelleServer.exe --work-root work/windows-smoke --report work/windows-smoke/report.json
+        run: ./work/windows-build/venv/Scripts/python.exe desktop/smoke_windows.py --executable dist/windows/portable/Gravelle/runtime/GravelleServer.exe --work-root work/windows-smoke --report work/windows-smoke/report.json
       - name: Verify HTTPS in the frozen Windows package
         shell: pwsh
-        run: ./work/windows-build/venv/Scripts/python.exe packaging/smoke_https.py --executable dist/windows/portable/Gravelle/GravelleServer.exe --work-root work/windows-https-smoke --report work/windows-https-smoke/report.json
+        run: ./work/windows-build/venv/Scripts/python.exe packaging/smoke_https.py --executable dist/windows/portable/Gravelle/runtime/GravelleServer.exe --work-root work/windows-https-smoke --report work/windows-https-smoke/report.json
       - name: Preserve the Windows smoke report
         if: always()
         uses: actions/upload-artifact@v7
@@ -175,6 +184,7 @@ jobs:
       contents: read
 
   docker-validate:
+    if: ${{ !inputs.desktop_only }}
     needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 40
@@ -272,13 +282,14 @@ jobs:
           retention-days: 7
 
   assemble:
-    if: ${{ !cancelled() && needs.test.result == 'success' && needs.windows.result == 'success' && needs['docker-validate'].result == 'success' && (needs.macos.result == 'success' || (needs.macos.result == 'skipped' && needs.test.outputs.macos_required != 'true')) }}
+    if: ${{ !cancelled() && needs.test.result == 'success' && needs.windows.result == 'success' && (needs['docker-validate'].result == 'success' || (inputs.desktop_only && needs['docker-validate'].result == 'skipped')) && (needs.macos.result == 'success' || (needs.macos.result == 'skipped' && needs.test.outputs.macos_required != 'true')) }}
     needs: [test, windows, macos, docker-validate]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
       RELEASE_VERSION: ${{ needs.test.outputs.version }}
       MACOS_REQUIRED: ${{ needs.test.outputs.macos_required }}
+      DESKTOP_ONLY: ${{ inputs.desktop_only }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -319,20 +330,28 @@ jobs:
                   assert hashlib.sha256(asset.read_bytes()).hexdigest() == digest, 'Mac checksum mismatch: ' + name
                   shutil.copyfile(asset, destination / name)
           PY
-      - name: Assemble source, deployment assets and exact reviewed description
+      - name: Assemble the selected release assets and exact reviewed description
         run: |
           set -euo pipefail
-          python packaging/package_source.py --output-dir dist/release --version "$RELEASE_VERSION"
+          if [ "$DESKTOP_ONLY" != true ]; then
+            python packaging/package_source.py --output-dir dist/release --version "$RELEASE_VERSION"
+          fi
           cp "docs/releases/$RELEASE_VERSION.md" dist/release-notes.md
           python - <<'PY'
           import hashlib, os, pathlib
           version = os.environ['RELEASE_VERSION']
           root = pathlib.Path('dist/release')
-          names = {f'Gravelle-Setup-{version}-x64.exe', f'Gravelle-Windows-{version}-x64.zip',
-                   f'Gravelle-Docker-{version}.zip', f'Gravelle-Source-{version}.zip'}
+          names = {f'Gravelle-Setup-{version}-x64.exe', f'Gravelle-Windows-{version}-x64.zip'}
           if os.environ['MACOS_REQUIRED'] == 'true':
               names.update(f'Gravelle-macOS-{version}-{arch}.{extension}'
                            for arch in ('arm64', 'x64') for extension in ('dmg', 'zip'))
+          if os.environ['DESKTOP_ONLY'] == 'true':
+              assert {asset.name for asset in root.iterdir()} == names, 'Unexpected desktop release asset set'
+              (root / 'SHA256SUMS.txt').write_text(
+                  ''.join(f'{hashlib.sha256((root / name).read_bytes()).hexdigest()}  {name}\n'
+                          for name in sorted(names)), encoding='ascii')
+          else:
+              names.update((f'Gravelle-Docker-{version}.zip', f'Gravelle-Source-{version}.zip'))
           assert {asset.name for asset in root.iterdir()} == names | {'SHA256SUMS.txt'}, 'Release asset set is incomplete or contains unexpected files'
           entries = [line.split('  ', 1) for line in (root / 'SHA256SUMS.txt').read_text(encoding='ascii').splitlines()]
           assert len(entries) == len(names) and {name for digest, name in entries} == names, 'Combined checksums must include every release asset exactly once'
@@ -367,6 +386,7 @@ jobs:
       RELEASE_REPOSITORY: ${{ github.repository }}
       SOURCE_SHA: ${{ needs.test.outputs.source_sha }}
       MACOS_REQUIRED: ${{ needs.test.outputs.macos_required }}
+      DESKTOP_ONLY: ${{ inputs.desktop_only }}
       DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE }}
       DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
     steps:
@@ -433,6 +453,9 @@ jobs:
           if [ "$upload_assets" = true ]; then
             gh release edit "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" --notes-file dist/release-notes.md
             gh release upload "$RELEASE_TAG" dist/release/* --repo "$RELEASE_REPOSITORY" --clobber
+          fi
+          if [ "$DESKTOP_ONLY" = true ]; then
+            diff <(ls -1 dist/release | sort) <(gh release view "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" --json assets --jq '.assets[].name' | sort)
           fi
       - uses: docker/setup-qemu-action@v4
         if: inputs.publish_docker

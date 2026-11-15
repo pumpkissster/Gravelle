@@ -103,13 +103,15 @@ class DesktopHTTPSConfigTests(unittest.TestCase):
         method = next(node for node in delegate.body if isinstance(node, ast.FunctionDef) and node.name == "set_busy")
         method.decorator_list = []
         state = SimpleNamespace(controller=SimpleNamespace(running=False), roots=[])
-        namespace = {"state": state}
+        namespace = {"state": state, "tr": macos_launcher.text}
         exec(compile(ast.fix_missing_locations(ast.Module(body=[method], type_ignores=[])), str(macos_launcher.__file__), "exec"), namespace)
         for running, busy in ((False, False), (False, True), (True, False), (True, True)):
             enabled = not running and not busy
             with self.subTest(running=running, busy=busy):
                 state.controller.running = running
                 mac = MagicMock(folder_controls=[])
+                mac.window.input_surfaces = tuple(
+                    MagicMock(field=field) for field in (mac.port, mac.share_port, mac.https_port))
                 namespace["set_busy"](mac, busy)
                 for control in (mac.port, mac.share_port, mac.https_port):
                     control.setEnabled_.assert_called_once_with(enabled)

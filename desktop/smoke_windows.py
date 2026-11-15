@@ -6,7 +6,7 @@ cryptography for independent share-response decryption. CI runs it with the
 build environment's Python; the service itself runs only from the EXE.
 
 Example: python desktop/smoke_windows.py --executable
-dist/windows/portable/Gravelle/GravelleServer.exe --work-root work/windows-smoke
+dist/windows/portable/Gravelle/runtime/GravelleServer.exe --work-root work/windows-smoke
 """
 from __future__ import annotations
 

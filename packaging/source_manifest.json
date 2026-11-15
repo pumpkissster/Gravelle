@@ -28,6 +28,8 @@
   "static/gravelle-logo.png", "static/gravelle-wordmark.svg", "static/gravelle-icon.png", "static/default-avatar.png",
   "static/fonts/LibreCaslonText.ttf", "static/fonts/OFL.txt", "static/fonts/README.md",
   "desktop/__init__.py", "desktop/core.py", "desktop/runtime.py", "desktop/launcher.py",
+  "desktop/windows_bridge.py", "desktop/windows/Launcher.cs", "desktop/windows/Launcher.xaml",
+  "desktop/windows/ControlOutline.cs",
   "desktop/platforms.py", "desktop/macos_entry.py", "desktop/macos_launcher.py",
   "desktop/build_macos.py", "desktop/gravelle-macos.spec", "desktop/requirements-macos-build.txt", "desktop/smoke_macos.py",
   "desktop/pdf_packaging.py", "tests/test_pdf_reader.py", "tests/test_pdf_api.py", "tests/test_pdf_packaging.py", "tests/test_pdf_reader_ui.js", "docs/pdf.md",
@@ -53,5 +55,6 @@
   "tests/test_image_search_crops.py", "tests/test_image_search_catalogue.py", "tests/test_image_search_activity.py", "tests/test_image_search_page_io.py", "tests/test_image_search_png_metadata.py", "tests/test_image_search_idle.py",
   "tests/test_reader_model.js", "tests/test_performance_settings.js", "tests/test_reader_end.js", "tests/test_avatar_ui.js", "tests/test_user_management.js", "tests/test_batch_selection.js", "tests/test_page_router.js", "tests/test_transcoding_ui.js", "tests/test_image_search_ui.js",
   "docs/releases/0.9.6.md",
+  "docs/releases/0.9.7.md",
   "tests/test_release_assets.py", "tests/test_release_workflow.py", "packaging/source_manifest.json", "packaging/package_source.py", "packaging/check_docker_context.py", "packaging/smoke_image_workers.py"
 ]

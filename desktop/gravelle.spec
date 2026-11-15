@@ -1,5 +1,4 @@
-# Two entry points share one runtime: the GUI has no console, while the hidden
-# server process retains a real stdin pipe for graceful shutdown.
+# The WPF launcher uses the bundled console companion over redirected pipes.
 from pathlib import Path
 import os
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
@@ -23,6 +22,7 @@ analysis = Analysis(
         (str(root / 'models' / 'yunet'), 'models/yunet'),
         (str(resources / 'release.json'), '.'),
         (str(resources / 'desktop' / 'release.json'), 'desktop'),
+        (str(resources / 'desktop' / 'version.txt'), 'desktop'),
         (str(root / 'desktop' / 'assets' / 'gravelle-wordmark.png'), 'desktop/assets'),
     ] + pdfium_data,
     hiddenimports=['server', 'network_settings', 'https_settings', 'ssl', 'transcoding', 'image_search', 'image_search_features', 'avatar_face_crop', 'task_scheduler', 'library_covers', 'cache_manager', 'page_cache', 'epub_reader', 'pdf_reader', 'pypdfium2', 'pypdfium2_raw', 'pypdfium2_cfg', 'sharing', 'share_crypto', 'share_passwords', 'cryptography.hazmat.primitives.ciphers.aead', 'cryptography.hazmat.primitives.serialization.pkcs12', 'desktop.runtime', 'desktop.platforms', 'PIL.Image', 'cv2', 'numpy'],
@@ -35,9 +35,7 @@ analysis = Analysis(
 pyz = PYZ(analysis.pure)
 common = dict(exclude_binaries=True, debug=False, bootloader_ignore_signals=False,
               strip=False, upx=False, icon=str(root / 'desktop' / 'gravelle.ico'))
-launcher = EXE(pyz, analysis.scripts, [], name='Gravelle', console=False,
-               manifest=str(root / 'desktop' / 'gravelle.manifest'), **common)
 service = EXE(pyz, analysis.scripts, [], name='GravelleServer', console=True, **common)
-bundle = COLLECT(launcher, service, analysis.binaries, analysis.datas,
-                 strip=False, upx=False, name='Gravelle')
+bundle = COLLECT(service, analysis.binaries, analysis.datas,
+                 strip=False, upx=False, name='runtime')
 
