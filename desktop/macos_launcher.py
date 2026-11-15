@@ -250,10 +250,122 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
     page, card, ink, muted, accent = map(colour, ("#faf9fa", "#ffffff", "#29252a", "#6d656d", "#ae3064"))
     line, sidebar, inset, selected, selected_ink = map(
         colour, ("#e9e4e8", "#f8f5f7", "#f7f5f7", "#f7e8ef", "#8c2853"))
+    control_border, hover_border, focus_border = map(colour, ("#dbd4da", "#9b9099", "#a32f61"))
+    pressed_surface, disabled_ink, accent_hover, accent_pressed, accent_focus = map(
+        colour, ("#f2eef1", "#8b828b", "#9c2857", "#86234b", "#671737"))
+    control_radius, control_height = 8, 36
+
+    def draw_control(bounds, fill, border):
+        outer = A.NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(bounds, control_radius, control_radius)
+        border.setFill()
+        outer.fill()
+        inner_bounds = A.NSInsetRect(bounds, 1, 1)
+        inner = A.NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            inner_bounds, control_radius - 1, control_radius - 1)
+        fill.setFill()
+        inner.fill()
 
     class GravelleFlippedView(A.NSView):
         def isFlipped(self):
             return True
+
+    class GravelleLauncherWindow(A.NSWindow):
+        def makeFirstResponder_(self, responder):
+            accepted = objc.super(GravelleLauncherWindow, self).makeFirstResponder_(responder)
+            # While editing, the first responder is AppKit's shared field editor.
+            for view in getattr(self, "input_surfaces", ()):
+                view.setNeedsDisplay_(True)
+            return accepted
+
+    class GravelleActionButton(A.NSButton):
+        @objc.python_method
+        def set_flat_style(self, primary):
+            self.primary = primary
+            self.hovered = False
+            self.setBordered_(False)
+            self.setFocusRingType_(A.NSFocusRingTypeNone)
+            options = (A.NSTrackingMouseEnteredAndExited | A.NSTrackingActiveInKeyWindow
+                       | A.NSTrackingInVisibleRect)
+            area = A.NSTrackingArea.alloc().initWithRect_options_owner_userInfo_(self.bounds(), options, self, None)
+            self.addTrackingArea_(area)
+
+        def mouseEntered_(self, event):
+            self.hovered = True
+            self.setNeedsDisplay_(True)
+
+        def mouseExited_(self, event):
+            self.hovered = False
+            self.setNeedsDisplay_(True)
+
+        def becomeFirstResponder(self):
+            accepted = objc.super(GravelleActionButton, self).becomeFirstResponder()
+            self.setNeedsDisplay_(True)
+            return accepted
+
+        def resignFirstResponder(self):
+            accepted = objc.super(GravelleActionButton, self).resignFirstResponder()
+            self.setNeedsDisplay_(True)
+            return accepted
+
+        def drawRect_(self, rect):
+            focused = self.window() is not None and self.window().firstResponder() == self
+            pressed = self.cell().isHighlighted()
+            hovered = self.hovered and self.window() is not None and self.window().isKeyWindow()
+            if not self.isEnabled():
+                fill, border, foreground = page, line, disabled_ink
+            elif self.primary:
+                fill = accent_pressed if pressed else accent_hover if hovered else accent
+                border, foreground = (accent_focus if focused else fill), card
+            else:
+                fill = pressed_surface if pressed else card
+                border = focus_border if focused else hover_border if hovered else control_border
+                foreground = ink
+            bounds = self.bounds()
+            draw_control(bounds, fill, border)
+            title = F.NSAttributedString.alloc().initWithString_attributes_(
+                self.title(), {A.NSFontAttributeName: self.font(), A.NSForegroundColorAttributeName: foreground})
+            size = title.size()
+            title.drawAtPoint_(A.NSMakePoint((bounds.size.width - size.width) / 2,
+                                            (bounds.size.height - size.height) / 2))
+
+    class GravelleInputSurface(GravelleFlippedView):
+        @objc.python_method
+        def configure(self, value, title):
+            self.field = A.NSTextField.alloc().initWithFrame_(A.NSMakeRect(0, 0, 1, 1))
+            self.field.setStringValue_(value)
+            self.field.setFont_(A.NSFont.systemFontOfSize_(14))
+            self.field.setTextColor_(ink)
+            self.field.setBezeled_(False)
+            self.field.setBordered_(False)
+            self.field.setDrawsBackground_(False)
+            self.field.setFocusRingType_(A.NSFocusRingTypeNone)
+            self.field.cell().setUsesSingleLineMode_(True)
+            self.field.setAccessibilityLabel_(title)
+            self.addSubview_(self.field)
+
+        @objc.python_method
+        def layout_field(self):
+            width, height = self.bounds().size
+            field_height = self.field.intrinsicContentSize().height + 2
+            self.field.setFrame_(A.NSMakeRect(10, (height - field_height) // 2, width - 20, field_height))
+
+        @objc.python_method
+        def has_focus(self):
+            window = self.window()
+            if window is None:
+                return False
+            responder = window.firstResponder()
+            editor = self.field.currentEditor()
+            return responder == self.field or (editor is not None and responder == editor)
+
+        def drawRect_(self, rect):
+            enabled = self.field.isEnabled()
+            border = (focus_border if self.has_focus() else control_border) if enabled else line
+            draw_control(self.bounds(), page if enabled else inset, border)
+
+        def mouseDown_(self, event):
+            if self.field.isEnabled():
+                self.window().makeFirstResponder_(self.field)
 
     class GravelleMacDelegate(F.NSObject):
         @objc.python_method
@@ -267,7 +379,7 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
             width, height = window_size(screen.width, screen.height)
             style = (A.NSWindowStyleMaskTitled | A.NSWindowStyleMaskClosable
                      | A.NSWindowStyleMaskMiniaturizable | A.NSWindowStyleMaskResizable)
-            self.window = A.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+            self.window = GravelleLauncherWindow.alloc().initWithContentRect_styleMask_backing_defer_(
                 A.NSMakeRect(0, 0, width, height), style, A.NSBackingStoreBuffered, False)
             self.window.setTitle_(tr("title"))
             self.window.setContentMinSize_(A.NSMakeSize(min(610, width), min(420, height)))
@@ -308,7 +420,7 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
             self.service_status = self.label(tr("service_stopped"), self.service_badge, size=12, color=selected_ink)
             self.service_status.setAlignment_(A.NSTextAlignmentCenter)
             self.address_label = self.label(tr("address"), self.service_card, size=12, color=muted)
-            self.address_surface = self.surface(self.service_card, inset, radius=8, border=True)
+            self.address_surface = self.surface(self.service_card, inset, radius=control_radius, border=control_border)
             self.address = self.label(
                 f"http://127.0.0.1:{state.port}/", self.address_surface, size=13, wrap=True)
             self.address.setSelectable_(True)
@@ -318,37 +430,15 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
             self.network_card = self.panel(self.advanced_page)
             self.network_heading = self.label(tr("network"), self.network_card, bold=True)
             self.port_label = self.label(tr("port"), self.network_card)
-            self.port = A.NSTextField.alloc().initWithFrame_(A.NSMakeRect(0, 0, 125, 34))
-            self.port.setStringValue_(state.port)
-            self.port.setFont_(A.NSFont.systemFontOfSize_(14))
-            self.port.setBezelStyle_(A.NSTextFieldRoundedBezel)
-            self.port.cell().setUsesSingleLineMode_(True)
-            # A rounded AppKit cell has its own bezel/editor metrics. Stretching
-            # it to the row height leaves a second-looking outline on focus.
-            self.port.sizeToFit()
-            self.port_height = self.port.frame().size.height
-            self.port.setAccessibilityLabel_(tr("port"))
-            self.network_card.addSubview_(self.port)
+            self.port_surface = self.port_input(state.port, tr("port"))
+            self.port = self.port_surface.field
             self.share_port_label = self.label(tr("share_port"), self.network_card)
-            self.share_port = A.NSTextField.alloc().initWithFrame_(A.NSMakeRect(0, 0, 125, 34))
-            self.share_port.setStringValue_(state.share_port)
-            self.share_port.setFont_(A.NSFont.systemFontOfSize_(14))
-            self.share_port.setBezelStyle_(A.NSTextFieldRoundedBezel)
-            self.share_port.cell().setUsesSingleLineMode_(True)
-            self.share_port.sizeToFit()
-            self.share_port_height = self.share_port.frame().size.height
-            self.share_port.setAccessibilityLabel_(tr("share_port"))
-            self.network_card.addSubview_(self.share_port)
+            self.share_port_surface = self.port_input(state.share_port, tr("share_port"))
+            self.share_port = self.share_port_surface.field
             self.https_port_label = self.label(tr("https_port"), self.network_card)
-            self.https_port = A.NSTextField.alloc().initWithFrame_(A.NSMakeRect(0, 0, 125, 34))
-            self.https_port.setStringValue_(state.https_port)
-            self.https_port.setFont_(A.NSFont.systemFontOfSize_(14))
-            self.https_port.setBezelStyle_(A.NSTextFieldRoundedBezel)
-            self.https_port.cell().setUsesSingleLineMode_(True)
-            self.https_port.sizeToFit()
-            self.https_port_height = self.https_port.frame().size.height
-            self.https_port.setAccessibilityLabel_(tr("https_port"))
-            self.network_card.addSubview_(self.https_port)
+            self.https_port_surface = self.port_input(state.https_port, tr("https_port"))
+            self.https_port = self.https_port_surface.field
+            self.window.input_surfaces = (self.port_surface, self.share_port_surface, self.https_port_surface)
             self.share_port_hint = self.label(tr("share_port_hint"), self.network_card, size=12, color=muted, wrap=True)
             self.lan = A.NSButton.checkboxWithTitle_target_action_(tr("lan"), self, "changeLAN:")
             self.lan.setFont_(A.NSFont.systemFontOfSize_(13))
@@ -411,29 +501,38 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
             return field
 
         @objc.python_method
-        def surface(self, parent, background, *, radius=0, border=False):
+        def surface(self, parent, background, *, radius=0, border=None):
             panel = GravelleFlippedView.alloc().initWithFrame_(A.NSMakeRect(0, 0, 1, 1))
             panel.setWantsLayer_(True)
             panel.layer().setBackgroundColor_(background.CGColor())
             panel.layer().setCornerRadius_(radius)
-            if border:
+            if border is not None:
                 panel.layer().setBorderWidth_(1)
-                panel.layer().setBorderColor_(line.CGColor())
+                panel.layer().setBorderColor_(border.CGColor())
             parent.addSubview_(panel)
             return panel
 
         @objc.python_method
         def panel(self, parent):
-            return self.surface(parent, card, radius=12, border=True)
+            return self.surface(parent, card, radius=12, border=line)
+
+        @objc.python_method
+        def port_input(self, value, title):
+            surface = GravelleInputSurface.alloc().initWithFrame_(A.NSZeroRect)
+            surface.configure(value, title)
+            self.network_card.addSubview_(surface)
+            return surface
 
         @objc.python_method
         def button(self, title, action, parent, primary=False):
-            button = A.NSButton.buttonWithTitle_target_action_(title, self, action)
-            button.setBezelStyle_(A.NSBezelStyleRounded)
-            button.setFont_(A.NSFont.boldSystemFontOfSize_(14) if primary else A.NSFont.systemFontOfSize_(13))
-            button.setBezelColor_(accent if primary else card)
-            button.setContentTintColor_(A.NSColor.whiteColor() if primary else ink)
-            button.setAccessibilityLabel_(title)
+            button = GravelleActionButton.alloc().initWithFrame_(A.NSZeroRect)
+            button.setTitle_(title)
+            button.setTarget_(self)
+            button.setAction_(action)
+            button.setButtonType_(A.NSButtonTypeMomentaryPushIn)
+            button.setFont_(A.NSFont.systemFontOfSize_weight_(14, A.NSFontWeightSemibold)
+                            if primary else A.NSFont.systemFontOfSize_(14))
+            button.set_flat_style(primary)
             if primary:
                 button.setKeyEquivalent_("\r")
             parent.addSubview_(button)
@@ -534,7 +633,7 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
                     item.removeFromSuperview()
             self.folder_controls = []
             for index, value in enumerate(state.roots):
-                well = self.surface(self.roots_card, inset, radius=8, border=True)
+                well = self.surface(self.roots_card, inset, radius=control_radius, border=control_border)
                 field = self.label(value, well, size=13)
                 field.setSelectable_(True)
                 field.setLineBreakMode_(A.NSLineBreakByTruncatingMiddle)
@@ -558,7 +657,7 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
 
         @objc.python_method
         def button_width(self, widget, minimum=60):
-            return max(minimum, int(widget.intrinsicContentSize().width + 12))
+            return max(minimum, int(widget.intrinsicContentSize().width + 20))
 
         @objc.python_method
         def layout_window(self):
@@ -571,7 +670,7 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
             self.frame(self.version, 17, 60, rail - 32, 18)
             self.frame(self.home_nav, 14, 100, rail - 28, 36)
             self.frame(self.advanced_nav, 14, 142, rail - 28, 36)
-            self.frame(self.update_button, 13, height - 49, rail - 26, 36)
+            self.frame(self.update_button, 13, height - 49, rail - 26, control_height)
             self.frame(self.scroll, rail, 0, width - rail, height - footer_height)
             content_width = self.scroll.contentSize().width
             card_width = content_width - 48
@@ -592,28 +691,29 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
             for button, minimum in ((self.start_button, 124), (self.stop_button, 60), (self.browser_button, 100)):
                 size = self.button_width(button, minimum)
                 x -= size
-                self.frame(button, x, footer_height - 49, size, 36)
+                self.frame(button, x, footer_height - 49, size, control_height)
                 x -= 8
 
         @objc.python_method
         def layout_reader(self, width):
             address_height = self.label_height(self.address, width - 56)
-            service_height = 88 + address_height
+            address_box_height = max(control_height, address_height + 12)
+            service_height = 78 + address_box_height
             self.frame(self.service_card, 24, 67, width, service_height)
             badge_width = 74
             self.frame(self.service_heading, 16, 16, width - badge_width - 40, 24)
             self.frame(self.service_badge, width - badge_width - 16, 16, badge_width, 23)
             self.frame(self.service_status, 6, 3, badge_width - 12, 18)
             self.frame(self.address_label, 16, 48, width - 32, 18)
-            self.frame(self.address_surface, 16, 68, width - 32, address_height + 12)
-            self.frame(self.address, 12, 6, width - 56, address_height)
+            self.frame(self.address_surface, 16, 68, width - 32, address_box_height)
+            self.frame(self.address, 12, (address_box_height - address_height) // 2, width - 56, address_height)
 
             roots_y = 67 + service_height + 12
             roots_height = 68 + len(state.roots) * 43
             self.frame(self.roots_card, 24, roots_y, width, roots_height)
             add_width = self.button_width(self.add_button, 110)
             self.frame(self.roots_heading, 16, 21, width - add_width - 40, 25)
-            self.frame(self.add_button, width - add_width - 16, 14, add_width, 36)
+            self.frame(self.add_button, width - add_width - 16, 14, add_width, control_height)
             for index, (well, field, choose, remove) in enumerate(self.folder_controls):
                 remove_width = self.button_width(remove, 64)
                 choose_width = self.button_width(choose, 64)
@@ -621,30 +721,31 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
                 choose_x = remove_x - choose_width - 6
                 y = 59 + index * 43
                 well_width = choose_x - 24
-                self.frame(well, 16, y, well_width, 36)
-                self.frame(field, 10, 8, well_width - 20, 20)
-                self.frame(choose, choose_x, y, choose_width, 36)
-                self.frame(remove, remove_x, y, remove_width, 36)
+                self.frame(well, 16, y, well_width, control_height)
+                self.frame(field, 12, (control_height - 20) // 2, well_width - 24, 20)
+                self.frame(choose, choose_x, y, choose_width, control_height)
+                self.frame(remove, remove_x, y, remove_width, control_height)
             return roots_y + roots_height + 20
 
         @objc.python_method
         def layout_advanced(self, width):
             self.frame(self.network_heading, 16, 16, width - 32, 24)
             field_width = int((width - 52) / 3)
-            for index, (label, control, control_height) in enumerate((
-                (self.port_label, self.port, self.port_height),
-                (self.share_port_label, self.share_port, self.share_port_height),
-                (self.https_port_label, self.https_port, self.https_port_height),
+            for index, (label, surface) in enumerate((
+                (self.port_label, self.port_surface),
+                (self.share_port_label, self.share_port_surface),
+                (self.https_port_label, self.https_port_surface),
             )):
                 x = 16 + index * (field_width + 10)
                 self.frame(label, x, 52, field_width, 20)
-                self.frame(control, x, 76, field_width, control_height)
-            checkbox_y = 82 + max(self.port_height, self.share_port_height, self.https_port_height)
+                self.frame(surface, x, 76, field_width, control_height)
+                surface.layout_field()
+            checkbox_y = 82 + control_height
             self.frame(self.lan, 16, checkbox_y, width - 32, 28)
             hint_height = self.label_height(self.share_port_hint, width - 32)
             self.frame(self.share_port_hint, 16, checkbox_y + 30, width - 32, hint_height)
             button_y = checkbox_y + 38 + hint_height
-            self.frame(self.diagnose_button, 16, button_y, self.button_width(self.diagnose_button), 36)
+            self.frame(self.diagnose_button, 16, button_y, self.button_width(self.diagnose_button), control_height)
             network_height = button_y + 50
             self.frame(self.network_card, 24, 67, width, network_height)
 
@@ -657,7 +758,7 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
                 size = self.button_width(button)
                 if x > 16 and x + size > width - 16:
                     x, y = 16, y + 42
-                self.frame(button, x, y, size, 36)
+                self.frame(button, x, y, size, control_height)
                 x += size + 8
             data_height = y + 50
             self.frame(self.data_card, 24, data_y, width, data_height)
@@ -671,8 +772,11 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
             for _, _, choose, remove in self.folder_controls:
                 choose.setEnabled_(editing)
                 remove.setEnabled_(editing and len(state.roots) > 1)
-            for control in (self.port, self.share_port, self.https_port, self.lan, self.add_button):
-                control.setEnabled_(editing)
+            for surface in self.window.input_surfaces:
+                surface.field.setEnabled_(editing)
+                surface.setNeedsDisplay_(True)
+            self.lan.setEnabled_(editing)
+            self.add_button.setEnabled_(editing)
             self.start_button.setEnabled_(editing)
             self.stop_button.setEnabled_(running and not busy)
             self.browser_button.setEnabled_(running and not busy)
@@ -1001,7 +1105,14 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
                           "status_menu_present": self.status_item.menu() is not None,
                           "native_buttons": isinstance(self.start_button, A.NSButton),
                           "port_field": isinstance(self.port, A.NSTextField),
-                          "port_uses_native_height": abs(self.port.frame().size.height - self.port.intrinsicContentSize().height) <= 1,
+                          "action_buttons_are_borderless": not self.start_button.isBordered() and not self.diagnose_button.isBordered(),
+                          "ports_and_actions_share_height": all(
+                              view.frame().size.height == start.size.height == control_height
+                              for view in self.window.input_surfaces),
+                          "port_editor_fits_surface": (self.port.frame().size.height >= self.port.intrinsicContentSize().height
+                                                       and self.port.frame().size.height < self.port_surface.frame().size.height),
+                          "port_uses_a_single_outline": (not self.port.isBezeled() and not self.port.isBordered()
+                                                        and self.port.focusRingType() == A.NSFocusRingTypeNone),
                           "port_single_line": bool(self.port.cell().usesSingleLineMode()),
                           "status_icon_is_template": bool(self.status_item.button().image() is not None
                                                            and self.status_item.button().image().isTemplate()),
@@ -1081,10 +1192,14 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
                     editor = self.port.currentEditor()
                     if editor is None or editor.string() != self.port.stringValue():
                         raise LauncherError("The native port editor did not show its current value.")
+                if self.port_surface.has_focus() != focus:
+                    raise LauncherError("The port outline did not follow keyboard focus.")
                 self.window.displayIfNeeded()
-                rect = A.NSInsetRect(self.port.convertRect_toView_(self.port.bounds(), self.root), -12, -12)
+                surface = self.port_surface
+                rect = A.NSInsetRect(surface.convertRect_toView_(surface.bounds(), self.root), -12, -12)
                 self.write_smoke_capture(self.root, rect, name)
-            return {"height": self.port.frame().size.height,
+            return {"height": self.port_surface.frame().size.height,
+                    "editor_height": self.port.frame().size.height,
                     "intrinsic_height": self.port.intrinsicContentSize().height,
                     "font_size": self.port.font().pointSize(),
                     "screenshots": ["port-focused.png", "port-unfocused.png"]}
