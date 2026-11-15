@@ -254,6 +254,7 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
     pressed_surface, disabled_ink, accent_hover, accent_pressed, accent_focus = map(
         colour, ("#f2eef1", "#8b828b", "#9c2857", "#86234b", "#671737"))
     control_radius, control_height = 8, 36
+    navigation_padding = 11
 
     def draw_control(bounds, fill, border):
         outer = A.NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(bounds, control_radius, control_radius)
@@ -327,6 +328,12 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
             size = title.size()
             title.drawAtPoint_(A.NSMakePoint((bounds.size.width - size.width) / 2,
                                             (bounds.size.height - size.height) / 2))
+
+    class GravelleNavigationButton(A.NSButton):
+        def drawRect_(self, rect):
+            # Inset the cell contents without shrinking the selected background or hit target.
+            contents = A.NSInsetRect(self.bounds(), navigation_padding, 0)
+            self.cell().drawWithFrame_inView_(contents, self)
 
     class GravelleInputSurface(GravelleFlippedView):
         @objc.python_method
@@ -402,6 +409,8 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
             self.version = self.label(tr("version", version=version), self.sidebar, size=12, color=muted)
             self.home_nav = self.navigation_button(tr("reader"), "showReaderSettings:", "book")
             self.advanced_nav = self.navigation_button(tr("advanced"), "showAdvancedSettings:", "gearshape")
+            nav_width = max(button.intrinsicContentSize().width for button in (self.home_nav, self.advanced_nav))
+            self.sidebar_width = max(164, int(nav_width + 2 * navigation_padding + 29))
             self.update_button = self.button(tr("check_update"), "update:", self.sidebar)
             self.scroll = A.NSScrollView.alloc().initWithFrame_(A.NSMakeRect(0, 0, width, height))
             self.scroll.setHasVerticalScroller_(True)
@@ -540,9 +549,13 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
 
         @objc.python_method
         def navigation_button(self, title, action, symbol):
-            button = A.NSButton.buttonWithTitle_target_action_(title, self, action)
+            button = GravelleNavigationButton.alloc().initWithFrame_(A.NSZeroRect)
+            button.setTitle_(title)
+            button.setTarget_(self)
+            button.setAction_(action)
             button.setBordered_(False)
             button.setAlignment_(A.NSTextAlignmentLeft)
+            button.setFont_(A.NSFont.boldSystemFontOfSize_(13))
             button.setWantsLayer_(True)
             button.layer().setCornerRadius_(8)
             button.setAccessibilityLabel_(title)
@@ -662,7 +675,7 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
         @objc.python_method
         def layout_window(self):
             width, height = self.root.bounds().size
-            rail = min(164, max(130, int(width * .27)))
+            rail = min(self.sidebar_width, max(130, int(width * .30)))
             footer_height = 118
             self.frame(self.sidebar, 0, 0, rail, height)
             self.frame(self.sidebar_line, rail - 1, 0, 1, height)
@@ -1093,10 +1106,10 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
                 self.window.setContentSize_(A.NSMakeSize(610, 420))
                 divider = self.sidebar.frame().size.width
                 home_visible = not self.home.isHidden() and self.advanced_page.isHidden()
-                self.show_page(True)
+                self.advanced_nav.performClick_(None)
                 advanced_visible = self.home.isHidden() and not self.advanced_page.isHidden()
                 port_metrics = self.capture_port_smoke()
-                self.show_page(False)
+                self.home_nav.performClick_(None)
                 body_height = self.root.bounds().size.height
                 footer = self.footer.frame()
                 start = self.start_button.frame()
