@@ -120,7 +120,8 @@ class ReleaseWorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, 'candidate branch'):
             self.check_version(GITHUB_REF='refs/heads/other')
         publish = job(RELEASE, 'publish')
-        self.assertIn("if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)", publish)
+        self.assertIn("github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)", publish)
+        self.assertIn("!cancelled() && needs.test.result == 'success' && needs.assemble.result == 'success'", publish)
         self.assertIn('needs: [test, assemble]', publish)
         before_publish = RELEASE.split('\n  publish:\n', 1)[0]
         self.assertNotIn('contents: write', before_publish)
