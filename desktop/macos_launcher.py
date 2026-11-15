@@ -231,7 +231,8 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
                 running.activateWithOptions_(A.NSApplicationActivateIgnoringOtherApps)
         return 0
 
-    language = preferred_language(F.NSLocale.preferredLanguages())
+    capture_launcher = smoke_report is not None and smoke_scenario == "idle"
+    language = "zh" if capture_launcher else preferred_language(F.NSLocale.preferredLanguages())
     tr = lambda key, **kwargs: text(key, language, **kwargs)
     app = A.NSApplication.sharedApplication()
     app.setActivationPolicy_(A.NSApplicationActivationPolicyRegular)
@@ -983,6 +984,8 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
             if self.smoke_phase == 'views':
                 # Exercise actual native controls before using the same
                 # terminate event as Dock Quit. No mock or app.stop() pass.
+                if capture_launcher:
+                    self.capture_launcher_smoke()
                 self.window.setContentSize_(A.NSMakeSize(610, 420))
                 divider = self.sidebar.frame().size.width
                 home_visible = not self.home.isHidden() and self.advanced_page.isHidden()
@@ -1080,17 +1083,35 @@ def run_gui(storage: Path, config_path: Path, version: str, *, smoke_report: Pat
                         raise LauncherError("The native port editor did not show its current value.")
                 self.window.displayIfNeeded()
                 rect = A.NSInsetRect(self.port.convertRect_toView_(self.port.bounds(), self.root), -12, -12)
-                bitmap = self.root.bitmapImageRepForCachingDisplayInRect_(rect)
-                if bitmap is None:
-                    raise LauncherError("The native port field could not be captured.")
-                self.root.cacheDisplayInRect_toBitmapImageRep_(rect, bitmap)
-                png = bitmap.representationUsingType_properties_(A.NSBitmapImageFileTypePNG, {})
-                if png is None or not png.writeToFile_atomically_(str(smoke_report.parent / name), True):
-                    raise LauncherError("The native port field capture could not be saved.")
+                self.write_smoke_capture(self.root, rect, name)
             return {"height": self.port.frame().size.height,
                     "intrinsic_height": self.port.intrinsicContentSize().height,
                     "font_size": self.port.font().pointSize(),
                     "screenshots": ["port-focused.png", "port-unfocused.png"]}
+
+        @objc.python_method
+        def capture_launcher_smoke(self):
+            self.window.makeFirstResponder_(None)
+            previous = self.update_status.stringValue()
+            self.update_status.setStringValue_("")
+            for name, advanced in (("launcher-reader.png", False), ("launcher-advanced.png", True)):
+                self.show_page(advanced)
+                self.window.displayIfNeeded()
+                # The window frame includes the native macOS title bar.
+                view = self.root.superview() or self.root
+                self.write_smoke_capture(view, view.bounds(), name)
+            self.show_page(False)
+            self.update_status.setStringValue_(previous)
+
+        @objc.python_method
+        def write_smoke_capture(self, view, rect, name):
+            bitmap = view.bitmapImageRepForCachingDisplayInRect_(rect)
+            if bitmap is None:
+                raise LauncherError(f"Could not capture {name}.")
+            view.cacheDisplayInRect_toBitmapImageRep_(rect, bitmap)
+            png = bitmap.representationUsingType_properties_(A.NSBitmapImageFileTypePNG, {})
+            if png is None or not png.writeToFile_atomically_(str(smoke_report.parent / name), True):
+                raise LauncherError(f"Could not write {name}.")
 
         def windowShouldClose_(self, window):
             window.orderOut_(None)

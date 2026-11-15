@@ -106,6 +106,10 @@ def native_smoke(executable: Path, work: Path) -> dict:
         with tempfile.TemporaryDirectory(prefix=f'gravelle-native-{scenario}-', dir=work) as temporary:
             scratch = Path(temporary)
             report_path = scratch / 'gui-report.json'
+            if scenario == 'idle':
+                # Use an illustrative path in the screenshot, independent of the runner home.
+                config = {"library_paths": ["/Users/Shared/Gravelle/Photos"]}
+                (scratch / "launcher.json").write_text(json.dumps(config), encoding="utf-8")
             command = [str(executable), '--smoke-launcher', '--smoke-scenario', scenario,
                        '--data', str(scratch), '--config', str(scratch / 'launcher.json'),
                        '--report', str(report_path)]
@@ -132,7 +136,8 @@ def native_smoke(executable: Path, work: Path) -> dict:
                 native = {}
                 item.setdefault('error', 'Native launcher did not write a valid termination report')
             captures = {}
-            for name in ('port-focused.png', 'port-unfocused.png'):
+            for name in ("port-focused.png", "port-unfocused.png",
+                         "launcher-reader.png", "launcher-advanced.png"):
                 captured = scratch / name
                 if captured.is_file() and not captured.is_symlink():
                     destination = work / (scenario + '-' + name)

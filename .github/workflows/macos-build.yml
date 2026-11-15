@@ -205,6 +205,7 @@ jobs:
           path: |
             work/macos-gui-${{ matrix.arch }}/gui-report.json
             work/macos-gui-${{ matrix.arch }}/*-port-*.png
+            work/macos-gui-${{ matrix.arch }}/idle-launcher-*.png
           if-no-files-found: warn
           retention-days: 14
       - name: Preserve macOS HTTPS report
