@@ -32,7 +32,7 @@ def python_step(source, name):
 
 VERSION_CHECK = python_step(RELEASE, 'Validate source version and publish branch')
 MAC_SELECTION = python_step(RELEASE, 'Verify and select both Mac architecture packages')
-ASSET_CHECK = python_step(RELEASE, 'Assemble source, deployment assets and exact reviewed description')
+ASSET_CHECK = python_step(RELEASE, 'Assemble the selected release assets and exact reviewed description')
 
 
 class ReleaseWorkflowTests(unittest.TestCase):
@@ -45,6 +45,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         os.chdir(self.root)
         self.env = {
             'REQUESTED_VERSION': '', 'PUBLISH': 'false', 'EVENT_NAME': 'push',
+            'DESKTOP_ONLY': 'false', 'PUBLISH_DOCKER': 'false',
             'GITHUB_REF': 'refs/heads/dev/release-0.9.3', 'DEFAULT_BRANCH': 'main',
             'SOURCE_TAG': '', 'GITHUB_OUTPUT': str(self.root / 'github-output'),
             'RELEASE_VERSION': '0.9.1', 'MACOS_REQUIRED': 'true',
@@ -81,6 +82,12 @@ class ReleaseWorkflowTests(unittest.TestCase):
                        {'SOURCE_TAG': 'v0.8.6'}, {'SOURCE_TAG': 'main'}):
             with self.subTest(values=values), self.assertRaises(AssertionError):
                 self.check_version(**values)
+
+    def test_desktop_only_mode_disallows_docker_publication(self):
+        self.version_source()
+        with self.assertRaisesRegex(AssertionError, 'cannot publish a Docker image'):
+            self.check_version(DESKTOP_ONLY='true', PUBLISH_DOCKER='true')
+        self.assertIn('if: ${{ !inputs.desktop_only }}', job(RELEASE, 'docker-validate'))
 
     def test_older_tag_backfill_does_not_require_missing_macos_sources(self):
         self.version_source('0.8.6')
@@ -157,12 +164,13 @@ class ReleaseWorkflowTests(unittest.TestCase):
             self.execute(MAC_SELECTION)
         self.assertFalse(any(destination.iterdir()))
 
-    def assembled_assets(self, *, macos=True):
+    def assembled_assets(self, *, macos=True, desktop_only=False):
         self.version_source()
         destination = self.root / 'dist/release'
         destination.mkdir(parents=True)
-        names = {'Gravelle-Setup-0.9.1-x64.exe', 'Gravelle-Windows-0.9.1-x64.zip',
-                 'Gravelle-Docker-0.9.1.zip', 'Gravelle-Source-0.9.1.zip'}
+        names = {'Gravelle-Setup-0.9.1-x64.exe', 'Gravelle-Windows-0.9.1-x64.zip'}
+        if not desktop_only:
+            names.update(('Gravelle-Docker-0.9.1.zip', 'Gravelle-Source-0.9.1.zip'))
         if macos:
             names.update(f'Gravelle-macOS-0.9.1-{arch}.{extension}'
                          for arch in ('arm64', 'x64') for extension in ('dmg', 'zip'))
@@ -171,13 +179,25 @@ class ReleaseWorkflowTests(unittest.TestCase):
             payload = ('explicit fixture: ' + name).encode()
             (destination / name).write_bytes(payload)
             lines.append(hashlib.sha256(payload).hexdigest() + '  ' + name)
-        (destination / 'SHA256SUMS.txt').write_text('\n'.join(lines) + '\n', encoding='ascii')
+        if not desktop_only:
+            (destination / 'SHA256SUMS.txt').write_text('\n'.join(lines) + '\n', encoding='ascii')
         (self.root / 'dist/release-notes.md').write_bytes((self.root / 'docs/releases/0.9.1.md').read_bytes())
         return destination
 
     def test_combined_checksum_validation_includes_mac_disk_images(self):
         self.assembled_assets()
         self.execute(ASSET_CHECK)
+
+    def test_desktop_only_mode_checksums_desktop_assets(self):
+        destination = self.assembled_assets(desktop_only=True)
+        names = {path.name for path in destination.iterdir()}
+        self.execute(ASSET_CHECK, DESKTOP_ONLY='true')
+        entries = (destination / 'SHA256SUMS.txt').read_text(encoding='ascii').splitlines()
+        self.assertEqual({entry.split('  ', 1)[1] for entry in entries}, names)
+        (destination / 'Gravelle-Docker-0.9.1.zip').write_bytes(b'unexpected Docker asset')
+        (destination / 'SHA256SUMS.txt').unlink()
+        with self.assertRaisesRegex(AssertionError, 'Unexpected desktop release asset set'):
+            self.execute(ASSET_CHECK, DESKTOP_ONLY='true')
 
     def test_combined_validation_rejects_missing_dmg_and_duplicate_checksums(self):
         destination = self.assembled_assets()
