@@ -1,45 +1,60 @@
-# Gravelle
+<div align="center">
 
-Gravelle 是属于你自己的写真库阅读器，支持 Windows、macOS 和 Docker。电脑、手机和平板通过浏览器阅读，同一账号共用进度、书签和收藏。
+<img src="static/gravelle-wordmark.svg" width="240" alt="Gravelle">
 
-Windows／macOS **0.9.7** · [下载与更新说明](https://github.com/pumpkissster/Gravelle/releases/latest)  
-Docker **0.9.6** · [部署说明](docs/docker-release.md)
+**属于你自己的写真库阅读器**
 
-## 主要功能
+写真与杂志库 · 以图搜图 · 单本分享
 
-- 读取图片文件夹、ZIP／CBZ、PDF 和图片型 EPUB，支持单页、双页、连续滚动及单页上下翻页。
-- 多个写真库与多个根文件夹，支持搜索、模特关联、收藏及批量整理。
-- 独立杂志库可读取图片文件夹、ZIP／CBZ、RAR 和图片型 EPUB。可填写简介和目录，并按正文关键词搜索。详见 [杂志库与填写示例](docs/magazines.md)。
-- 管理员可拖拽调整写真库和杂志库的顺序。在「设置 → 界面设置 → 侧边栏显示」也可拖拽调整主导航，以及设置部分条目的显示。侧边栏偏好按账号保存在当前设备。
-- 管理员与子账号、写真库访问授权，各账号独立保存阅读记录和库的显示偏好。
-- 按规则优化大图，各设备共用优化副本，保留原图。
-- 在自己的写真库中以图搜图，支持完整截图和轻中度裁剪匹配。
-- 管理员创建带密码的单本分享，有效期可选 1／3／7 天，在设置中管理链接与查看访问统计。
-- 网络设置支持已有证书启用 HTTPS、安全入口、独立分享端口和公网分享地址。详见 [网络设置说明](docs/network.md)。
-- 图片索引失败列表、写真库合成封面和缓存管理。
-- Board 界面支持亮色和暗色主题。
+[![Windows 和 macOS 正式版](https://img.shields.io/github/v/release/pumpkissster/Gravelle?label=Windows%20%2F%20macOS&color=ae3064)](https://github.com/pumpkissster/Gravelle/releases/latest)
+[![Docker Hub](https://img.shields.io/badge/Docker-Hub-2496ED?logo=docker&logoColor=white)](https://hub.docker.com/r/pumpkissster/gravelle)
+[![MIT License](https://img.shields.io/badge/License-MIT-6d656d)](LICENSE)
 
-EPUB 面向图片写真集，不支持纯文字书或 DRM；PDF 不支持加密文档。PDF、EPUB 暂不参加图片优化和以图搜图。扫描、编辑资料和移除作品不会删除或改写原文件。
+[桌面下载](https://github.com/pumpkissster/Gravelle/releases/latest) · [Docker 部署](docs/docker-release.md) · [使用文档](#使用文档) · [反馈问题](https://github.com/pumpkissster/Gravelle/issues)
 
-杂志库的 RAR 阅读使用系统 libarchive。支持单卷、未加密的 RAR，单页上限为 128 MiB。RAR 可按页阅读和分享，暂不参与图片优化与以图搜图。
+</div>
 
-## 下载与安装
+---
 
-桌面安装包可从 [GitHub Releases](https://github.com/pumpkissster/Gravelle/releases/latest) 下载。
+Gravelle 把本地写真和杂志整理成可在浏览器阅读的书架。支持 Windows、macOS 和 Docker，同一账号可以在电脑、手机和平板上接着读。
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/library-dark.jpg">
+  <img src="docs/screenshots/library-light.jpg" alt="Gravelle 的 Board 主题写真库，显示侧边导航、搜索和照片封面">
+</picture>
+
+<sub>Board 主题的示例写真库，演示照片来自 <a href="https://www.pexels.com/license/">Pexels</a>。</sub>
+
+## 功能亮点
+
+| 功能 | 用法 |
+| --- | --- |
+| **写真与杂志分库** | 把不同目录整理成独立的库，拖拽调整顺序。杂志可以录入简介和目录，也能按文字搜索。 |
+| **以图搜图** | 用完整截图或轻中度裁剪的图片，在自己的写真库里找原图。 |
+| **多种阅读方式** | 阅读图片文件夹、ZIP／CBZ、PDF 和图片型 EPUB。支持单页、双页和连续滚动，进度、书签与收藏随账号同步。 |
+| **单本分享** | 管理员可以为单本作品创建带密码的分享，设置 1、3 或 7 天有效期，查看访问统计和关闭分享。 |
+| **图片优化与权限** | 可按规则生成优化副本并保留原图。为子账号单独授权写真库，阅读记录按账号保存。 |
+
+<details>
+<summary>查看格式说明</summary>
+
+- 杂志库可读取单卷、未加密的 RAR，单页上限为 128 MiB。RAR 支持按页阅读和分享。
+- EPUB 面向图片写真集。加密 PDF、DRM EPUB 和纯文字 EPUB 超出支持范围。PDF、EPUB 和 RAR 暂不参加图片优化和以图搜图。
+
+</details>
+
+## 快速安装
 
 | 平台 | 安装方式 |
 | --- | --- |
-| Windows 10（1809+）／11 x64 | 下载安装程序，或解压便携 ZIP 后运行 `Gravelle/Gravelle.exe`。详见 [Windows 使用说明](docs/windows.md)。 |
-| macOS 15 及以上 | Apple 芯片选 `arm64`，Intel 选 `x64`；打开 DMG，将 Gravelle 拖入“应用程序”。详见 [Mac 使用说明](docs/macos.md)。 |
-| Docker | 拉取 [Docker Hub 镜像](https://hub.docker.com/r/pumpkissster/gravelle)，支持 amd64 和 arm64。详见 [部署说明](docs/docker-release.md)。 |
+| Windows 10（1809+）／11 x64 | 从 [发行页](https://github.com/pumpkissster/Gravelle/releases/latest) 下载安装程序，或解压便携 ZIP 后打开 `Gravelle.exe`。 [Windows 使用说明](docs/windows.md) |
+| macOS 15 及以上 | 从 [发行页](https://github.com/pumpkissster/Gravelle/releases/latest) 下载 DMG。Apple 芯片选 `arm64`，Intel 选 `x64`。 [macOS 使用说明](docs/macos.md) |
+| Docker／NAS | 使用 `pumpkissster/gravelle:latest`，支持 amd64 和 arm64。 [Docker 部署说明](docs/docker-release.md) |
 
-桌面版打开启动器后，添加写真根文件夹，设置端口并启动阅读器；浏览器会自动打开。首次访问注册管理员账号，然后创建写真库。子账号由管理员在设置中创建。
+桌面版在启动器里添加写真根文件夹，再点击「启动阅读器」。首次在浏览器打开时注册管理员账号，然后创建写真库。
 
-需要手机或平板访问时，开启局域网访问，使用启动器显示的局域网地址；Docker 使用宿主机 IP 和映射端口。
-
-Windows 安装程序未做代码签名，macOS 包未完成 Apple 公证，系统可能显示安全提示。请从项目发行页下载，并核对 `SHA256SUMS.txt`。
-
-## Docker 快速部署
+<details>
+<summary>展开 Docker Compose 示例</summary>
 
 可将以下内容保存为 `compose.yaml`，将 `/path/to/...` 替换为实际宿主机目录。默认访问端口为 8080，可自行修改。群晖用户也可直接填入 Container Manager 的“项目”配置。
 
@@ -76,29 +91,17 @@ docker compose up -d
 
 镜像可选 `pumpkissster/gravelle:latest`。写真目录只读映射到 `/library` 或 `/library` 的子目录，资料目录映射到 `/data`；网页创建库时选择 `/library` 或其子目录。
 
-按默认端口配置，打开 `http://服务器IP:8080`；修改了左侧端口时使用对应端口。网页创建库时选择 `/library/photos`。也可使用发行页的 Docker 配置包；其他路径与权限设置见 [Docker／NAS 部署说明](docs/docker-release.md)。
+在浏览器打开 `http://服务器IP:8080`，网页创建库时选择 `/library/photos`。如需独立分享端口、HTTPS 或单独挂载优化副本，可查看 [Docker 部署说明](docs/docker-release.md) 和 [网络设置](docs/network.md)。
 
-自动扫描间隔可在网页「设置 → 性能设置」调整，设为 0 可关闭定时扫描。
+</details>
 
-需要独立分享时，取消上方 `8081:8081` 映射的注释，重新创建容器，再到“设置 → 网络设置”开启“独立分享端口”。仅增加映射不会自动开启分享服务。左侧为宿主机分享端口，可自行修改；右侧容器端口保持 `8081`。公网分享地址填写访客实际使用的域名与端口，详见 [网络设置](docs/network.md#独立分享端口)。
+## 使用文档
 
-图片优化副本默认位于 `/data/transcoded`。如果已有优化副本，启用独立映射前先按 [迁移说明](docs/docker-release.md#图片优化目录单独映射) 移动已有副本，再切换挂载。
+- **整理与阅读**　[杂志库](docs/magazines.md) · [PDF](docs/pdf.md) · [EPUB](docs/epub.md) · [以图搜图](docs/image-search.md)
+- **服务与访问**　[用户与权限](docs/users.md) · [单本分享](docs/sharing.md) · [网络设置](docs/network.md)
+- **存储与性能**　[图片优化](docs/transcoding.md) · [缓存管理](docs/cache.md) · [性能设置](docs/performance.md)
 
-## 资料、备份与更新
-
-| 平台 | 资料位置 |
-| --- | --- |
-| Windows | `%LOCALAPPDATA%\Gravelle` |
-| macOS | `~/Library/Application Support/Gravelle` |
-| Docker | 容器 `/data` 对应的宿主机目录 |
-
-升级前停止服务，备份完整资料目录，并沿用原作品路径和挂载。资料包含账号、作品信息、进度、书签、封面及分享密码密钥；原始写真文件需另行备份。
-
-网页设置可检查新版本；桌面启动器可检查并下载对应平台安装包，由用户确认安装。Docker 用户备份后拉取新镜像并重建容器。
-
-分享链接需要访客能连接服务地址；本机 `127.0.0.1` 链接不能供另一台设备使用。图片加密不能防截图，也不能代替 HTTPS；公网访问应使用受信任的 HTTPS 入口。
-
-详细操作：[用户与权限](docs/users.md) · [PDF](docs/pdf.md) · [EPUB](docs/epub.md) · [单本分享](docs/sharing.md) · [图片优化](docs/transcoding.md) · [以图搜图](docs/image-search.md) · [缓存管理](docs/cache.md) · [性能设置](docs/performance.md)
+升级前，停止服务并备份完整资料目录，沿用原作品路径和挂载。各平台的资料位置和更新步骤见上面的安装说明。
 
 ## 许可
 
