@@ -132,8 +132,8 @@ button:focus-visible, a:focus-visible { outline-offset: 3px; }
 .library-tile-info>span { display: block; color: #968a8f; font-size: 12px; margin-top: 7px; }
 .section-label { gap: 13px; margin-bottom: 13px; }
 .section-label h2, #shelf-heading { font: 600 17px/1.5 var(--sans); letter-spacing: .3px; }
-.section-label>span { color: #78686f; font-size: 12px; letter-spacing: 1.5px; }
 .continue-section { margin-bottom: 32px; }
+.section-label>span { color: #78686f; font-size: 12px; letter-spacing: 1.5px; }
 .continue-card { min-height: 148px; padding: 18px 22px; gap: 19px; background: linear-gradient(105deg, #322d2f 0%, #282526 62%, #272425 100%); border-color: #433b3e; border-radius: 8px; }
 .continue-card:after { border-color: #50454a; opacity: .3; }
 .continue-cover { width: 72px; height: 108px; border-radius: 4px; background: #3c3538; box-shadow: 0 4px 12px #0004; }
@@ -502,6 +502,7 @@ button:focus-visible, a:focus-visible { outline-offset: 3px; }
 .reader[data-controls="hidden"] .reader-notice { top: 8px; }
 .paged-view { overflow: hidden; }
 .page-turn-layer { position: absolute; inset: 0; pointer-events: none; z-index: 1; }
+.reader-drag-neighbor:not([data-drag-active]) { visibility: hidden; }
 .reader-footer .page-slider-label { grid-column: 1 / -1; grid-row: 1; width: 100%; min-width: 0; max-width: none; }
 .reader-footer .page-navigation { grid-column: 1; grid-row: 2; }
 .reader-footer .reader-key-hint { grid-column: 2; grid-row: 2; justify-self: end; margin-left: 0; }
@@ -903,23 +904,43 @@ html[data-interface-theme="light"] #settings-connection { color: #a71c5c; }
 .library-name-results { margin: 0 0 16px; color: var(--muted); }
 #browse-sections { min-width: 0; }
 #home-empty-preferences button { margin-top: 16px; }
-#app[data-view="home"] .library-tiles {
-  --tile-shadow-gutter: clamp(16px, 2.5vw, 32px);
-  display: grid;
-  grid-auto-flow: column;
-  grid-auto-columns: clamp(245px, 20vw, 330px);
-  grid-template-columns: none;
-  gap: 18px;
-  overflow-x: auto;
-  overscroll-behavior-x: contain;
-  scrollbar-width: thin;
-  /* A scrollport clips shadows in both axes; reserve room within its bounds. */
-  padding: 24px var(--tile-shadow-gutter) 36px;
-  margin: -24px calc(0px - var(--tile-shadow-gutter)) -22px;
-  scroll-padding-inline: var(--tile-shadow-gutter);
-  scroll-snap-type: x proximity;
+.home-library-carousel {
+  --color-background-primary-default: var(--board-raised);
+  --color-background-primary-hover: var(--board-hover);
+  --color-background-primary-active: var(--board-hover);
+  --color-border-button-default: var(--line);
+  --color-border-button-hover: var(--board-border-hover);
+  --color-border-focus-ring: var(--board-focus);
+  --color-foreground-icon-primary: var(--ink);
 }
-#app[data-view="home"] .library-tiles > * { scroll-snap-align: start; }
+.home-library-carousel [data-carousel-track] { padding-block: 8px 12px; margin-block: -8px -12px; }
+.home-library-carousel-item { flex: 0 0 min(86%, clamp(245px, 20vw, 330px)); }
+.home-library-card-host, .home-library-card-host > .library-tile-card { height: 100%; }
+.home-library-carousel-controls {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  pointer-events: none;
+}
+.home-library-carousel-controls button {
+  position: absolute;
+  inset-block-start: 50%;
+  inline-size: 44px;
+  block-size: 44px;
+  translate: 0 -50%;
+  pointer-events: auto;
+  border-radius: 50%;
+  box-shadow: var(--board-shadow-hover);
+}
+.home-library-carousel-controls button[hidden] { display: none; }
+.home-library-carousel-controls [data-carousel-edge="previous"] { inset-inline-start: 8px; }
+.home-library-carousel-controls [data-carousel-edge="next"] { inset-inline-end: 8px; }
+@media (hover: hover) and (pointer: fine) {
+  .home-library-carousel:not(:hover):not(:has(:focus-visible)) .home-library-carousel-controls button {
+    opacity: 0;
+    pointer-events: none;
+  }
+}
 .library-tile-card { position: relative; min-width: 0; }
 .library-tile-card .library-tile { display: block; width: 100%; height: 100%; }
 .selection-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 22px; padding: 13px 15px; border: 1px solid var(--line); background: var(--surface); border-radius: 9px; }
@@ -1054,7 +1075,7 @@ html[data-interface-theme="light"] .button-danger { color: #aa304b; }
 #book-detail .detail-library-link:hover { border-color: currentColor; background: var(--surface); }
 #book-detail .detail-library-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
 @media (max-width: 760px) {
-  #app[data-view="home"] .library-tiles { grid-auto-columns: min(76vw, 300px); gap: 14px; }
+  .home-library-carousel-item { flex-basis: min(76vw, 300px); }
   .selection-toolbar { padding: 11px; gap: 9px; }
   .selection-toolbar .button { min-height: 42px; padding: 10px 12px; font-size: 12px; }
   .selection-actions { margin-left: 0; width: 100%; }
@@ -1188,10 +1209,18 @@ button, input, select, textarea { line-height: 1.5; }
   background: var(--surface); border-color: var(--line); color: var(--ink);
 }
 #app[data-view="home"] .library-heading { display: none; }
-#app[data-view="home"] #browse-sections { padding-top: 24px; }
-#app[data-view="home"] .library-home { margin-bottom: 12px; }
+#app[data-view="home"] #browse-sections {
+  --home-section-spacing: 32px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  row-gap: var(--home-section-spacing);
+  padding-block-start: var(--home-section-spacing);
+}
+#app[data-view="home"] #browse-sections > :is(.library-home, .continue-section) { margin-block-end: 0; }
 #app[data-view="home"] .shelf-meta { display: none; }
-#app[data-view="home"] .shelf-tools { margin-bottom: 22px; }
+#app[data-view="home"] #browse-sections > section > :is(.section-label, .shelf-tools) { margin-block-end: 16px; }
+#app[data-view="home"] #browse-sections > section > :is(.section-label, .shelf-tools) > h2 { margin: 0; line-height: 32px; }
+#app[data-view="home"] #catalog-section > .shelf-tools { min-block-size: 0; border-block-end: 0; }
 
 .reader {
   --reader-text: #f3eef2;
@@ -1218,7 +1247,6 @@ button, input, select, textarea { line-height: 1.5; }
 }
 .reader-turn-hint small { color: #ded8dc; }
 @media (max-width: 760px) {
-  #app[data-view="home"] #browse-sections { padding-top: 10px; }
   .section-label h2, #shelf-heading { font-size: 18px; }
   .continue-info h3 { font-size: 17px; }
   .continue-card > .button { min-height: 36px; }
@@ -1645,8 +1673,28 @@ button, input, select, textarea { line-height: 1.5; }
 #settings-page { padding-bottom: 36px; }
 .message-center {
   width: min(100%, var(--settings-content-width));
+  display: grid;
+  gap: 16px;
   padding-bottom: 36px;
 }
+.message-task-runs {
+  display: grid;
+  gap: 12px;
+}
+.message-task-runs > h2 {
+  margin: 0;
+  color: var(--ink);
+  font: 600 15px/1.45 var(--sans);
+}
+.message-task-runs .notice { margin: 0; }
+.message-task-runs .message-details ol {
+  margin: 8px 0 0;
+  padding-inline-start: 18px;
+  list-style: none;
+}
+.message-task-runs .message-details li + li { margin-block-start: 8px; }
+.message-task-runs .message-details li p { margin-block-start: 2px; }
+.message-task-runs .message-task-failure { color: var(--text-warning); }
 .message-list {
   display: grid;
   gap: 12px;
@@ -1667,9 +1715,6 @@ button, input, select, textarea { line-height: 1.5; }
   box-shadow: var(--board-shadow, none);
 }
 .message-card[data-kind="scan"] { --message-tint: var(--text-warning); }
-.message-card[data-unread="true"] {
-  background: color-mix(in srgb, var(--text-accent) 4%, var(--surface));
-}
 .message-card-icon {
   display: grid;
   place-items: center;
@@ -1687,19 +1732,23 @@ button, input, select, textarea { line-height: 1.5; }
   align-items: center;
   gap: 4px 8px;
 }
-.message-unread-dot {
-  flex: 0 0 8px;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--text-accent);
-}
 .message-read-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   padding: 1px 7px;
   border: 1px solid var(--line);
   border-radius: 999px;
-  color: var(--muted);
+  color: var(--ink);
+  background: var(--surface);
   font: 500 12px/1.5 var(--sans);
+}
+.message-card[data-unread="true"] .message-read-status::before {
+  content: "";
+  inline-size: 6px;
+  block-size: 6px;
+  border-radius: 50%;
+  background: var(--color-text-error-primary, var(--text-danger));
 }
 .message-card-body :is(h2, h3) {
   margin: 0;

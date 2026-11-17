@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { scanMessages, optimizationMessage, createInbox } = require('../static/message-center.js');
+const { scanMessages, optimizationMessage, createInbox, taskCard } = require('../static/message-center.js');
 
 const libraries = [{ id: 'first', name: 'A' }, { id: 'second', name: 'B' }];
 const unreadable = { library_id: 'first', path: 'one', message: '无法读取此目录' };
@@ -169,4 +169,22 @@ test('invalid or unavailable storage does not block the inbox, and saved reads a
   const saved = JSON.parse(bounded.getItem('account')).entries;
   assert.equal(saved.length, 256);
   assert.equal(saved.at(-1)[0], 'scan:299');
+});
+test('run details show the waiting work and preserve the latest per-page failure', () => {
+  const work = { title: '示例作品', page: 0 };
+  const failure = { work, reason: '图片无法解码。' };
+  const current = taskCard('index', { stage: 'waiting', current: {
+    work, lastProgressAt: 123, done: 3, failed: 1, lastFailure: failure,
+  } });
+  assert.equal(current.stage, '正在等待后台任务名额');
+  assert.equal(current.target, '示例作品（第 1 页）');
+  assert.equal(current.lastProgressAt, 123);
+  assert.match(current.failure, /示例作品.*图片无法解码/);
+  const finished = taskCard('index', { stage: 'idle', recent: [
+    { outcome: 'warnings', done: 3, failed: 1, endedAt: 456, lastFailure: failure },
+  ] });
+  assert.equal(finished.stage, '暂无索引任务');
+  assert.equal(finished.target, '');
+  assert.equal(finished.recent[0].label, '已完成，有异常');
+  assert.equal(finished.recent[0].failure, current.failure);
 });

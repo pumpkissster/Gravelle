@@ -46,11 +46,13 @@ import zipfile
 
 from PIL import Image, ImageDraw, ImageOps, UnidentifiedImageError
 from accounts import (PERMISSION_KEYS, PERMISSION_OPTIONS, check_password, hash_password,
-                      migrate_accounts, prepare_account_migration, validate_password)
+                      migrate_accounts, validate_password)
+from database_backup import database_upgrade
 from password_reset import DataDirectoryLock
 from transcoding import TranscodingManager, catalogue_visibility
 from image_search import ImageSearchManager, MAX_QUERY_BYTES
-from task_scheduler import SharedTaskScheduler
+from task_scheduler import SharedTaskScheduler, TaskRunHistory
+from incremental_scan import LibraryChangeMonitor, MAX_TARGETS, ScanTarget, add_target
 from library_covers import LibraryCoverManager
 from page_cache import SourcePageCache, file_identity, source_identity
 from cache_manager import CacheManager
@@ -62,7 +64,7 @@ from network_settings import (NetworkSettings, ENTRY_COOKIE, ENTRY_SECONDS,
                               SHARE_STATIC, SHARE_PAGE, SHARE_GET, SHARE_POST)
 from https_settings import HTTPSSettingsError, MAX_CERTIFICATE_BODY_BYTES, load_context
 
-VERSION = "0.9.7"
+VERSION = "0.9.8"
 MEDIA_TYPES = {"manga_jp", "manga_kr", "comic_us", "photo", "magazine"}
 LIBRARY_ORDER_SQL = "l.display_order IS NULL,l.display_order,l.created_at,l.id"
 IMAGE_TYPES = {
@@ -487,7 +489,8 @@ def validate_archive_image(info):
 
 
 class Library:
-    def __init__(self, root: Path, data: Path, password: str, scan_interval: float, *, roots=None):
+    def __init__(self, root: Path, data: Path, password: str, scan_interval: float, *, roots=None,
+                 on_database_upgrade=None):
         # Preserve the primary boundary for existing callers/configuration. Each
         # additional boundary keeps its lexical path so links can be rejected.
         if roots is not None and not isinstance(roots, (list, tuple)):
@@ -505,17 +508,19 @@ class Library:
         self.root = self.roots[0]
         self.data = data.resolve()
         self.data.mkdir(parents=True, exist_ok=True)
+        self.database = self.data / "library.sqlite3"
         self.service_lock = DataDirectoryLock(self.data)
         if not self.service_lock.acquire():
             raise RuntimeError("此资料目录正在使用，请先停止正在运行的阅读器。")
         try:
-            self._initialize_runtime(password, scan_interval)
+            with database_upgrade(self.database, on_database_upgrade) as backup:
+                self.migration_backup = backup
+                self._initialize_runtime(password, scan_interval)
         except BaseException:
             self.service_lock.release()
             raise
 
     def _initialize_runtime(self, password, scan_interval):
-        self.database = self.data / "library.sqlite3"
         self.password = password
         self.scan_interval = scan_interval
         self.scan_timer_condition = threading.Condition()
@@ -528,7 +533,10 @@ class Library:
         self.last_scan = None
         self.errors = []
         self.pending_scans = set()
+        self.pending_scan_targets = {}
         self.current_scan = None
+        self.scan_activity_lock = threading.Lock()
+        self.scan_activity = None
         self.attempt_lock = threading.Lock()
         self.auth_lock = threading.RLock()
         self.attempts: dict[str, deque] = {}
@@ -542,7 +550,6 @@ class Library:
         self.request_condition = threading.Condition()
         self.active_requests = 0
         self.request_stopping = False
-        self.migration_backup = prepare_account_migration(self.database)
         self._initialize_database()
         migrate_accounts(self.database)
         # Add chapter offsets after the legacy single-account tables have been
@@ -554,6 +561,10 @@ class Library:
         self.signing_key = self._load_secret()
         self.network = NetworkSettings(self)
         self.task_scheduler = SharedTaskScheduler(self, ReaderError)
+        self.task_runs = TaskRunHistory(self)
+        self.change_monitor = LibraryChangeMonitor(
+            data=self.data, routes=self._incremental_routes, directory=self._watch_directory,
+            classify=self._scan_event_kind, hidden=is_hidden, submit=self._queue_incremental_scan)
         self.transcoding = TranscodingManager(self, ReaderError)
         self.image_search = ImageSearchManager(self, ReaderError)
         self.library_covers = LibraryCoverManager(self, ReaderError)
@@ -724,6 +735,8 @@ class Library:
                 connection.execute("ALTER TABLE media_libraries ADD COLUMN default_author_id TEXT REFERENCES models(id)")
             if "display_order" not in library_columns:
                 connection.execute("ALTER TABLE media_libraries ADD COLUMN display_order INTEGER")
+            if "incremental_scan" not in library_columns:
+                connection.execute("ALTER TABLE media_libraries ADD COLUMN incremental_scan INTEGER NOT NULL DEFAULT 0")
             columns = {row["name"] for row in connection.execute("PRAGMA table_info(books)")}
             if "library_id" not in columns:
                 connection.execute("ALTER TABLE books ADD COLUMN library_id TEXT")
@@ -746,6 +759,7 @@ class Library:
                 connection.execute("ALTER TABLE books ADD COLUMN source_root TEXT NOT NULL DEFAULT ''")
                 connection.execute("""UPDATE books SET source_root=COALESCE(
                     (SELECT path FROM media_libraries WHERE id=books.library_id),'')""")
+            connection.execute("CREATE INDEX IF NOT EXISTS books_scan_source ON books(library_id,source_root,path)")
             if "removed" not in columns:
                 connection.execute("ALTER TABLE books ADD COLUMN removed INTEGER NOT NULL DEFAULT 0")
             if "pdf_sizes" not in columns:
@@ -874,7 +888,9 @@ class Library:
         result["paths"] = json.loads(row["paths"]) or [row["path"]]
         result["exclude_rules"] = json.loads(row["exclude_rules"])
         result["hide_date_prefix"] = bool(row["hide_date_prefix"])
-        result["errors"] = json.loads(row["errors"])
+        result["incremental_scan"] = bool(row["incremental_scan"])
+        result["errors"] = [{key: value for key, value in error.items() if key != "scan_scope"}
+                            for error in json.loads(row["errors"])]
         result["book_count"] = row["book_count"]
         result["scanning"] = scanning
         return result
@@ -1023,9 +1039,12 @@ class Library:
             if direction not in ("ltr", "rtl", "ttb"):
                 raise ReaderError("阅读方向需要是 ltr、rtl 或 ttb。")
             hide_date_prefix = body.get("hide_date_prefix", bool(previous.get("hide_date_prefix", 0)))
+            incremental_scan = body.get("incremental_scan", bool(previous.get("incremental_scan", 0)))
             apply_reading_defaults = body.get("apply_reading_defaults", False)
             if type(hide_date_prefix) is not bool:
                 raise ReaderError("隐藏作品名称中的日期需要是布尔值。")
+            if type(incremental_scan) is not bool:
+                raise ReaderError("增量扫描需要是布尔值。")
             if type(apply_reading_defaults) is not bool:
                 raise ReaderError("将阅读设置应用于全部作品需要是布尔值。")
             author_id = body.get("default_author_id", previous.get("default_author_id"))
@@ -1055,16 +1074,16 @@ class Library:
                 library_id = secrets.token_hex(12)
                 connection.execute("""INSERT INTO media_libraries
                     (id,name,path,paths,media_type,reading_mode,reading_direction,exclude_rules,default_author,
-                     default_author_id,hide_date_prefix,created_at)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""", (library_id, name.strip(), path,
+                     default_author_id,hide_date_prefix,incremental_scan,created_at)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""", (library_id, name.strip(), path,
                     json.dumps(paths, ensure_ascii=False), media_type, mode,
-                    direction, json.dumps(rules, ensure_ascii=False), author, author_id, hide_date_prefix, time.time()))
+                    direction, json.dumps(rules, ensure_ascii=False), author, author_id, hide_date_prefix, incremental_scan, time.time()))
             else:
                 connection.execute("""UPDATE media_libraries SET name=?,path=?,paths=?,media_type=?,reading_mode=?,
-                    reading_direction=?,exclude_rules=?,default_author=?,default_author_id=?,hide_date_prefix=?,
+                    reading_direction=?,exclude_rules=?,default_author=?,default_author_id=?,hide_date_prefix=?,incremental_scan=?,
                     revision=revision+1 WHERE id=?""",
                     (name.strip(), path, json.dumps(paths, ensure_ascii=False), media_type, mode, direction,
-                     json.dumps(rules, ensure_ascii=False), author, author_id, hide_date_prefix, library_id))
+                     json.dumps(rules, ensure_ascii=False), author, author_id, hide_date_prefix, incremental_scan, library_id))
                 marks = ",".join("?" for _ in paths)
                 # A root removal cannot redirect an old relative page manifest
                 # into a different selected root while the rescan is running.
@@ -1080,6 +1099,8 @@ class Library:
             # a listing must not observe removed roots before polling is active.
             connection.commit()
             self.start_scan(library_id)
+        if incremental_scan or previous.get("incremental_scan"):
+            self.change_monitor.refresh()
         return {"library": next(item for item in self.libraries(include_hidden=True)["libraries"] if item["id"] == library_id)}
 
     @staticmethod
@@ -1133,11 +1154,14 @@ class Library:
             connection.execute(f"DELETE FROM media_libraries WHERE id IN ({marks})", ids)
             connection.commit()
             self.pending_scans.difference_update(ids)
+            for library_id in ids:
+                self.pending_scan_targets.pop(library_id, None)
             for book_id in book_ids:
                 self._prune_covers(book_id, set())
             self.transcoding.remove_books(book_ids)
             self.image_search.reconcile()
         self.pdf.prune()
+        self.change_monitor.refresh()
         return {"removed": ids}
 
     def batch_books(self, body):
@@ -1606,6 +1630,58 @@ class Library:
             else:
                 self.attempts.setdefault(address, deque(maxlen=16)).append(time.monotonic())
 
+    @staticmethod
+    def _scan_event_kind(suffix):
+        if suffix in IMAGE_TYPES:
+            return "folder"
+        if suffix in ARCHIVE_TYPES or suffix in (".pdf", ".epub", ".rar"):
+            return "file"
+        return None
+
+    def _incremental_routes(self):
+        routes = {}
+        with closing(self.connect()) as connection:
+            for row in connection.execute("SELECT id,revision,path,paths FROM media_libraries WHERE incremental_scan=1"):
+                for root in json.loads(row["paths"]) or [row["path"]]:
+                    routes.setdefault(root, []).append((row["id"], row["revision"]))
+        return routes
+
+    def _watch_directory(self, root):
+        try:
+            self._directory_path(root)
+        except ReaderError as error:
+            raise OSError(str(error)) from error
+
+    def _start_scan_worker(self):
+        if not self.scanning:
+            self.scanning = True
+            self.scan_thread = threading.Thread(target=self._scan, name="library-scan", daemon=True)
+            self.scan_thread.start()
+
+    def _queue_incremental_scan(self, library_id, revision, targets):
+        with self.state_lock, closing(self.connect()) as connection:
+            if self.stop_event.is_set():
+                return
+            row = connection.execute("SELECT revision,incremental_scan FROM media_libraries WHERE id=?", (library_id,)).fetchone()
+            if not row or not row["incremental_scan"] or row["revision"] != revision:
+                return
+            if library_id in self.pending_scans and library_id not in self.pending_scan_targets:
+                return  # An already queued full scan covers the batch.
+            if targets is not None:
+                queued_revision, combined = self.pending_scan_targets.get(library_id, (revision, set()))
+                if queued_revision != revision:
+                    combined = set()
+                for target in targets:
+                    add_target(combined, target)
+                if len(combined) <= MAX_TARGETS:
+                    self.pending_scan_targets[library_id] = (revision, combined)
+                else:
+                    self.pending_scan_targets.pop(library_id, None)
+            else:
+                self.pending_scan_targets.pop(library_id, None)
+            self.pending_scans.add(library_id)
+            self._start_scan_worker()
+
     def start_scan(self, library_id=None):
         if library_id is not None:
             self._library_config(library_id)
@@ -1625,10 +1701,9 @@ class Library:
             self.pending_scans.update(targets)
             if not targets:
                 return False
-            if not self.scanning:
-                self.scanning = True
-                self.scan_thread = threading.Thread(target=self._scan, name="library-scan", daemon=True)
-                self.scan_thread.start()
+            for identifier in targets:
+                self.pending_scan_targets.pop(identifier, None)
+            self._start_scan_worker()
             return True
 
     def start(self):
@@ -1636,6 +1711,7 @@ class Library:
         self.image_search.start()
         self.library_covers.start()
         self.cache_manager.start()
+        self.change_monitor.start()
         self.start_scan()
         self.periodic_thread = threading.Thread(target=self._periodic, name="scan-timer", daemon=True)
         self.periodic_thread.start()
@@ -1673,6 +1749,7 @@ class Library:
 
     def close(self):
         self.stop_event.set()
+        self.change_monitor.close()
         self.source_pages.close()
         with self.scan_timer_condition:
             self.scan_timer_condition.notify_all()
@@ -1711,10 +1788,14 @@ class Library:
                         return
                     library_id = sorted(self.pending_scans)[0]
                     self.pending_scans.remove(library_id)
+                    scope = self.pending_scan_targets.pop(library_id, None)
                     self.current_scan = library_id
                 try:
                     config = self._library_config(library_id)
-                    self._scan_library(config)
+                    if scope is None:
+                        self._scan_library(config)
+                    elif scope[0] == config["revision"] and config["incremental_scan"]:
+                        self._scan_library(config, sorted(scope[1]))
                 except ReaderError as error:
                     if error.status != 404:
                         LOG.exception("Media library scan failed")
@@ -1726,16 +1807,138 @@ class Library:
                     self.current_scan = None
                     self.scanning = False
 
-    def _scan_library(self, config):
+    def scan_task_status(self):
+        with self.scan_activity_lock:
+            current = dict(self.scan_activity) if self.scan_activity is not None else None
+        queued = len(self.pending_scans)
+        return {"stage": current["stage"] if current else "queued" if queued else "idle",
+                "current": current, "queued": queued, "recent": self.task_runs.recent("scan")}
+
+    def _update_scan_activity(self, run, **fields):
+        with self.scan_activity_lock:
+            if any(run[key] != value for key, value in fields.items()):
+                run.update(fields, lastProgressAt=time.time())
+
+    def _scan_library(self, config, targets=None):
+        now = time.time()
+        run = {"libraryId": config["id"], "libraryName": config["name"], "stage": "enumerating",
+               "startedAt": now, "lastProgressAt": now, "work": None, "directory": None,
+               "mode": "incremental" if targets is not None else "full",
+               "directories": 0, "done": 0, "total": None, "warnings": 0, "lastFailure": None}
+        with self.scan_activity_lock:
+            self.scan_activity = run
+        outcome = "failed"
+        try:
+            outcome = self._perform_scan(config, run, targets)
+        except Exception:
+            if not run["lastFailure"]:
+                self._update_scan_activity(run, lastFailure={
+                    "reason": "扫描失败，请检查服务端日志。", "work": run["work"], "at": time.time()})
+            raise
+        finally:
+            with self.scan_activity_lock:
+                if self.scan_activity is run:
+                    self.scan_activity = None
+            self.task_runs.finish("scan", run, outcome)
+
+    @staticmethod
+    def _scan_rows(library_id, targets, alias=""):
+        prefix = f"{alias}." if alias else ""
+        where = f"{prefix}library_id=?"
+        args = [library_id]
+        if targets is None:
+            return where, args
+        scopes = []
+        for target in targets:
+            path = f"{prefix}path"
+            clause = f"{prefix}source_root=?"
+            args.append(target.root)
+            if target.kind == "tree" and target.path != ".":
+                clause += f" AND ({path}=? OR ({path}>=? AND {path}<?))"
+                args.extend((target.path, target.path + "/", target.path + "0"))
+            elif target.kind != "tree":
+                comparison = "=" if target.kind == "folder" else "<>"
+                clause += f" AND {path}=? AND {prefix}format{comparison}'folder'"
+                args.append(target.path)
+            scopes.append("(" + clause + ")")
+        return where + " AND (" + " OR ".join(scopes) + ")", args
+
+    def _scan_entries(self, root, target, rules, walk_error, exact_case=False):
+        if target is None or (target.kind == "tree" and target.path == "."):
+            yield from os.walk(root, topdown=True, onerror=walk_error, followlinks=False)
+            return
+        relative = PurePosixPath(target.path)
+        directory = relative.parent if target.kind == "file" else relative
+        current = root
+        for part in directory.parts:
+            if exact_case:
+                try:
+                    with os.scandir(current) as siblings:
+                        if not any(entry.name == part for entry in siblings):
+                            return
+                except OSError as error:
+                    walk_error(error)
+                    return
+            current /= part
+            if is_hidden(part) or current.is_relative_to(self.data):
+                return
+            try:
+                info = current.lstat()
+            except (FileNotFoundError, NotADirectoryError):
+                return
+            except OSError as error:
+                walk_error(error)
+                return
+            if is_link_node(info):
+                return
+            if not stat.S_ISDIR(info.st_mode):
+                # A replaced directory can now be a readable archive at the
+                # same path. Both the old subtree and the new file are in scope.
+                if target.kind == "tree" and current == root.joinpath(*relative.parts):
+                    yield current.parent, [], [current.name]
+                return
+            if self._excluded(current.relative_to(root).as_posix(), rules, directory=True):
+                return
+        if target.kind == "tree":
+            yield from os.walk(current, topdown=True, onerror=walk_error, followlinks=False)
+        elif target.kind == "folder":
+            try:
+                with os.scandir(current) as entries:
+                    names = [entry.name for entry in entries]
+            except (FileNotFoundError, NotADirectoryError):
+                return
+            except OSError as error:
+                walk_error(error)
+                return
+            yield current, [], names
+        else:
+            if exact_case:
+                try:
+                    with os.scandir(current) as siblings:
+                        if not any(entry.name == relative.name for entry in siblings):
+                            return
+                except OSError as error:
+                    walk_error(error)
+                    return
+            yield current, [], [relative.name]
+
+    def _perform_scan(self, config, run, targets=None):
         library_id, revision = config["id"], config["revision"]
         errors, found, unreadable = [], [], []
         rules = json.loads(config["exclude_rules"])
         roots = json.loads(config["paths"]) or [config["path"]]
+        old_errors = json.loads(config["errors"])
+        where, scan_arguments = self._scan_rows(library_id, targets)
+        joined_where, _ = self._scan_rows(library_id, targets, "b")
         archive_types = ARCHIVE_TYPES | {".rar"} if config["media_type"] == "magazine" else ARCHIVE_TYPES
 
-        def report(path, message):
+        def report(path, message, kind="file", location=None):
             if len(errors) < 200:
-                errors.append({"path": path, "message": str(message)})
+                errors.append({"path": path, "message": str(message),
+                               "scan_scope": [root_value, path if location is None else location, kind]})
+            self._update_scan_activity(
+                run, warnings=run["warnings"] + 1,
+                lastFailure={"reason": str(message)[:300], "work": run["work"], "at": time.time()})
 
         def on_walk_error(error):
             try:
@@ -1743,7 +1946,8 @@ class Library:
             except (TypeError, ValueError):
                 path = "."
             unreadable.append((str(root), path))
-            report(path, "无法读取此目录，请检查目录访问权限。")
+            self._update_scan_activity(run, work=None)
+            report(path, "无法读取此目录，请检查目录访问权限。", "tree")
 
         def entry_excluded(name):
             parts = PurePosixPath(name).parts
@@ -1754,7 +1958,7 @@ class Library:
         try:
             with closing(self.connect()) as connection:
                 cached = {row["id"]: dict(row) for row in connection.execute(
-                    "SELECT * FROM books WHERE library_id=?", (library_id,))}
+                    "SELECT * FROM books WHERE " + where, scan_arguments)}
             # Only source/availability changes require another index pass.
             # Periodic scans also update metadata and last_scan, but must not
             # restart a slow full-catalogue reconciliation every five minutes.
@@ -1764,18 +1968,30 @@ class Library:
             previous_ids = {(self._source_identity(Path(row["source_root"]), row["path"]),
                              row["format"] if row["format"] in ("folder", "pdf", "epub") else "archive"): row["id"]
                             for row in cached.values()}
-            for root_value in roots:
-                try:
-                    root = self._directory_path(root_value)
-                except ReaderError as error:
-                    unreadable.append((root_value, "."))
-                    report(root_value, str(error))
+            scopes = [(root, None) for root in roots] if targets is None else [(item.root, item) for item in targets]
+            spellings = {}
+            for target in targets or ():
+                spellings.setdefault((target.root, target.path.casefold()), set()).add(target.path)
+            validated_roots = {}
+            for root_value, target in scopes:
+                self._update_scan_activity(run, directory=None, work=None)
+                if root_value not in validated_roots:
+                    try:
+                        validated_roots[root_value] = self._directory_path(root_value)
+                    except ReaderError as error:
+                        validated_roots[root_value] = None
+                        unreadable.append((root_value, "."))
+                        report(root_value, str(error), "tree", ".")
+                root = validated_roots[root_value]
+                if root is None:
                     continue
-                for directory, children, filenames in os.walk(root, topdown=True,
-                                                             onerror=on_walk_error, followlinks=False):
+                exact_case = target is not None and len(spellings[(target.root, target.path.casefold())]) > 1
+                for directory, children, filenames in self._scan_entries(root, target, rules, on_walk_error, exact_case):
                     if self.stop_event.is_set():
-                        return
+                        return "interrupted"
                     folder = Path(directory)
+                    self._update_scan_activity(run, directories=run["directories"] + int(target is None or target.kind != "file"),
+                                               directory=folder.relative_to(root).as_posix(), work=None)
                     # A selected root may contain DATA_PATH; never catalogue our
                     # own database or anything below that directory.
                     children[:] = sorted((name for name in children if not is_hidden(name)
@@ -1789,11 +2005,18 @@ class Library:
                             continue
                         candidate = folder / name
                         suffix = candidate.suffix.lower()
+                        if target is not None and target.kind == "folder" and suffix not in IMAGE_TYPES:
+                            continue
+                        if target is not None and target.kind == "file" and suffix in IMAGE_TYPES:
+                            continue
                         if suffix not in IMAGE_TYPES and suffix not in archive_types and suffix not in (".pdf", ".epub"):
                             continue
                         relative = candidate.relative_to(root).as_posix()
                         if self._excluded(relative, rules):
                             continue
+                        work = {"title": candidate.stem} if suffix not in IMAGE_TYPES else None
+                        if work != run["work"]:
+                            self._update_scan_activity(run, work=work)
                         try:
                             info = candidate.lstat()
                             if not stat.S_ISREG(info.st_mode) or is_link_node(info):
@@ -1802,7 +2025,7 @@ class Library:
                                 if info.st_size > 0:
                                     image_files.append((relative, info))
                                 else:
-                                    report(relative, "图片文件为空，已跳过。")
+                                    report(relative, "图片文件为空，已跳过。", "folder", folder.relative_to(root).as_posix())
                             elif suffix == ".epub":
                                 book_id = previous_ids.get((self._source_identity(root, relative), "epub")) or self._book_id("source\0" + self._source_identity(root, relative), "epub", library_id)
                                 with self._open_media_file(root, relative) as handle:
@@ -1874,12 +2097,18 @@ class Library:
                                     report(relative, "压缩包中没有支持的图片，或图片已被排除规则过滤。")
                         except (OSError, ValueError, RuntimeError, NotImplementedError,
                                 zipfile.BadZipFile, ReaderError) as error:
+                            if target is not None and target.kind == "file" and isinstance(error, FileNotFoundError):
+                                continue
                             message = str(error) if isinstance(error, (ReaderError, RarError)) else "无法读取作品，请检查文件是否损坏或权限是否正确。"
-                            report(relative, message)
+                            if suffix in IMAGE_TYPES:
+                                report(relative, message, "folder", folder.relative_to(root).as_posix())
+                            else:
+                                report(relative, message)
                     if image_files:
+                        self._update_scan_activity(run, work=None)
                         relative = folder.relative_to(root).as_posix()
                         if len(image_files) > MAX_PAGES:
-                            report(relative, "此目录超过 10,000 张图片，请按章节拆分目录。")
+                            report(relative, "此目录超过 10,000 张图片，请按章节拆分目录。", "folder")
                             continue
                         pages = [entry[0] for entry in image_files]
                         signature = hashlib.sha256(json.dumps(
@@ -1891,29 +2120,41 @@ class Library:
                                                 sum(entry[1].st_size for entry in image_files),
                                                 max(entry[1].st_mtime for entry in image_files), signature))
             if self.stop_event.is_set():
-                return
+                return "interrupted"
             # Lightweight page header inspection happens outside the SQLite
             # write transaction. Full decoding is exclusively a worker task.
             inspected = {}
-            for book in found:
+            self._update_scan_activity(run, stage="inspecting", total=len(found), directory=None, work=None)
+            for index, book in enumerate(found):
+                if self.stop_event.is_set():
+                    return "interrupted"
+                self._update_scan_activity(run, done=index, work={"bookId": book["id"], "title": book["title"]})
                 try:
                     inspected[book["id"]] = self.transcoding.inspect_book(book)
-                except (OSError, ValueError, RuntimeError, ReaderError, zipfile.BadZipFile) as error:
+                except (OSError, ValueError, RuntimeError, ReaderError, zipfile.BadZipFile):
+                    source_error = "无法读取源图片，请检查目录权限并重新扫描。"
+                    self._update_scan_activity(
+                        run, warnings=run["warnings"] + 1,
+                        lastFailure={"reason": source_error, "work": run["work"], "at": time.time()})
                     inspected[book["id"]] = [dict(
                         page_key=key, page_index=index, source_version="unavailable",
                         size=0, width=0, height=0,
-                        inspect_error="无法读取源图片，请检查目录权限并重新扫描。")
+                        inspect_error=source_error)
                         for index, key in enumerate(json.loads(book["pages"]))]
+            if self.stop_event.is_set():
+                return "interrupted"
+            self._update_scan_activity(run, stage="saving", done=len(found), work=None)
             scanned_at = time.time()
             with self.state_lock, closing(self.connect()) as connection, connection:
                 if connection.execute("SELECT 1 FROM media_libraries WHERE id=?", (library_id,)).fetchone() is None:
-                    return
+                    return "interrupted"
                 current = self._library_config(library_id, connection)
                 if current["revision"] != revision:
                     self.pending_scans.add(library_id)
-                    return
+                    self.pending_scan_targets.pop(library_id, None)
+                    return "superseded"
                 index_versions = {(row["book_id"], row["page_key"]): row["source_version"] for row in connection.execute(
-                    "SELECT p.book_id,p.page_key,p.source_version FROM is_pages p JOIN books b ON b.id=p.book_id WHERE b.library_id=?", (library_id,))}
+                    "SELECT p.book_id,p.page_key,p.source_version FROM is_pages p JOIN books b ON b.id=p.book_id WHERE " + joined_where, scan_arguments)}
                 # Header inspection already obtained fresh per-file identity
                 # (or ZIP CRC). A same-size/mtime replacement must still queue
                 # reconciliation, without reading any large index payloads.
@@ -1921,7 +2162,7 @@ class Library:
                     (book_id, page["page_key"]) in index_versions and
                     index_versions[(book_id, page["page_key"])] != page["source_version"]
                     for book_id, pages in inspected.items() for page in pages)
-                connection.execute("UPDATE books SET active=0 WHERE library_id=?", (library_id,))
+                connection.execute("UPDATE books SET active=0 WHERE " + where, scan_arguments)
                 for row in cached.values():
                     if row["active"] and any(
                             row["source_root"] == source_root and (
@@ -1929,7 +2170,7 @@ class Library:
                             for source_root, prefix in unreadable):
                         connection.execute("UPDATE books SET active=1 WHERE id=? AND removed=0", (row["id"],))
                 removed = {row["id"] for row in connection.execute(
-                    "SELECT id FROM books WHERE library_id=? AND removed=1", (library_id,))}
+                    "SELECT id FROM books WHERE removed=1 AND " + where, scan_arguments)}
                 for book in found:
                     if book["id"] in removed:
                         continue
@@ -1956,24 +2197,34 @@ class Library:
                         self.transcoding.apply_book(connection, book, inspected[book["id"]])
                     connection.execute("UPDATE progress SET page=MIN(page, ?) WHERE book_id=?",
                                        (book["page_count"] - 1, book["id"]))
+                if targets is not None:
+                    retained = [error for error in old_errors if "scan_scope" not in error or
+                                not any(target.covers(ScanTarget(*error["scan_scope"])) for target in targets)]
+                    errors = (errors + retained)[:200]
                 connection.execute("UPDATE media_libraries SET last_scan=?,errors=? WHERE id=?",
                     (scanned_at, json.dumps(errors, ensure_ascii=False), library_id))
                 index_after = {tuple(row[key] for key in index_columns) for row in connection.execute(
-                    "SELECT * FROM books WHERE library_id=? AND active=1 AND removed=0", (library_id,))}
+                    "SELECT * FROM books WHERE active=1 AND removed=0 AND " + where, scan_arguments)}
             LOG.info("Media library %s scan finished: %d books, %d warnings", config["name"], len(found), len(errors))
             self.library_covers.reconcile(library_id)
-            self.pdf.prune()
-            if index_after != index_before or index_sources_changed or errors != json.loads(config["errors"]):
+            if targets is None or any(book["format"] == "pdf" for book in found) or any(
+                    book["format"] == "pdf" for book in cached.values()):
+                self.pdf.prune()
+            if index_after != index_before or index_sources_changed or errors != old_errors:
                 self.image_search.reconcile()
+            return "warnings" if run["warnings"] else "completed"
         except Exception as error:
             LOG.exception("Media library %s scan failed", config["name"])
             message = str(error) if isinstance(error, ReaderError) else "扫描失败，请检查写真库挂载、目录权限和存储空间。"
+            self._update_scan_activity(run, lastFailure={"reason": message[:300], "work": run["work"], "at": time.time()})
             with self.state_lock, closing(self.connect()) as connection, connection:
-                if connection.execute("SELECT 1 FROM media_libraries WHERE id=?", (library_id,)).fetchone() is None:
-                    return
-                if self._library_config(library_id, connection)["revision"] == revision:
+                if (connection.execute("SELECT 1 FROM media_libraries WHERE id=?", (library_id,)).fetchone() is not None
+                        and self._library_config(library_id, connection)["revision"] == revision):
+                    failure = {"path": ".", "message": message}
+                    entries = [failure, *(entry for entry in old_errors if entry != failure)] if targets is not None else [failure]
                     connection.execute("UPDATE media_libraries SET errors=? WHERE id=?",
-                        (json.dumps([{"path": ".", "message": message}], ensure_ascii=False), library_id))
+                        (json.dumps(entries[:200], ensure_ascii=False), library_id))
+            return "failed"
 
     @staticmethod
     def _source_identity(root, relative):
@@ -3902,7 +4153,7 @@ class ReaderHandler(BaseHTTPRequestHandler):
             if path == "/api/image-search/activity":
                 if request.query:
                     raise ReaderError("图片索引状态不接受查询参数。")
-                self.respond(self.library.image_search.activity_status())
+                self.respond(self.library.image_search.activity_status(include_runs=True))
                 return
             search_preview = re.fullmatch(r"/api/image-search/thumbnail/([a-f0-9]{24})/([0-9]{1,6})", path)
             if search_preview:
@@ -4435,4 +4686,7 @@ if __name__ == "__main__":
     if sys.argv[1:2] == ["--reset-security-entry"]:
         from network_settings import main as reset_security_entry_main
         raise SystemExit(reset_security_entry_main(sys.argv[2:]))
+    if sys.argv[1:2] == ["--restore-database-backup"]:
+        from database_backup import main as restore_database_main
+        raise SystemExit(restore_database_main(sys.argv[2:]))
     raise SystemExit(main())

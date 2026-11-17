@@ -239,6 +239,35 @@ test('hidden image search stops status polling and refreshes immediately when vi
   } finally { ui.reset(); global.setTimeout = originalSet; global.clearTimeout = originalClear; }
 });
 
+test('sidebar and open task details share one poll and finish together', async () => {
+  const fixture = browserFixture(); const calls = []; const transitions = [];
+  const timer = new Map(); let next = 0; let working = true;
+  const originalSet = global.setTimeout, originalClear = global.clearTimeout;
+  global.setTimeout = (fn, delay) => { const id = ++next; timer.set(id, { fn, delay }); return id; };
+  global.clearTimeout = id => timer.delete(id);
+  let current; let spinner = false;
+  const ui = Search.create({ ...fixture, api: async path => {
+    calls.push(path);
+    return { working, taskRuns: { scan: { stage: 'idle' }, index: { stage: working ? 'decoding' : 'idle' } } };
+  }, post: async () => ({}), openBook() {}, isAdmin: () => true,
+  onActivity: value => { spinner = value; },
+  onTaskRuns: runs => { current = runs; if (runs) transitions.push([spinner, runs.index.stage]); } });
+  try {
+    ui.watchActivity(); await flush();
+    const scheduled = [...timer.values()][0];
+    // Opening details consumes the existing snapshot immediately.
+    assert.equal(current.index.stage, 'decoding');
+    assert.equal(scheduled.delay, 3500);
+    assert.equal(calls.length, 1);
+    working = false; scheduled.fn(); await flush();
+    assert.deepEqual(calls, ['/api/image-search/activity', '/api/image-search/activity']);
+    assert.deepEqual(transitions, [[true, 'decoding'], [false, 'idle']]);
+    assert.equal(timer.size, 1);
+    assert.equal([...timer.values()][0].delay, 12000);
+  } finally { ui.reset(); global.setTimeout = originalSet; global.clearTimeout = originalClear; }
+  assert.equal(current, null);
+});
+
 test('hiding a pending status request aborts it and an old result cannot overwrite the resumed state', async () => {
   const fixture = browserFixture(); let finish; let signal; let reads = 0;
   const api = async (_path, options) => ++reads === 1 ? new Promise(resolve => { finish = resolve; signal = options.signal; }) : { enabled: true, available: true };

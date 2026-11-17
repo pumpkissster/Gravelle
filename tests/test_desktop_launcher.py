@@ -5,6 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 import socket
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -464,6 +465,15 @@ class InstallerHandoffTests(unittest.TestCase):
         self.assertTrue(result.exception.lock_recovered)
         lock.release.assert_called_once()
         lock.acquire.assert_called_once()
+
+    @unittest.skipUnless(sys.platform == "win32", "uses Windows process flags")
+    def test_managed_job_allows_verified_installer_to_run_after_launcher_exit(self):
+        from unittest.mock import Mock
+        lock = Mock()
+        with patch("desktop.launcher.subprocess.Popen") as spawn:
+            launch_verified_installer(self.installer, self.digest, lock, breakaway=True)
+        spawn.assert_called_once_with([str(self.installer)], shell=False,
+                                      creationflags=subprocess.CREATE_BREAKAWAY_FROM_JOB)
 
     def test_failed_spawn_reports_when_another_instance_acquired_lock(self):
         from unittest.mock import Mock

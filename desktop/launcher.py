@@ -113,13 +113,14 @@ class InstallerLaunchError(LauncherError):
         self.lock_recovered = lock_recovered
 
 
-def launch_verified_installer(path: Path, sha256: str, instance_lock: SingleInstanceLock):
+def launch_verified_installer(path: Path, sha256: str, instance_lock: SingleInstanceLock, *, breakaway: bool = False):
     """Release Inno's AppMutex before starting it; recover the lock on failure."""
     if not verify_installer(path, sha256):
         raise LauncherError("安装程序校验失败，请重新下载。")
+    options = {"creationflags": subprocess.CREATE_BREAKAWAY_FROM_JOB} if breakaway else {}
     try:
         instance_lock.release()
-        return subprocess.Popen([str(path)], shell=False)
+        return subprocess.Popen([str(path)], shell=False, **options)
     except OSError as error:
         try:
             recovered = instance_lock.acquire()
@@ -786,6 +787,10 @@ class LauncherWindow:
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["--restore-database-backup"]:
+        _restore_child_stdio()
+        from database_backup import main as restore_database_main
+        return restore_database_main(argv[1:])
     if argv[:1] == ["--pdf-worker"]:
         from pdf_reader import worker_main
         return worker_main(argv[1:])
@@ -802,6 +807,7 @@ def main(argv=None):
     modes.add_argument("--reset-admin-password", action="store_true")
     modes.add_argument("--reset-security-entry", action="store_true")
     modes.add_argument("--launcher-bridge", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--managed-launcher-job", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--config", type=Path)
     parser.add_argument("--library", action="append", metavar="PATH", help="写真根文件夹，可重复指定")
     parser.add_argument("--data", type=Path)
@@ -812,9 +818,11 @@ def main(argv=None):
     parser.add_argument("--instance", default="")
     modes.add_argument("--version", action="store_true")
     arguments = parser.parse_args(argv)
+    if arguments.managed_launcher_job and not arguments.launcher_bridge:
+        parser.error("--managed-launcher-job requires --launcher-bridge")
     if arguments.launcher_bridge:
         from desktop.windows_bridge import run
-        return run(arguments.config, launcher_version())
+        return run(arguments.config, launcher_version(), installer_breakaway=arguments.managed_launcher_job)
     if arguments.reset_security_entry:
         if not arguments.data:
             parser.error("--reset-security-entry requires --data")

@@ -8,7 +8,7 @@
   const messages = Object.freeze({ expired: '分享已到期，请联系分享者。', closed: '分享已关闭。', exhausted: '分享的访问次数已用完。', unavailable: '分享或作品已不可用。', invalid: '分享链接不正确。' });
   const choices = { mode: [['single', '单页'], ['double', '双页'], ['webtoon', '连续滚动']], direction: [['ltr', '左 → 右'], ['rtl', '右 → 左'], ['ttb', '上下翻页']], fit: [['height', '适应屏幕'], ['width', '适应宽度']] };
   const labels = { mode: '阅读方式', direction: '阅读方向', fit: '图片适配' };
-  const MEDIA_LIMIT = 3, MEMORY_LIMIT = 96 * 1024 * 1024;
+  const MEDIA_LIMIT = 3, PAGED_MEDIA_LIMIT = 6, MEMORY_LIMIT = 96 * 1024 * 1024;
   function tokenFromPath(path) { return /^\/share\/([A-Za-z0-9_-]{43})\/?$/.exec(String(path || ''))?.[1] || null; }
   function validManifest(value) { return Boolean(value?.manifest && typeof value.manifest.title === 'string' && Number.isInteger(value.manifest.page_count) && value.manifest.page_count > 0 && value.manifest.page_count <= 100000 && typeof value.key === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value.key) && ['folder', 'zip', 'cbz', 'archive', 'pdf', 'epub', 'rar'].includes(value.manifest.format)); }
   function pageNumber(value, total) { const number = Number(value); return Number.isInteger(number) ? Math.min(Math.max(number, 0), Math.max(0, total - 1)) : 0; }
@@ -34,7 +34,7 @@
     const paged = $('share-paged-view'), scrollView = $('share-scroll-view'), slider = $('share-page-slider'), popup = $('share-choice-popover'), menu = $('share-menu'), help = $('share-help-panel');
     let key = null, manifest = null, active = false, sequence = 0, page = 0, heartbeat = null, expiryTimer = null, chromeTimer = null, scrollTimer = null, resizeTimer = null, checking = null, stopped = false, isBusy = false;
     let lifecycle = 0, exitRequested = false, logoutPending = null, unlockPending = null, prefs = readingPrefs(), choice = null, popupOptions = [], touch = null, suppressClickUntil = 0, scrollLoading = false;
-    let spreads = null, lastMode = 'single', offsets = [0], rowWidth = 0, scrollRestoring = null;
+    let spreads = null, lastMode = 'single', offsets = [0], rowWidth = 0, scrollRestoring = null, dragAnimation = null;
     const media = new Map(), rows = new Map(), sizes = new Map(), controllers = new Set(), failedPages = new Set();
     const wheel = Model.createWheelPager();
     const fullscreen = Model.createFullscreen(doc, $('share-fullscreen'), mode => {
@@ -58,13 +58,17 @@
     function evict(index) {
       const entry = media.get(index); if (!entry) return;
       media.delete(index); entry.controller?.abort(); controllers.delete(entry.controller);
+      entry.resolveImage(null);
       entry.image.onload = entry.image.onerror = null; entry.image.removeAttribute('src');
       if (entry.url) win.URL.revokeObjectURL(entry.url);
       const row = rows.get(index); if (row) { row.replaceChildren(element('span', 'scroll-placeholder', '第 ' + (index + 1) + ' 页')); row.className = 'scroll-page'; }
     }
-    function clearMedia() {
+    function clearMedia(keep = []) {
+      dragAnimation?.cancel(); dragAnimation = null;
+      mousePager.reset();
       sequence++; controllers.forEach(controller => controller.abort()); controllers.clear();
-      [...media.keys()].forEach(evict); rows.clear(); failedPages.clear(); host.replaceChildren(); scrollView.replaceChildren(); scrollLoading = false; scrollRestoring = null;
+      for (const [index, entry] of media) if (!keep.includes(index) || !entry.loaded) evict(index);
+      rows.clear(); failedPages.clear(); host.replaceChildren(); scrollView.replaceChildren(); scrollLoading = false; scrollRestoring = null;
       win.clearTimeout(scrollTimer); scrollTimer = null;
     }
     function closeChoice(focus = false) {
@@ -145,7 +149,7 @@
       if (!spreads) spreads = Model.buildSpreads(Array.from({ length: manifest.page_count }, (_, index) => sizes.get(index) || {}), { coverAlone: prefs.coverAlone, offset: prefs.offset });
       return spreads;
     }
-    function visiblePages() { return mode() === 'double' ? groups()[Model.spreadForPage(groups(), page)] || [page] : [page]; }
+    function visiblePages(index = page) { return mode() === 'double' ? groups()[Model.spreadForPage(groups(), index)] || [index] : [index]; }
     function nextIndex(delta) {
       if (mode() !== 'double') return pageNumber(page + delta, manifest.page_count);
       const list = groups(), at = Model.spreadForPage(list, page), target = Math.min(Math.max(at + delta, 0), list.length - 1); return list[target][0];
@@ -174,12 +178,14 @@
       $('share-theme').setAttribute('aria-label', prefs.theme === 'light' ? '切换为深色阅读背景' : '切换为浅色阅读背景');
       $('share-mode-hint').textContent = effective === 'webtoon' ? '从上到下滚动 · ? 帮助' : vertical() ? '上下翻页 · ↑ ↓ / 滚轮翻页 · ? 帮助' : prefs.mode === 'double' && effective === 'single' ? '窄屏自动单页 · 横屏可使用双页' : '↑ ↓ / ← → 翻页 · ? 帮助';
       $('share-help-arrows').textContent = vertical() ? '上下翻页时使用 ↑ / ↓' : '上一页 / 下一页，跟随阅读方向';
-      $('share-help-description').textContent = effective === 'webtoon' ? '上下连续滚动阅读，点击画面中央显示阅读菜单。' : vertical() ? '点击画面上方返回上一页，下方翻到下一页；中央显示菜单。长图先在当前页内滚动，到达边缘后再次操作才翻页。' : '点击中央显示阅读菜单，两侧点击或左右滑动翻页。双页时从右到左会交换图片左右位置。';
+      $('share-help-description').textContent = effective === 'webtoon' ? '上下连续滚动阅读，点击画面中央显示阅读菜单。' : vertical() ? '点击画面上方返回上一页，下方翻到下一页；中央显示菜单。长图先在当前页内滚动，到达边缘后再次操作才翻页。' : '点击画面中央显示阅读菜单。点击两侧、在触屏上左右滑动，或按住鼠标左键左右拖动均可翻页。双页时从右到左会交换图片左右位置。';
     }
-    async function loadImage(index, target, version, ready) {
+    async function loadImage(index, target, version, ready, preview = false) {
       if (!active || stopped || media.has(index)) return;
       const secret = key, controller = new win.AbortController(), image = doc.createElement('img');
       const entry = { image, url: null, controller, loaded: false, bytes: 24 * 1024 * 1024 }; media.set(index, entry); controllers.add(controller);
+      entry.decoded = new Promise(resolve => { entry.resolveImage = resolve; });
+      if (preview) entry.bytes = estimatedPageBytes(index);
       const current = () => validWork(version, secret) && media.get(index) === entry;
       image.alt = manifest.title + ' · 第 ' + (index + 1) + ' 页'; image.draggable = false; image.decoding = 'async';
       try {
@@ -196,13 +202,18 @@
         image.onload = () => {
           if (!current()) return; entry.loaded = true; entry.bytes = Math.max(1, image.naturalWidth || 1) * Math.max(1, image.naturalHeight || 1) * 4;
           if (image.naturalWidth && image.naturalHeight) { sizes.set(index, { width: image.naturalWidth, height: image.naturalHeight }); spreads = null; }
+          if (preview && mediaBytes() > MEMORY_LIMIT) { evict(index); return; }
+          entry.resolveImage(image);
+          if (preview) return;
           ready?.(entry); if (!current()) return; if (index === page || mode() !== 'webtoon') savePosition();
         };
-        image.onerror = () => { if (!current()) return; evict(index); pageError(index, '图片暂时无法显示。'); };
+        image.onerror = () => { if (!current()) return; evict(index); if (!preview) pageError(index, '图片暂时无法显示。'); };
         target.replaceChildren(image); image.src = entry.url;
       } catch (problem) {
         if (!current() || problem.name === 'AbortError') return;
-        evict(index); if (!terminal(problem)) pageError(index, problem.message || '图片加载失败，请重试。');
+        evict(index);
+        if (preview) { if ([401, 403, 410].includes(problem.status)) terminal(problem); }
+        else if (!terminal(problem)) pageError(index, problem.message || '图片加载失败，请重试。');
       } finally { controllers.delete(controller); }
     }
     function showPageError(text) { message.hidden = false; messageText.textContent = text; pageRetry.hidden = false; }
@@ -219,6 +230,21 @@
     }
     function scrollIndex(top) { let low = 0, high = manifest.page_count; while (low + 1 < high) { const middle = (low + high) >> 1; if (offsets[middle] <= top) low = middle; else high = middle; } return low; }
     function trimScroll(wanted) { for (const index of [...media.keys()]) if (!wanted.includes(index)) evict(index); }
+    function mediaBytes() { return [...media.values()].reduce((sum, entry) => sum + entry.bytes, 0); }
+    function estimatedPageBytes(index) {
+      const size = sizes.get(index) || sizes.get(page);
+      return size ? size.width * size.height * 4 : 24 * 1024 * 1024;
+    }
+    function previewShareNeighbor(delta) {
+      const next = nextIndex(delta);
+      if (next === page) return null;
+      const pages = Model.visualPages(visiblePages(next), direction());
+      const required = pages.filter(index => !media.has(index));
+      const bytes = required.reduce((sum, index) => sum + estimatedPageBytes(index), 0);
+      if (mediaBytes() + bytes > MEMORY_LIMIT || media.size + required.length > PAGED_MEDIA_LIMIT) return [];
+      required.forEach(index => loadImage(index, element('span'), sequence, null, true));
+      return Promise.all(pages.map(index => media.get(index)?.decoded)).then(images => images.every(Boolean) ? images : []);
+    }
     async function pumpScroll(version) {
       if (scrollLoading || !validWork(version, key) || mode() !== 'webtoon') return;
       const currentEntry = media.get(page), wanted = currentEntry?.loaded ? [page, page + 1, page - 1].filter(index => index >= 0 && index < manifest.page_count) : [page];
@@ -252,24 +278,56 @@
       message.hidden = true;
       pumpScroll(sequence);
     }
-    async function render(index, { preserveTop = false } = {}) {
-      if (!active || !manifest || stopped) return; page = pageNumber(index, manifest.page_count); clearMedia(); const version = sequence;
+    async function render(index, { preserveTop = false, dragFrom = 0, retainPages = false } = {}) {
+      if (!active || !manifest || stopped) return;
+      page = pageNumber(index, manifest.page_count);
+      const keep = retainPages ? [page, nextIndex(-1), nextIndex(1)].flatMap(visiblePages) : [];
+      clearMedia(keep);
+      const version = sequence;
       controls(); lastMode = mode(); wheel.reset(); message.hidden = false; messageText.textContent = '正在加载图片…'; pageRetry.hidden = true;
       const scrolling = mode() === 'webtoon'; paged.hidden = scrolling; scrollView.hidden = !scrolling;
       if (scrolling) { scrollRestoring = { index: page, within: 0 }; calculateOffsets(); syncScroll(false); viewport.scrollTop = offsets[page]; await pumpScroll(version); return; }
       if (!preserveTop) viewport.scrollTop = 0;
       const pages = Model.visualPages(visiblePages(), direction()); host.dataset.pages = pages.length; const targets = pages.map(() => element('span', 'share-paged-slot'));
+      function ready() {
+        if (!pages.every(index => media.get(index)?.loaded) || !host.firstElementChild || message.hidden) return;
+        message.hidden = true;
+        if (dragFrom) dragAnimation = Model.animatePageOffset(host, dragFrom, 0, 200);
+        savePosition();
+        if (!vertical() && win.matchMedia?.('(any-pointer: fine)')?.matches) mousePager.prepare();
+      }
       // Single pages remain direct children for exactly the same sizing rules.
-      await Promise.all(pages.map((index, offset) => loadImage(index, targets[offset], version, () => {
-        if (version !== sequence) return;
-        const desired = Model.visualPages(visiblePages(), direction());
-        if (desired.join(',') !== pages.join(',')) { render(page, { preserveTop: true }); return; }
-        if (pages.every(index => media.get(index)?.loaded)) message.hidden = true;
-      })));
+      await Promise.all(pages.map((index, offset) => {
+        const cached = media.get(index);
+        if (cached?.loaded) { targets[offset].append(cached.image); return; }
+        return loadImage(index, targets[offset], version, () => {
+          if (version !== sequence) return;
+          const desired = Model.visualPages(visiblePages(), direction());
+          if (desired.join(',') !== pages.join(',')) { render(page, { preserveTop: true, dragFrom, retainPages }); return; }
+          ready();
+        });
+      }));
       if (!validWork(version, key)) return;
       host.replaceChildren(...targets.flatMap(target => Array.from(target.children)));
+      ready();
     }
     async function move(delta) { if (!active || !help.hidden || choice) return; await render(nextIndex(delta)); }
+    function dragPage(delta, offset, neighbor) {
+      const next = nextIndex(delta);
+      if (next === page) return false;
+      if (!offset) { render(next, { retainPages: true }); return true; }
+      const exit = Math.sign(offset) * viewport.clientWidth;
+      const neighborReady = Boolean(neighbor?.firstElementChild);
+      dragAnimation = Model.animatePageOffset(host, offset, exit, 170, true);
+      if (dragAnimation) {
+        if (neighborReady) Model.animatePageOffset(neighbor, parseFloat(neighbor.style.translate), 0, 170, true);
+        const version = sequence;
+        dragAnimation.finished.then(() => {
+          if (sequence === version) render(next, { retainPages: true, dragFrom: neighborReady ? 0 : -exit });
+        }, () => {});
+      } else render(next, { retainPages: true });
+      return true;
+    }
     function change(name, value) {
       if (!active) return; const allowed = name === 'theme' ? ['dark', 'light'] : choices[name]?.map(option => option[0]);
       if (allowed && !allowed.includes(value)) return; if (name === 'direction' && (prefs.mode === 'webtoon' || prefs.mode === 'double' && value === 'ttb')) return;
@@ -356,6 +414,11 @@
       const delta = Model.swipePageDelta({ dx, dy, vertical: vertical(), direction: direction(), blocked: !help.hidden || Boolean(choice) || (win.visualViewport?.scale || 1) > 1.01 || Math.abs((viewport.scrollTop || 0) - origin.top) > 2 || vertical() && (dy < 0 ? origin.down : origin.up) });
       if (delta) move(delta);
     }, { passive: true }); listening(viewport, 'touchcancel', () => { touch = null; }, { passive: true });
+    const mousePager = Model.bindMousePager(viewport, host, () => {
+      if (!active || stopped || prefs.mode === 'webtoon' || vertical() || !help.hidden ||
+          !menu.hidden || choice || (win.visualViewport?.scale || 1) > 1.01) return null;
+      return { revision: sequence, direction: direction(), blocked: !message.hidden || dragAnimation?.playState === 'running' };
+    }, dragPage, previewShareNeighbor);
     listening(viewport, 'pointerdown', event => { if (event.target === viewport && event.pointerType !== 'touch') scrollRestoring = null; }, { passive: true });
     listening(doc, 'keydown', event => {
       if (!active || event.defaultPrevented || event.ctrlKey || event.altKey || event.metaKey) return;

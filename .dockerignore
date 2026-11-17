@@ -2,6 +2,7 @@
 !Dockerfile
 !server.py
 !accounts.py
+!database_backup.py
 !password_reset.py
 !network_settings.py
 !https_settings.py
@@ -10,6 +11,7 @@
 !image_search_features.py
 !avatar_face_crop.py
 !task_scheduler.py
+!incremental_scan.py
 !library_covers.py
 !cache_manager.py
 !page_cache.py

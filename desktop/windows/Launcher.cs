@@ -24,6 +24,7 @@ using Payload = System.Collections.Generic.Dictionary<string, object>;
 internal sealed class Companion : IDisposable
 {
     private readonly Process process;
+    private readonly ReaderJob job;
     private readonly JavaScriptSerializer json = new JavaScriptSerializer();
     private readonly Dictionary<int, TaskCompletionSource<Payload>> pending =
         new Dictionary<int, TaskCompletionSource<Payload>>();
@@ -36,13 +37,32 @@ internal sealed class Companion : IDisposable
         string executable = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "runtime", "GravelleServer.exe");
         if (!File.Exists(executable))
             throw new FileNotFoundException("找不到阅读服务。请完整解压或重新安装 Gravelle。");
-        var options = new ProcessStartInfo(executable, "--launcher-bridge" +
+        var options = new ProcessStartInfo(executable, "--launcher-bridge --managed-launcher-job" +
             (config == null ? "" : " --config " + QuoteArgument(config))) {
             UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true,
             RedirectStandardOutput = true, StandardOutputEncoding = Encoding.UTF8
         };
-        process = Process.Start(options);
-        process.StandardInput.AutoFlush = true;
+        try
+        {
+            job = new ReaderJob();
+            process = Process.Start(options);
+            // No request is sent until assignment succeeds. The companion can
+            // only start the reader after receiving a request over this pipe.
+            job.Add(process);
+            process.StandardInput.AutoFlush = true;
+        }
+        catch (Exception error)
+        {
+            if (process != null)
+            {
+                try { if (!process.HasExited) process.Kill(); }
+                catch (InvalidOperationException) { }
+                catch (Win32Exception) { }
+                finally { process.Dispose(); }
+            }
+            if (job != null) job.Dispose();
+            throw new IOException("无法启动受启动器管理的阅读服务：" + error.Message, error);
+        }
         ReadResponses();
     }
 
@@ -115,7 +135,11 @@ internal sealed class Companion : IDisposable
     {
         try { process.StandardInput.Close(); }
         catch (IOException) { }
-        // EOF stops the owned reader even if the window exits unexpectedly.
+        finally
+        {
+            job.Dispose();
+            process.Dispose();
+        }
     }
 }
 
@@ -567,8 +591,8 @@ internal sealed class Launcher
         }
         catch (Exception)
         {
-            // Closing the pipe also asks the companion to stop its owned
-            // reader if it can no longer return an explicit exit response.
+            // Closing the window releases the job even if the companion can
+            // no longer return an explicit exit response.
             mayClose = true;
             window.Close();
         }

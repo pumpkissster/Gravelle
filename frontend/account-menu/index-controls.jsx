@@ -6,6 +6,18 @@ export function mountIndexSpinner(host) {
   createRoot(host).render(<Spinner size="sm" aria-hidden className="text-current" />);
 }
 
+export function mountLibraryScanOption(host) {
+  const root = createRoot(host);
+  let enabled = false;
+  function update(value) {
+    enabled = value === true;
+    root.render(<Checkbox aria-describedby="library-incremental-hint" isSelected={enabled} onChange={update}>
+      启用增量扫描
+    </Checkbox>);
+  }
+  return { update, value: () => enabled };
+}
+
 export function mountIndexScope(host, onChange) {
   const root = createRoot(host);
   function update({ libraries, selection, disabled }) {

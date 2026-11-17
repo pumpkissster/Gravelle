@@ -16,6 +16,8 @@ from urllib.request import ProxyHandler, build_opener
 
 from desktop.core import LauncherConfig, LauncherError, check_port, reader_url, security_entry_recovery_warnings
 
+DATABASE_UPGRADE_TIMEOUT_SECONDS = 300
+
 
 def _startup_trace(stage: str, *, stream=None, **details) -> None:
     """Opt-in diagnostics contain flags only, never protocol lines or paths."""
@@ -58,7 +60,9 @@ def serve(config: LauncherConfig, data_path: Path, instance: str = "") -> int:
     try:
         roots = [Path(path) for path in config.library_paths]
         _startup_trace("service.library_init.begin")
-        library = Library(roots[0], data_path, "", 300, roots=roots)
+        def report_upgrade():
+            print(json.dumps({"stage": "database_upgrade", "instance": instance}), flush=True)
+        library = Library(roots[0], data_path, "", 300, roots=roots, on_database_upgrade=report_upgrade)
         _startup_trace("service.library_init.end")
         _startup_trace("service.bind.begin")
         server = ReaderServer((config.host, config.port), library, share_port=config.share_port,
@@ -182,20 +186,25 @@ class ServerController:
                         _startup_trace("parent.stdout.error", stream=trace_stream,
                                        error_type=type(error).__name__)
                         raise
-                threading.Thread(target=read_output, name="server-ready", daemon=True).start()
+                output_reader = threading.Thread(target=read_output, name="server-ready", daemon=True)
+                output_reader.start()
                 deadline = time.monotonic() + timeout
                 ready = False
+                upgrading = False
                 while time.monotonic() < deadline:
-                    if not self.running:
-                        raise LauncherError("阅读器启动失败，请查看服务日志。")
                     try:
                         message = messages.get(timeout=min(0.1, max(0.01, deadline - time.monotonic())))
                     except queue.Empty:
+                        if not self.running and not output_reader.is_alive():
+                            raise LauncherError("阅读器启动失败，请查看服务日志。")
                         continue
                     if not isinstance(message, dict):
                         continue
                     if message.get("error"):
                         raise LauncherError("阅读器启动失败：" + str(message["error"]))
+                    if not upgrading and message.get("stage") == "database_upgrade" and message.get("instance") == instance:
+                        deadline = max(deadline, time.monotonic() + DATABASE_UPGRADE_TIMEOUT_SECONDS)
+                        upgrading = True
                     if message.get("ready") and message.get("instance") == instance:
                         _startup_trace("parent.ready_accepted", stream=self.log_stream)
                         ready = True

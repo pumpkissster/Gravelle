@@ -39,6 +39,7 @@
   let profileFormGeneration = 0;
   const selection = { enabled: false, ids: new Set(), busy: false, revision: 0 };
   let libraryOrderDraft = null;
+  let libraryScanOption = null;
   const batchModels = { ids: [], selected: new Set(), context: null, generation: 0, busy: false };
   const avatarEdits = {};
   let modelMutationBusy = false;
@@ -71,7 +72,7 @@
   let libraryCoverBusy = false;
   let libraryCoverRequest = 0;
   let searchMode = 'text';
-  const messageState = { inbox: null, scan: [], optimization: null, scanStamp: '', request: null, timer: null, rendered: '' };
+  const messageState = { inbox: null, scan: [], optimization: null, scanStamp: '', request: null, timer: null, rendered: '', taskRuns: null, taskCards: [] };
   state.settingsSection = '';
   state.settingsTab = '';
   reader.pageCache = Performance.createCache(Performance.get().imageCacheLimit, entry => entry.cancel?.(), { byteLimit: Performance.get().imageCacheMemoryMB * 1024 * 1024 });
@@ -329,9 +330,84 @@
   function resetMessages() {
     clearInterval(messageState.timer);
     Object.assign(messageState, { inbox: null, scan: [], optimization: null, scanStamp: '', request: null, timer: null, rendered: '' });
+    messageState.taskRuns = null;
+    messageState.taskCards = [];
+    $('#message-task-list').replaceChildren();
+    $('#message-task-runs').hidden = true;
     $('#message-list').replaceChildren();
     $('#message-center').hidden = true;
     renderMessages();
+  }
+  function createTaskCard(kind) {
+    const scan = kind === 'scan';
+    const card = node('article', 'message-card');
+    const symbol = node('span', 'message-card-icon');
+    symbol.append(icon(scan ? 'clock' : 'image-search'));
+    const body = node('div', 'message-card-body');
+    const heading = node('h3', '', scan ? '媒体库扫描' : '图片索引');
+    const stage = node('p');
+    stage.setAttribute('aria-live', 'polite');
+    const target = node('p');
+    const counts = node('p');
+    const timestamp = node('p');
+    const failure = node('p', 'message-task-failure');
+    const details = node('details', 'message-details');
+    const summary = node('summary', '', '最近运行');
+    const recent = node('ol');
+    details.append(summary, recent);
+    body.append(heading, stage, target, counts, timestamp, failure, details);
+    const actions = node('div', 'message-card-actions');
+    const open = node('button', 'button button-secondary', scan ? '打开媒体库' : '打开图片搜索设置');
+    open.type = 'button';
+    let libraryId, recentSignature;
+    open.addEventListener('click', () => {
+      if (!scan) navigate('settings', { section: 'image-search' });
+      else if (state.libraries.some(library => String(library.id) === libraryId)) navigate('library', { libraryId });
+      else navigate('libraries');
+    });
+    actions.append(open);
+    card.append(symbol, body, actions);
+    $('#message-task-list').append(card);
+    return data => {
+      const display = Messages.taskCard(kind, data);
+      libraryId = display.libraryId;
+      const fields = [[stage, display.stage], [target, display.target], [counts, display.counts],
+        [timestamp, display.lastProgressAt ? `上次进度更新 ${formatDate(display.lastProgressAt, true, true)}` : ''],
+        [failure, display.failure]];
+      for (const [element, value] of fields) {
+        if (element.textContent !== value) element.textContent = value;
+        element.hidden = !value;
+      }
+      const signature = JSON.stringify(display.recent);
+      if (signature === recentSignature) return;
+      recentSignature = signature;
+      details.hidden = !display.recent.length;
+      summary.textContent = `最近运行（${display.recent.length}）`;
+      recent.replaceChildren(...display.recent.map(run => {
+        const item = node('li');
+        item.append(node('strong', '', run.label));
+        item.append(node('p', '', `${formatDate(run.endedAt, true, true)} · ${run.detail}`));
+        if (run.failure) item.append(node('p', 'message-task-failure', run.failure));
+        return item;
+      }));
+    };
+  }
+  function renderTaskRuns(administrator) {
+    const panel = $('#message-task-runs');
+    panel.hidden = !administrator;
+    $('#message-scan-progress').hidden = !state.scanning || (administrator && Boolean(messageState.taskRuns));
+    if (!administrator) return;
+    const status = $('#message-task-status');
+    const list = $('#message-task-list');
+    const taskRuns = messageState.taskRuns;
+    list.hidden = !taskRuns;
+    status.hidden = Boolean(taskRuns);
+    const label = taskRuns === false ? '无法读取任务运行记录，将自动重试。' : '正在读取任务运行记录…';
+    if (status.textContent !== label) status.textContent = label;
+    if (!taskRuns) return;
+    if (!messageState.taskCards.length) messageState.taskCards = [createTaskCard('scan'), createTaskCard('index')];
+    messageState.taskCards[0](taskRuns.scan);
+    messageState.taskCards[1](taskRuns.index);
   }
   function renderMessages() {
     const administrator = isAdmin();
@@ -341,7 +417,7 @@
     const unread = messages.filter(item => !item.read).length;
     accountMenu.update({ unread });
     if ($('#message-center').hidden) return;
-    $('#message-scan-progress').hidden = !state.scanning;
+    renderTaskRuns(administrator);
     $('#message-empty').hidden = Boolean(messages.length);
     const signature = JSON.stringify([administrator, messages.map(({ message, read }) => [message.id, message.signature, message.libraryName, read])]);
     if (messageState.rendered === signature) return;
@@ -358,14 +434,10 @@
       symbol.append(icon(scan ? 'scan-warning' : 'optimization'));
       const body = node('div', 'message-card-body');
       const heading = node('div', 'message-card-heading');
-      heading.append(node('h2', '', scan ? '扫描未完成' : '图片优化待处理'));
-      if (read) heading.append(node('span', 'message-read-status', '已读'));
-      else {
-        const unreadDot = node('span', 'message-unread-dot');
-        unreadDot.setAttribute('aria-hidden', 'true');
-        heading.prepend(unreadDot);
-        heading.append(node('span', 'sr-only', '未读'));
-      }
+      heading.append(
+        node('h2', '', scan ? '扫描未完成' : '图片优化待处理'),
+        node('span', 'message-read-status', read ? '已读' : '未读')
+      );
       body.append(
         heading,
         node('p', '', scan ? `「${message.libraryName}」有 ${message.count} 个项目未能完整扫描。` : `有 ${message.count} 本作品需要选择图片优化方式。`)
@@ -779,11 +851,11 @@
   function isReading(book) { return Boolean(book.progress); }
   function currentLibrary() { return state.libraries.find(library => String(library.id) === String(state.libraryId)); }
   function currentModel() { return state.models.find(model => String(model.id) === String(state.modelId)); }
-  function formatDate(value, time = false) {
+  function formatDate(value, time = false, seconds = false) {
     if (!value) return '—';
     const date = new Date(typeof value === 'number' ? value * 1000 : value);
     if (Number.isNaN(date.getTime())) return String(value);
-    return date.toLocaleString('zh-CN', time ? { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false } : { year: 'numeric', month: '2-digit', day: '2-digit' });
+    return date.toLocaleString('zh-CN', time ? { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', ...(seconds ? { second: '2-digit' } : {}), hour12: false } : { year: 'numeric', month: '2-digit', day: '2-digit' });
   }
   function formatAddedDate(value, time = true) {
     if (!value) return '—';
@@ -999,10 +1071,10 @@
     $('#edit-model').hidden = !model || !can('manage_models');
     $('#create-model').hidden = state.view !== 'models' || !can('manage_models');
   }
-  function makeCover(book, containerClass, lazy = true) {
+  function makeCover(book, containerClass, lazy = true, loadCover = Performance.loadCover) {
     const wrap = node('div', containerClass); const image = node('img');
     image.alt = ''; image.decoding = 'async';
-    Performance.loadCover(image, bookUrl(book.id) + '/cover?v=' + encodeURIComponent(book.cover_version || book.cover_page || 0), lazy);
+    loadCover(image, bookUrl(book.id) + '/cover?v=' + encodeURIComponent(book.cover_version || book.cover_page || 0), lazy);
     image.addEventListener('error', () => { const fallback = node('div', 'cover-fallback'); fallback.append(icon('book'), node('span', '', book.title || '未命名作品')); image.replaceWith(fallback); }, { once: true }); wrap.append(image); return wrap;
   }
   async function toggleFavorite(book) {
@@ -1096,28 +1168,46 @@
         const grid = $(tiles);
         const libraries = groupLibraries(group);
         grid.hidden = !libraries.length;
-        renderLibraryTiles(grid, libraries, false);
+        const cards = makeLibraryTiles(libraries, false);
+        if (window.GravelleHomeLibraries) {
+          grid.renderCarousel ||= window.GravelleHomeLibraries.mount(grid);
+          grid.renderCarousel(cards);
+        } else { grid.classList.add('library-tiles'); mountLibraryTiles(grid, cards); }
       }
     }
   }
   function renderLibraryTiles(grid, libraries, selectable) {
+    mountLibraryTiles(grid, makeLibraryTiles(libraries, selectable));
+  }
+  function mountLibraryTiles(grid, cards) {
+    grid.replaceChildren(...cards.map(card => card.element));
+    cards.forEach(card => card.loadCovers());
+  }
+  function makeLibraryTiles(libraries, selectable) {
     const booksByLibrary = new Map(libraries.map(library => [String(library.id), []]));
     for (const book of state.books) booksByLibrary.get(String(book.library_id))?.push(book);
-    grid.replaceChildren(...libraries.map(library => {
+    return libraries.map(library => {
       const card = node('article', 'library-tile-card');
+      const coverRequests = [];
+      const queueCover = (image, url, lazy = true) => coverRequests.push({ image, url, lazy });
       card.classList.toggle('is-selected', selectable && selection.enabled && selection.ids.has(String(library.id)));
       const button = node('button', 'library-tile'); button.type = 'button'; button.setAttribute('aria-label', `打开${libraryLabel(library)} ${library.name}`);
       const books = booksByLibrary.get(String(library.id)); const montage = node('div', 'library-montage');
       if (library.cover?.url) {
         montage.classList.add('is-composite'); const image = node('img'); image.alt = ''; image.decoding = 'async';
-        Performance.loadCover(image, library.cover.url + '?v=' + encodeURIComponent(library.cover.version || 'pending'));
+        queueCover(image, library.cover.url + '?v=' + encodeURIComponent(library.cover.version || 'pending'));
         image.addEventListener('error', () => { image.replaceWith(libraryIcon(library)); }, { once: true }); montage.append(image);
-      } else if (books.length) { montage.dataset.count = Math.min(books.length, 4); books.slice(0, 4).forEach(book => montage.append(makeCover(book, 'tile-cover'))); } else montage.append(libraryIcon(library));
+      } else if (books.length) { montage.dataset.count = Math.min(books.length, 4); books.slice(0, 4).forEach(book => montage.append(makeCover(book, 'tile-cover', true, queueCover))); } else montage.append(libraryIcon(library));
       const info = node('div', 'library-tile-info'); info.append(node('strong', '', library.name), node('span', '', `${typeLabels[library.media_type] || '日漫'} · ${books.length} 本作品`));
       button.append(montage, info); button.addEventListener('click', () => selection.enabled && selectable ? toggleSelection(library.id) : selectLibrary(library.id)); card.append(button);
       if (selectable) card.append(selectionCheckbox(library.id, library.name, 'library-select'));
-      return card;
-    }));
+      return {
+        id: library.id,
+        element: card,
+        // The lazy loader discards detached images, so register only once mounted.
+        loadCovers: () => coverRequests.splice(0).forEach(({ image, url, lazy }) => Performance.loadCover(image, url, lazy)),
+      };
+    });
   }
   function resetSelection() {
     selection.enabled = false; selection.ids.clear(); selection.revision += 1;
@@ -1550,6 +1640,14 @@
         spinner.hidden = !working;
         if (working) spinner.parentElement.setAttribute('aria-label', '搜索，正在建立图片索引');
         else spinner.parentElement.removeAttribute('aria-label');
+      },
+      onTaskRuns: runs => {
+        messageState.taskRuns = runs;
+        if (!$('#message-center').hidden) renderTaskRuns(isAdmin());
+      },
+      onOpenRuns: () => {
+        navigate('messages');
+        $('#message-task-title').focus({ preventScroll: true });
       },
       onManage: () => navigate('settings', { section: 'image-search' }),
       onOpenFailure: async (bookId, page) => { const generation = authGeneration; try { const book = await api(bookUrl(bookId)); if (generation === authGeneration && isAdmin()) await openBook(book, page); } catch (error) { if (generation === authGeneration && error.status !== 401) toast(error.message); } },
@@ -2074,6 +2172,8 @@
     const direction = $('#library-direction'); direction.dataset.pagedDirection = ['ltr', 'rtl', 'ttb'].includes(library?.reading_direction) ? library.reading_direction : 'ltr'; updateLibraryReadingDirection();
     libraryBrowseInput = null; libraryBrowseRequest += 1; $('#library-paths').replaceChildren(); const paths = library?.paths?.length ? library.paths : [library?.path || state.rootPath]; paths.forEach(path => addLibraryPath(path));
     $('#library-excludes').value = (library?.exclude_rules || []).join('\n');
+    libraryScanOption ??= window.GravelleIndexControls.mountLibraryScanOption($('#library-incremental-scan'));
+    libraryScanOption.update(library?.incremental_scan === true);
     if (type !== 'magazine') {
       const author = library?.default_author_id || state.models.find(model => model.name.normalize('NFKC').toLocaleLowerCase('zh-CN') === String(library?.default_author || '').normalize('NFKC').toLocaleLowerCase('zh-CN'))?.id || '';
       renderLibraryAuthors(author);
@@ -2510,13 +2610,14 @@
     scheduleReaderChrome();
   }
 
-  function cancelPageTurn() {
+  function cancelPageTurn(keepDrag = false) {
+    if (!keepDrag) mousePager.reset();
     reader.turnAnimations.forEach(animation => animation.cancel());
     reader.turnAnimations = [];
-    $$('.page-turn-layer').forEach(element => element.remove());
+    $$('.page-turn-layer:not(.reader-drag-neighbor)').forEach(element => element.remove());
   }
 
-  function animatePageTurn(wrap, outgoing, side) {
+  function animatePageTurn(wrap, outgoing, side, dragOffset, neighborOffset) {
     if (!outgoing || !side || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
     outgoing.classList.add('page-turn-layer');
     outgoing.removeAttribute('id');
@@ -2526,8 +2627,9 @@
     const axis = verticalPaging() ? 'Y' : 'X';
     const distance = verticalPaging() ? $('#reader-viewport').clientHeight : 100;
     const unit = verticalPaging() ? 'px' : '%';
-    const oldAnimation = outgoing.animate([{ transform: `translate${axis}(0)` }, { transform: `translate${axis}(${-side * distance}${unit})` }], options);
-    const newAnimation = wrap.animate([{ transform: `translate${axis}(${side * distance}${unit})` }, { transform: `translate${axis}(0)` }], options);
+    const incomingOffset = neighborOffset || (dragOffset ? `calc(${side * distance}${unit} + ${dragOffset}px)` : `${side * distance}${unit}`);
+    const oldAnimation = outgoing.animate([{ transform: `translate${axis}(${dragOffset}px)` }, { transform: `translate${axis}(${-side * distance}${unit})` }], options);
+    const newAnimation = wrap.animate([{ transform: `translate${axis}(${incomingOffset})` }, { transform: `translate${axis}(0)` }], options);
     reader.turnAnimations = [oldAnimation, newAnimation];
     Promise.allSettled(reader.turnAnimations.map(animation => animation.finished)).then(() => outgoing.remove());
   }
@@ -2584,7 +2686,7 @@
     if (imageVolume) toggleChapters(false);
     $('#reader-mode-hint').textContent = scroll ? '从上到下滚动 · ↑ ↓ 滚动 · ? 帮助' : vertical ? '上下翻页 · ↑ ↓ / 滚轮翻页 · ? 帮助' : state.prefs.mode === 'double' && readerMode() === 'single' ? '窄屏自动单页 · 横屏可使用双页' : imageVolume ? '↑ ↓ / ← → 翻页 · ? 帮助' : '↑ ↓ 翻页 · ← → 章节 · ? 帮助';
     $('#reader-help-arrows').textContent = vertical && imageVolume ? '上下翻页时使用 ↑ / ↓' : imageVolume ? '上一页 / 下一页，跟随阅读方向' : '上一话 / 下一话，跟随阅读方向';
-    $('#reader-help-description').textContent = scroll ? '上下连续滚动阅读，点击画面中央显示阅读菜单。' : vertical ? '点击画面上方返回上一页，下方翻到下一页；中央显示阅读菜单。也可使用滚轮或上下滑动。长图会先在当前页内滚动，到达边缘后再次操作才翻页。' : '点击画面中央显示阅读菜单，两侧点击或左右滑动可翻页。双页时从右到左会交换图片左右位置。';
+    $('#reader-help-description').textContent = scroll ? '上下连续滚动阅读，点击画面中央显示阅读菜单。' : vertical ? '点击画面上方返回上一页，下方翻到下一页；中央显示阅读菜单。也可使用滚轮或上下滑动。长图会先在当前页内滚动，到达边缘后再次操作才翻页。' : '点击画面中央显示阅读菜单。点击两侧、在触屏上左右滑动，或按住鼠标左键左右拖动均可翻页。双页时从右到左会交换图片左右位置。';
     ['mode', 'fit'].forEach(key => { $('#reader-' + key).value = state.prefs[key]; });
     $('#reader-mode').disabled = !reader.book;
     $('#reader-fit').disabled = !reader.book;
@@ -2740,12 +2842,18 @@
 
   function rebuildSpreads() {
     reader.effective = readerMode();
-    reader.spreads = reader.effective === 'double' ? Model.buildSpreads(reader.sizes, { coverAlone: reader.coverAlone, offset: reader.offset }) : Array.from({ length: reader.book.page_count }, (_, index) => [index]);
+    reader.spreads = reader.effective === 'double' ? doublePageSpreads() : Array.from({ length: reader.book.page_count }, (_, index) => [index]);
   }
+
+  function doublePageSpreads() { return Model.buildSpreads(reader.sizes, { coverAlone: reader.coverAlone, offset: reader.offset }); }
 
   function currentSpread() {
     if (!reader.book) return [];
     return reader.spreads[Model.spreadForPage(reader.spreads, reader.index)] || [reader.index];
+  }
+
+  function neighborSpread(delta) {
+    return reader.spreads[Model.spreadForPage(reader.spreads, reader.index) + delta];
   }
 
   function setReaderMode() {
@@ -2767,19 +2875,21 @@
     updateReaderPosition();
   }
 
-  async function renderPage(turnSide = 0) {
+  async function renderPage(turnSide = 0, dragOffset = 0, neighbor = null) {
     if (!reader.book || !reader.open) return;
     const token = reader.token;
     const epoch = ++reader.epoch;
     const book = reader.book;
     const spread = currentSpread();
     const wrap = $('#page-image-wrap');
-    cancelPageTurn();
+    cancelPageTurn(Boolean(dragOffset));
     const outgoing = turnSide && $('img', wrap) ? wrap.cloneNode(true) : null;
     if (outgoing) {
+      outgoing.style.translate = '';
       outgoing.style.top = -$('#reader-viewport').scrollTop + 'px';
       outgoing.style.height = wrap.getBoundingClientRect().height + 'px';
       outgoing.style.bottom = 'auto';
+      if (dragOffset) wrap.style.translate = `${dragOffset}px`;
     }
     reader.loadedPage = null;
     if (!outgoing) wrap.replaceChildren(makeLoading('正在加载第 ' + spread.map(index => index + 1).join('、') + ' 页'));
@@ -2792,21 +2902,24 @@
       rebuildSpreads();
       const nextSpread = currentSpread();
       // Once dimensions are known, a wide original stays intact on its own spread.
-      if (nextSpread.join(',') !== spread.join(',')) { reader.index = nextSpread[0]; updateReaderPosition(); renderPage(turnSide); return; }
+      if (nextSpread.join(',') !== spread.join(',')) { reader.index = nextSpread[0]; updateReaderPosition(); renderPage(turnSide, dragOffset, neighbor); return; }
       reader.index = spread[0];
       wrap.dataset.pages = spread.length;
       const byPage = new Map(images.map(image => [Number(image.dataset.page), image]));
       $('#reader-viewport').scrollTop = 0;
+      const neighborOffset = neighbor?.firstElementChild ? neighbor.style.translate : '';
+      mousePager.reset();
       wrap.replaceChildren(...Model.visualPages(spread, readerDirection()).map(index => byPage.get(index)));
-      animatePageTurn(wrap, outgoing, turnSide);
+      animatePageTurn(wrap, outgoing, turnSide, dragOffset, neighborOffset);
       reader.loadedPage = Math.max(...spread);
       updateReaderPosition();
       markVisiblePage(reader.loadedPage);
-      preloadNeighbors(reader.loadedPage);
+      preloadNeighbors();
       refreshPdfResolution();
     } catch (error) {
       if (!reader.open || token !== reader.token || epoch !== reader.epoch) return;
-      wrap.replaceChildren(makePageError(error.message, renderPage));
+      mousePager.reset();
+      wrap.replaceChildren(makePageError(error.message, () => renderPage()));
     }
   }
 
@@ -2834,10 +2947,11 @@
     }
     return reader.pageCache.availableBytes >= estimate;
   }
-  function preloadNeighbors(index) {
+  function preloadNeighbors() {
     if (!reader.book || state.prefs.mode === 'webtoon') return;
     const protectedPages = currentSpread(); const limit = Performance.get().imageCacheLimit;
-    const candidates = [Math.max(...protectedPages) + 1, Math.min(...protectedPages) - 1].filter(value => value >= 0 && value < reader.book.page_count && !protectedPages.includes(value));
+    const next = neighborSpread(1) || [], previous = neighborSpread(-1) || [];
+    const candidates = [next[0], previous.at(-1), next[1], previous.length > 1 ? previous[0] : undefined].filter(Number.isInteger);
     configureReaderCache(protectedPages);
     reader.preloads = [];
     candidates.slice(0, limit ? Math.max(0, limit - protectedPages.length) : candidates.length).forEach(value => {
@@ -2845,6 +2959,32 @@
       reader.preloads.push(value); loadReaderImage(value).catch(() => {});
     });
     configureReaderCache(protectedPages);
+    if (!verticalPaging() && matchMedia('(any-pointer: fine)').matches) mousePager.prepare();
+  }
+
+  function previewReaderNeighbor(delta) {
+    const spread = neighborSpread(delta);
+    if (!spread) return null;
+    const epoch = reader.epoch, direction = readerDirection();
+    const current = currentSpread();
+    const limit = Performance.get().imageCacheLimit;
+    async function load(spread) {
+      if (limit && current.length + spread.length > limit) return [];
+      const requests = [];
+      for (const index of Model.visualPages(spread, direction)) {
+        if (!reserveReaderPreload(index, [...current, ...reader.preloads, ...spread])) break;
+        requests.push(loadReaderImage(index));
+      }
+      const images = await Promise.all(requests);
+      return images.length === spread.length ? images : [];
+    }
+    return load(spread).then(images => {
+      if (reader.epoch !== epoch || reader.effective !== 'double' || !images.length) return images;
+      const groups = doublePageSpreads();
+      const actual = groups[Model.spreadForPage(groups, spread[0])];
+      if (actual.join(',') === spread.join(',')) return images;
+      return load(actual);
+    });
   }
 
   function clearReaderImages() {
@@ -3067,14 +3207,14 @@
     }
   }
 
-  function setReaderPage(value) {
+  function setReaderPage(value, dragOffset = 0, neighbor = null) {
     if (!reader.book || !reader.open) return;
     const index = Math.min(reader.book.page_count - 1, Math.max(0, Math.round(Number(value)) || 0));
     if (index === reader.index && state.prefs.mode !== 'webtoon') return;
     const turnSide = Math.sign(index - reader.index) * (readerDirection() === 'rtl' ? -1 : 1);
     reader.index = index;
     updateReaderPosition();
-    if (state.prefs.mode !== 'webtoon') renderPage(turnSide);
+    if (state.prefs.mode !== 'webtoon') renderPage(turnSide, dragOffset, neighbor);
     else {
       reader.scrollJumpBehavior = 'smooth';
       reader.restoring = index;
@@ -3213,13 +3353,14 @@
     $('#reader-viewport').scrollBy({ top: delta * $('#reader-viewport').clientHeight * .8, behavior: 'smooth' });
   }
 
-  function movePage(delta) {
-    if (!reader.book || reader.endOverlay) return;
-    if (delta > 0 && showReaderEnd()) return;
-    if (state.prefs.mode === 'webtoon') { setReaderPage(reader.index + delta); return; }
-    const position = Model.spreadForPage(reader.spreads, reader.index);
-    const target = Math.min(reader.spreads.length - 1, Math.max(0, position + delta));
-    setReaderPage(reader.spreads[target][0]);
+  function movePage(delta, dragOffset = 0, neighbor = null) {
+    if (!reader.book || reader.endOverlay) return false;
+    if (delta > 0 && showReaderEnd()) return false;
+    if (state.prefs.mode === 'webtoon') { setReaderPage(reader.index + delta); return false; }
+    const spread = neighborSpread(delta);
+    if (!spread) return false;
+    setReaderPage(spread[0], dragOffset, neighbor);
+    return true;
   }
   function physicalPage(side) { movePage(side * (readerDirection() === 'rtl' ? -1 : 1)); }
   function verticalKeyPage(delta, event) {
@@ -3564,6 +3705,7 @@
     const button = $('#library-save'); button.disabled = true; $('#library-form-error').hidden = true;
     const generation = authGeneration; const formGeneration = libraryFormGeneration;
     const data = { name: $('#library-name').value.trim(), media_type: $('#library-type').value, paths: $$('.library-path-input', $('#library-paths')).map(input => input.value.trim()), reading_mode: $('#library-mode').value, reading_direction: $('#library-direction').dataset.pagedDirection || 'ltr', hide_date_prefix: $('#library-hide-date').checked, apply_reading_defaults: Boolean(state.editingLibrary && $('#library-apply-reading').checked), exclude_rules: $('#library-excludes').value.split(/\r?\n/).map(value => value.trim()).filter(value => value && !value.startsWith('#')), default_author_id: $('#library-author').value || null };
+    data.incremental_scan = libraryScanOption.value();
     if (magazine) delete data.default_author_id;
     try {
       if (generation !== authGeneration || !isAdmin() || formGeneration !== libraryFormGeneration || !$('#library-dialog').open) return;
@@ -3832,6 +3974,11 @@
   $('#reader').addEventListener('keydown', event => {
     if (!reader.endOverlay && event.key === 'Tab' && $('#reader').dataset.controls !== 'visible') setReaderChrome(true);
   });
+  const mousePager = Model.bindMousePager($('#reader-viewport'), $('#page-image-wrap'), () => {
+    if (!reader.open || !reader.book || reader.endOverlay || state.prefs.mode === 'webtoon' || verticalPaging() || (window.visualViewport?.scale || 1) > 1.01 ||
+        reader.choice?.active || !$('#reader-help-panel').hidden || !$('#reader-menu').hidden || !$('#chapter-drawer').hidden) return null;
+    return { revision: reader.epoch, direction: readerDirection(), blocked: pagingBlocked() };
+  }, movePage, previewReaderNeighbor);
   let touchStart = null;
   $('#reader').addEventListener('touchstart', event => {
     if (event.touches.length > 1) { touchStart = null; reader.suppressClickUntil = Date.now() + 500; }
@@ -3946,7 +4093,7 @@
     if (reader.open && reader.book) {
       renderChapters();
       if (state.prefs.mode === 'webtoon') loadScrollBuffer(reader.index);
-      else preloadNeighbors(reader.index);
+      else preloadNeighbors();
     } else configureReaderCache([]);
   });
 

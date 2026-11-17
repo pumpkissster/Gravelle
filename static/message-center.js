@@ -9,6 +9,73 @@
   const maxReadMessages = 256;
   const maxSavedOptimizationRecords = 16384;
   const signaturePattern = /^[0-9a-f]{8}:[0-9a-f]{8}$/;
+  const scanStages = {
+    idle: '暂无扫描任务', queued: '等待扫描', enumerating: '正在查找作品',
+    inspecting: '正在检查作品', saving: '正在保存扫描结果',
+  };
+  const indexStages = {
+    idle: '暂无索引任务', queued: '等待处理', starting: '正在启动', reconciling: '正在核对图片',
+    waiting: '正在等待后台任务名额', reading: '正在读取图片', decoding: '正在建立图片特征',
+    paused: '已暂停', disabled: '未启用', stopping: '正在停止', stopped: '任务已停止',
+    error: '暂时中断，正在重试',
+  };
+  const runOutcomes = {
+    completed: '已完成', warnings: '已完成，有异常', failed: '失败', paused: '已暂停',
+    interrupted: '已中断', superseded: '库设置已变更，等待重扫',
+  };
+  const count = value => Number.isSafeInteger(value) && value >= 0 ? value : 0;
+
+  function taskWork(work) {
+    return work?.title ? work.title + (Number.isSafeInteger(work.page) && work.page >= 0 ? `（第 ${work.page + 1} 页）` : '') : '';
+  }
+
+  function taskFailure(failure) {
+    if (!failure?.reason) return '';
+    return [taskWork(failure.work), failure.reason].filter(Boolean).join(' · ');
+  }
+
+  function runDuration(entry) {
+    if (!Number.isFinite(entry.startedAt) || !Number.isFinite(entry.endedAt)) return '';
+    const elapsed = Math.max(0, entry.endedAt - entry.startedAt);
+    if (elapsed < 1) {
+      const milliseconds = Math.round(elapsed * 1000);
+      return milliseconds ? `耗时 ${milliseconds} 毫秒` : '耗时不到 1 毫秒';
+    }
+    const seconds = Math.floor(elapsed);
+    const minutes = Math.floor(seconds / 60);
+    return minutes ? `耗时 ${minutes} 分 ${seconds % 60} 秒` : `耗时 ${seconds} 秒`;
+  }
+
+  function taskCard(kind, data) {
+    const scan = kind === 'scan';
+    const stages = scan ? scanStages : indexStages;
+    const current = data?.current;
+    const stage = Object.hasOwn(stages, data?.stage) ? stages[data.stage] : '暂未读取';
+    const target = [current?.libraryName, taskWork(current?.work) || (current?.directory === '.' ? '' : current?.directory)].filter(Boolean).join(' · ');
+    const counts = [];
+    if (scan) {
+      if (current) {
+        counts.push(current.mode === 'incremental' ? '增量扫描' : '全量扫描');
+        counts.push(`已遍历 ${count(current.directories)} 个目录`);
+        if (Number.isSafeInteger(current.total)) counts.push(`已检查 ${count(current.done)} / ${count(current.total)} 本`);
+        if (current.warnings) counts.push(`异常 ${count(current.warnings)} 项`);
+      }
+      if (data?.queued) counts.push(`${count(data.queued)} 个库排队中`);
+    } else if (current) {
+      if (Number.isSafeInteger(current.totalToCheck)) counts.push(`已核对 ${count(current.checked)} / ${count(current.totalToCheck)} 张`);
+      counts.push(`本次已处理 ${count(current.done)} 张 · 失败 ${count(current.failed)} 张`);
+    }
+    const recent = Array.isArray(data?.recent) ? data.recent.slice(0, 10).map(entry => ({
+      label: [scan ? (entry.mode === 'incremental' ? '增量扫描' : '全量扫描') : '',
+        Object.hasOwn(runOutcomes, entry.outcome) ? runOutcomes[entry.outcome] : '已结束',
+        scan ? entry.libraryName : ''].filter(Boolean).join(' · '),
+      detail: [scan ? `遍历 ${count(entry.directories)} 个目录 · 检查 ${count(entry.done)} 本 · 异常 ${count(entry.warnings)} 项`
+        : `核对 ${count(entry.checked)} 张 · 处理 ${count(entry.done)} 张 · 失败 ${count(entry.failed)} 张`, runDuration(entry)].filter(Boolean).join(' · '),
+      failure: taskFailure(entry.lastFailure), endedAt: entry.endedAt,
+    })) : [];
+    return { stage, target, counts: counts.join(' · '), lastProgressAt: current?.lastProgressAt,
+      failure: current?.error || taskFailure(current?.lastFailure), libraryId: current?.libraryId || data?.recent?.[0]?.libraryId, recent };
+  }
 
   function fingerprint(value) {
     // Keep storage bounded without persisting the paths or warning text.
@@ -170,5 +237,5 @@
     };
   }
 
-  return { createInbox, scanMessages, optimizationMessage };
+  return { createInbox, scanMessages, optimizationMessage, taskCard };
 });

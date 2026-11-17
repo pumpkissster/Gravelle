@@ -8,13 +8,11 @@ from contextlib import closing
 import hashlib
 import hmac
 import json
-import os
-from pathlib import Path
 import secrets
 import sqlite3
-import stat
-import time
 import unicodedata
+
+from database_backup import prepare_legacy_account_backup as prepare_account_migration
 
 PASSWORD_ITERATIONS = 600_000
 PERMISSION_OPTIONS = (
@@ -54,42 +52,6 @@ def check_password(value, encoded):
         return hmac.compare_digest(actual, expected)
     except (ValueError, TypeError, UnicodeError):
         return False
-
-
-def prepare_account_migration(database: Path):
-    """Back up an existing single-user DB before any startup schema changes."""
-    if not database.exists():
-        return None
-    attributes = database.lstat()
-    if not stat.S_ISREG(attributes.st_mode) or getattr(attributes, "st_file_attributes", 0) & 0x400:
-        raise RuntimeError("数据库必须是普通文件，不能通过链接迁移。")
-    with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as source:
-        if source.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='users'").fetchone():
-            return None
-        target_dir = database.parent / "backups"
-        if target_dir.exists() or target_dir.is_symlink():
-            attributes = target_dir.lstat()
-            if (not stat.S_ISDIR(attributes.st_mode) or stat.S_ISLNK(attributes.st_mode)
-                    or getattr(attributes, "st_file_attributes", 0) & 0x400):
-                raise RuntimeError("备份目录不能是符号链接或目录联接。")
-        target_dir.mkdir(mode=0o700, exist_ok=True)
-        backup = target_dir / ("before-multiuser-" + time.strftime("%Y%m%d-%H%M%S", time.gmtime())
-                               + "-" + secrets.token_hex(6) + ".sqlite3")
-        descriptor = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        os.close(descriptor)
-        try:
-            with closing(sqlite3.connect(backup)) as destination:
-                deadline = time.monotonic() + 30
-                def progress(status, remaining, total):
-                    if status in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED) and time.monotonic() > deadline:
-                        raise RuntimeError("数据库正忙，无法安全备份，未执行账户迁移。")
-                source.backup(destination, pages=256, progress=progress, sleep=0.05)
-            with backup.open("r+b") as handle:
-                os.fsync(handle.fileno())
-        except BaseException:
-            backup.unlink(missing_ok=True)
-            raise
-    return backup
 
 
 def _ensure_hidden_libraries(connection):

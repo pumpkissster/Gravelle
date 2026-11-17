@@ -16,11 +16,12 @@ APP_MUTEX = r"Local\GravelleLauncher-6589345A87B047CE942471F892240DF7"
 
 
 class WindowsLauncherSession:
-    def __init__(self, storage, config_path, version, instance_lock):
+    def __init__(self, storage, config_path, version, instance_lock, *, installer_breakaway=False):
         self.storage = storage
         self.config_path = config_path
         self.version = version
         self.instance_lock = instance_lock
+        self.installer_breakaway = installer_breakaway
         self.controller = ServerController(storage / "data", storage / "logs" / "server.log")
         self.release = None
         self.downloaded = None
@@ -96,7 +97,8 @@ class WindowsLauncherSession:
                 return {"retry_download": True}
             controller.stop()
             try:
-                launch_verified_installer(Path(self.downloaded["path"]), self.downloaded["sha256"], self.instance_lock)
+                launch_verified_installer(Path(self.downloaded["path"]), self.downloaded["sha256"], self.instance_lock,
+                                          breakaway=self.installer_breakaway)
             except InstallerLaunchError as error:
                 if error.lock_recovered:
                     raise
@@ -105,7 +107,7 @@ class WindowsLauncherSession:
         raise LauncherError("不支持的启动器操作。")
 
 
-def run(config_path, version):
+def run(config_path, version, *, installer_breakaway=False):
     sys.stdin.reconfigure(encoding="utf-8")
     storage = user_directory()
     lock = SingleInstanceLock(storage / "launcher.lock", APP_MUTEX)
@@ -120,7 +122,8 @@ def run(config_path, version):
         respond({"ok": False, "error": "Gravelle 启动器已经打开，请从任务栏恢复窗口。"})
         return 1
 
-    session = WindowsLauncherSession(storage, config_path or storage / "launcher.json", version, lock)
+    session = WindowsLauncherSession(storage, config_path or storage / "launcher.json", version, lock,
+                                     installer_breakaway=installer_breakaway)
 
     def process(request):
         command_id = request["id"]

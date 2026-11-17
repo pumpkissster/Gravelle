@@ -64,11 +64,188 @@
       }
     };
   }
-  function swipePageDelta({ dx, dy, vertical = false, direction = 'ltr', blocked = false } = {}) {
+  function swipePageDelta({ dx, dy, vertical = false, direction = 'ltr', blocked = false, threshold = 55 } = {}) {
     if (blocked) return 0;
     const primary = vertical ? dy : dx; const cross = vertical ? dx : dy;
-    if (!Number.isFinite(primary) || !Number.isFinite(cross) || Math.abs(primary) <= 55 || Math.abs(primary) <= Math.abs(cross) * 1.5) return 0;
+    if (!Number.isFinite(primary) || !Number.isFinite(cross) || Math.abs(primary) <= threshold || Math.abs(primary) <= Math.abs(cross) * 1.5) return 0;
     return -Math.sign(primary) * (!vertical && direction === 'rtl' ? -1 : 1);
+  }
+  function animatePageOffset(surface, from, to, duration, hold = false) {
+    if (surface.ownerDocument?.defaultView?.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches) return null;
+    return surface.animate?.([{ translate: `${from}px` }, { translate: `${to}px` }], {
+      duration, easing: 'cubic-bezier(.22,.61,.36,1)', fill: hold ? 'forwards' : 'none',
+    }) || null;
+  }
+  function bindMousePager(viewport, surface, getContext, turnPage, previewPage) {
+    let origin = null;
+    let suppressClick = false;
+    let returnAnimation = null;
+    let neighborReturn = null;
+    let activePreview = null;
+    const previews = new Map();
+    function positionPreview(preview, offset = 0) {
+      preview.layer.style.translate = `${preview.rest + offset}px`;
+      preview.layer.toggleAttribute('data-drag-active', Boolean(offset));
+    }
+    function measurePreview(preview) {
+      const { layer, side } = preview;
+      const bounds = layer.getBoundingClientRect();
+      // Start the picture itself at the edge, including in fit-to-height mode.
+      const inset = Math.max(0, side > 0 ? layer.firstElementChild.getBoundingClientRect().left - bounds.left
+        : bounds.right - layer.lastElementChild.getBoundingClientRect().right);
+      preview.rest = side * (bounds.width - inset);
+    }
+    function resetVisual(clear = true) {
+      returnAnimation?.cancel();
+      neighborReturn?.cancel();
+      returnAnimation = neighborReturn = null;
+      surface.style.translate = '';
+      if (!clear) for (const preview of previews.values()) positionPreview(preview);
+      activePreview = null;
+      if (clear) {
+        for (const preview of previews.values()) preview.layer.remove();
+        previews.clear();
+      }
+    }
+    function settle(offset) {
+      surface.style.translate = '';
+      if (offset) returnAnimation = animatePageOffset(surface, offset, 0, 180);
+      if (!activePreview) return;
+      const preview = activePreview;
+      activePreview = null;
+      const rest = preview.rest;
+      positionPreview(preview);
+      if (!offset) return;
+      const animation = animatePageOffset(preview.layer, rest + offset, rest, 180);
+      if (animation) {
+        preview.layer.setAttribute('data-drag-active', '');
+        neighborReturn = animation;
+        animation.finished.then(() => {
+          if (neighborReturn !== animation) return;
+          neighborReturn = null;
+          preview.layer.removeAttribute('data-drag-active');
+        }, () => {});
+      }
+    }
+    function prepareSide(side, direction) {
+      const known = previews.get(side);
+      if (known) {
+        if (!known.ready || Array.from(known.layer.children).every(image => image.naturalWidth)) return known;
+        known.layer.remove();
+        previews.delete(side);
+      }
+      const images = previewPage(side * (direction === 'rtl' ? -1 : 1));
+      if (!images) return null;
+      const layer = surface.ownerDocument.createElement('div');
+      layer.className = 'page-image-wrap page-turn-layer reader-drag-neighbor';
+      layer.setAttribute('aria-hidden', 'true');
+      layer.inert = true;
+      const preview = { layer, side, rest: side * viewport.clientWidth, ready: false };
+      previews.set(side, preview);
+      positionPreview(preview);
+      surface.after(layer);
+      Promise.resolve(images).then(async pages => {
+        if (!pages.length || previews.get(side) !== preview) return;
+        await Promise.all(pages.map(image => image.decode?.()));
+        if (previews.get(side) !== preview || pages.some(image => !image.naturalWidth)) return;
+        layer.dataset.pages = pages.length;
+        layer.replaceChildren(...pages.map(image => surface.contains(image) ? image.cloneNode(false) : image));
+        measurePreview(preview);
+        preview.ready = true;
+        positionPreview(preview);
+        if (origin && activePreview === preview && currentContext(origin)) slide(origin, origin.distance);
+      }).catch(() => {});
+      return preview;
+    }
+    function prepare() {
+      const context = previewPage && getContext();
+      if (context) for (const side of [-1, 1]) prepareSide(side, context.direction);
+    }
+    function slide(start, distance) {
+      start.distance = distance;
+      if (previewPage) {
+        const side = -Math.sign(distance);
+        const preview = side ? prepareSide(side, start.direction) : null;
+        if (activePreview && activePreview !== preview) positionPreview(activePreview);
+        activePreview = preview;
+        // Keep the current image in place until the whole adjacent spread is ready.
+        if (!preview?.ready) distance = 0;
+        else positionPreview(preview, distance);
+      }
+      start.offset = distance;
+      surface.style.translate = `${distance}px`;
+    }
+    function currentContext(start) {
+      const context = getContext();
+      if (context?.revision !== start.revision || context?.direction !== start.direction || Math.abs(viewport.scrollTop - start.top) > 2) return null;
+      return context;
+    }
+    const clampOffset = (dx, width) => Math.min(width, Math.max(-width, dx));
+    viewport.addEventListener('pointerdown', event => {
+      suppressClick = false;
+      if (event.pointerType === 'mouse') origin = null;
+      if (event.pointerType !== 'mouse' || event.button !== 0 || event.ctrlKey || event.metaKey || event.altKey ||
+          event.target?.closest?.('button:not(.tap-zone), a, input, select, textarea, [contenteditable]')) return;
+      const context = getContext();
+      if (!context) return;
+      if (!context.blocked) {
+        resetVisual(false);
+        for (const preview of previews.values()) if (preview.ready) { measurePreview(preview); positionPreview(preview); }
+      }
+      origin = { ...context, id: event.pointerId, x: event.clientX, y: event.clientY, top: viewport.scrollTop,
+        width: viewport.clientWidth, dragged: false, horizontal: false, offset: 0, distance: 0 };
+    });
+    viewport.addEventListener('pointermove', event => {
+      if (!origin || origin.id !== event.pointerId) return;
+      const dx = event.clientX - origin.x, dy = event.clientY - origin.y;
+      if (!origin.dragged) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) <= 10) return;
+        origin.dragged = true;
+        origin.horizontal = Math.abs(dx) > Math.abs(dy) * 1.5;
+        // Capture after movement so a regular click still reaches its original tap zone.
+        viewport.setPointerCapture(event.pointerId);
+      }
+      const context = currentContext(origin);
+      if (!origin.horizontal || !context || context.blocked) return;
+      slide(origin, clampOffset(dx, origin.width));
+    });
+    viewport.addEventListener('pointerup', event => {
+      if (!origin || origin.id !== event.pointerId) return;
+      const start = origin;
+      origin = null;
+      const dx = event.clientX - start.x, dy = event.clientY - start.y;
+      suppressClick = start.dragged || Math.max(Math.abs(dx), Math.abs(dy)) > 10;
+      if (!suppressClick) return;
+      const context = currentContext(start);
+      if (!context) {
+        if (start.offset) resetVisual();
+        return;
+      }
+      const threshold = Math.min(160, Math.max(64, start.width * .12));
+      const delta = swipePageDelta({ dx, dy, direction: context.direction, threshold,
+        blocked: context.blocked || event.button !== 0 || (start.dragged && !start.horizontal) });
+      if (delta) {
+        slide(start, clampOffset(dx, start.width));
+        if (turnPage(delta, start.offset, activePreview?.ready ? activePreview.layer : null)) return;
+      }
+      if (start.dragged) settle(start.offset);
+    });
+    viewport.addEventListener('pointerleave', () => { if (!origin?.dragged) origin = null; });
+    for (const type of ['pointercancel', 'lostpointercapture']) {
+      viewport.addEventListener(type, event => {
+        if (!origin || origin.id !== event.pointerId) return;
+        const start = origin;
+        origin = null;
+        if (start.dragged && currentContext(start)) settle(start.offset);
+      });
+    }
+    viewport.addEventListener('click', event => {
+      if (!suppressClick || !event.detail) return;
+      suppressClick = false;
+      event.preventDefault();
+      event.stopPropagation();
+    }, true);
+    return { reset: resetVisual, prepare };
   }
   const pdfWidths = Object.freeze([800, 1600, 2400, 3200, 4096]);
   function pageDimensions(value) {
@@ -161,5 +338,5 @@
       }
     };
   }
-  return { buildSpreads, spreadForPage, visualPages, effectiveMode, effectiveDirection, canScrollPage, createWheelPager, swipePageDelta, pageDimensions, pdfPageWidth, pageSource, createFullscreen };
+  return { buildSpreads, spreadForPage, visualPages, effectiveMode, effectiveDirection, canScrollPage, createWheelPager, swipePageDelta, bindMousePager, animatePageOffset, pageDimensions, pdfPageWidth, pageSource, createFullscreen };
 }));

@@ -457,6 +457,8 @@ class ImageSearchManager:
         now = time.time()
         self.activity = {"stage": "idle", "generation": None, "done": 0, "total": 0,
                          "startedAt": now, "lastProgressAt": now, "heartbeatAt": now}
+        self.activity_work = None
+        self.index_run = None
         self._activity_logged_at = 0
         self._failed_generation = None
         self.processes = set()
@@ -542,7 +544,40 @@ class ImageSearchManager:
     def _settings(self, connection):
         return dict(connection.execute("SELECT * FROM is_settings WHERE id=1").fetchone())
 
-    def _set_activity(self, stage, generation, *, done=0, total=0):
+    @staticmethod
+    def _activity_target(book, page=None):
+        return {"bookId": book["id"], "title": book.get("display_title") or book["title"], "page": page}
+
+    def _begin_index_run(self, generation):
+        with self.activity_lock:
+            if self.index_run is None:
+                now = time.time()
+                self.index_run = {"generation": generation, "startedAt": now, "lastProgressAt": now,
+                                  "checked": 0, "done": 0, "failed": 0, "lastFailure": None}
+
+    def _record_index_page(self, generation, work, reason=""):
+        now = time.time()
+        with self.activity_lock:
+            run = self.index_run
+            if run is None or run["generation"] != generation:
+                return
+            run["done"] += 1
+            run["lastProgressAt"] = now
+            if reason:
+                run["failed"] += 1
+                run["lastFailure"] = {"reason": reason[:300], "work": work, "at": now}
+
+    def _finish_index_run(self, outcome, *, unless_generation=None):
+        with self.activity_lock:
+            run = self.index_run
+            if run is None or run["generation"] == unless_generation:
+                return
+            self.index_run = None
+        if outcome == "completed" and run["failed"]:
+            outcome = "warnings"
+        self.library.task_runs.finish("index", {key: value for key, value in run.items() if key != "generation"}, outcome)
+
+    def _set_activity(self, stage, generation, *, done=0, total=0, work=None):
         """Keep maintenance progress in memory, without per-page SQLite writes."""
         now = time.time()
         done, total = max(0, int(done)), max(0, int(total))
@@ -551,11 +586,16 @@ class ImageSearchManager:
             if old["generation"] is not None and generation < old["generation"]:
                 return
             changed = old["stage"] != stage or old["generation"] != generation
-            advanced = changed or done > old["done"]
+            changed_work = work is not None and work != self.activity_work
+            advanced = changed or changed_work or done > old["done"]
             self.activity = {"stage": stage, "generation": generation, "done": done, "total": total,
                              "startedAt": now if changed else old["startedAt"],
                              "lastProgressAt": now if advanced else old["lastProgressAt"],
                              "heartbeatAt": now}
+            if work is not None:
+                self.activity_work = work
+            elif old["generation"] != generation or stage not in ("waiting", "reconciling", "reading", "decoding", "error"):
+                self.activity_work = None
             report = stage == "reconciling" and (changed or now - self._activity_logged_at >= 10
                                                   or (advanced and done == total))
             if report:
@@ -563,10 +603,7 @@ class ImageSearchManager:
         if report:
             logging.getLogger("sumi").info("Image index catalogue check: %d/%d", done, total)
 
-    def _activity_snapshot(self, settings, summary):
-        with self.activity_lock:
-            activity = dict(self.activity)
-        alive = bool(self.thread and self.thread.is_alive())
+    def _activity_snapshot(self, settings, pending, activity, alive):
         if activity.pop("generation") != settings["generation"]:
             activity.update(stage="starting", done=0, total=0)
         if not settings["enabled"]:
@@ -577,24 +614,48 @@ class ImageSearchManager:
             activity["stage"] = "stopping" if alive else "stopped"
         elif self.thread is not None and not alive:
             activity["stage"] = "stopped"
-        elif activity["stage"] == "idle" and (summary["pending"] or settings["reconcile_pending"]):
+        elif activity["stage"] == "idle" and (pending or settings["reconcile_pending"]):
             activity["stage"] = "queued"
         activity["workerAlive"] = alive
-        activity["background"] = self.library.task_scheduler.snapshot_debug()
         return activity
 
-    def _working(self, settings):
-        with self.activity_lock:
-            return bool(settings["enabled"] and not settings["paused"]
-                        and not self.stop_event.is_set() and not self.library.stop_event.is_set()
-                        and self.thread and self.thread.is_alive()
-                        and self.activity["generation"] == settings["generation"]
-                        and self.activity["stage"] in ("reconciling", "reading", "decoding"))
+    @staticmethod
+    def _working(settings, activity):
+        return bool(settings["enabled"] and not settings["paused"] and activity["workerAlive"]
+                    and activity["stage"] in ("reconciling", "reading", "decoding"))
 
-    def activity_status(self):
-        # The sidebar only needs one flag. Don't count/scan is_pages here.
+    def _index_activity(self, settings, pending=False, *, details=False):
+        with self.activity_lock:
+            activity = dict(self.activity)
+            same_generation = activity["generation"] == settings["generation"]
+            work = self.activity_work if same_generation else None
+            run = dict(self.index_run) if self.index_run and self.index_run["generation"] == settings["generation"] else None
+        alive = bool(self.thread and self.thread.is_alive())
+        activity = self._activity_snapshot(settings, pending or run is not None, activity, alive)
+        working = self._working(settings, activity)
+        if not details:
+            return working, activity, None
+        current = None
+        if activity["stage"] in ("queued", "starting", "reconciling", "waiting", "reading", "decoding", "error"):
+            current = {"startedAt": run["startedAt"] if run else activity["startedAt"],
+                       "lastProgressAt": max(activity["lastProgressAt"], run["lastProgressAt"]) if run else activity["lastProgressAt"],
+                       "work": work, "done": run["done"] if run else 0, "failed": run["failed"] if run else 0,
+                       "checked": activity["done"] if activity["stage"] == "reconciling" else None,
+                       "totalToCheck": activity["total"] if activity["stage"] == "reconciling" else None,
+                       "lastFailure": run["lastFailure"] if run else None,
+                       "error": (settings["error"] or "图片索引任务失败，正在重试。") if activity["stage"] == "error" else ""}
+        return working, activity, {"stage": activity["stage"], "current": current,
+                                   "recent": self.library.task_runs.recent("index")}
+
+    def activity_status(self, *, include_runs=False):
+        # The shared sidebar/detail request never counts or scans is_pages.
         with closing(self.library.connect()) as connection:
-            return {"working": self._working(self._settings(connection))}
+            details = include_runs and self.library._actor(connection)["role"] == "admin"
+            working, _, index = self._index_activity(self._settings(connection), details=details)
+        result = {"working": working}
+        if details:
+            result["taskRuns"] = {"scan": self.library.scan_task_status(), "index": index}
+        return result
 
     def _work_directory(self):
         self.root.mkdir(exist_ok=True)
@@ -632,6 +693,8 @@ class ImageSearchManager:
                     pass
         if self.thread and self.thread is not threading.current_thread():
             self.thread.join(timeout=10)
+        if not self.thread or not self.thread.is_alive():
+            self._finish_index_run("interrupted")
 
     def _loop(self):
         while not self.stop_event.is_set() and not self.library.stop_event.is_set():
@@ -862,7 +925,8 @@ class ImageSearchManager:
             access, arguments = self.library._access_sql(connection, visible=True)
             available = settings["enabled"] and connection.execute(f"""SELECT 1 FROM is_pages p JOIN books b ON b.id=p.book_id
                 WHERE p.status='ready' AND b.active=1 AND b.removed=0 AND {INDEX_LIBRARY_SCOPE} AND {access} LIMIT 1""", arguments).fetchone()
-            working = self._working(settings)
+            admin = actor["role"] == "admin"
+            working, activity, index = self._index_activity(settings, summary["pending"] if admin else False, details=admin)
             indexing = bool(settings["enabled"] and not settings["paused"] and settings["reconcile_pending"]
                             and settings["library_ids"] != "[]")
             if settings["enabled"] and not settings["paused"] and not indexing:
@@ -882,11 +946,12 @@ class ImageSearchManager:
                     existing = {item["id"] for item in libraries}
                     library_ids = [item for item in json.loads(library_ids) if item in existing]
                 indexing = indexing or working or bool(settings["enabled"] and not settings["paused"] and summary["pending"])
+                activity["background"] = self.library.task_scheduler.snapshot_debug()
                 result.update(indexing=indexing, library_ids=library_ids, libraries=libraries,
                               paused=bool(settings["paused"]), summary=summary,
                               progress={"done": summary["indexed"] + summary["failed"], "total": summary["total"]},
                               revision=settings["revision"], error=settings["error"],
-                              activity=self._activity_snapshot(settings, summary))
+                              activity=activity, taskRuns={"scan": self.library.scan_task_status(), "index": index})
             return result
 
     def _current(self, generation, connection=None):
@@ -902,6 +967,7 @@ class ImageSearchManager:
         # Sources have already been opened and closed outside this short
         # transaction. A concurrent scan or account action must be rechecked
         # after reserving the writer before any old observations are applied.
+        failures = []
         with self.lock, connection:
             connection.execute("BEGIN IMMEDIATE")
             if not self._current(generation, connection):
@@ -932,8 +998,12 @@ class ImageSearchManager:
                         local_features=NULL,local_sketch=NULL,local_state='pending',local_version=0,local_error='',failure_code='',actual_format='',updated_at=excluded.updated_at""",
                         (book["id"], key, index, version, book["signature"], ALGORITHM_VERSION,
                          "failed" if error else "pending", error, time.time()))
+                    if error:
+                        failures.append((book, index, error))
             if changed:
                 connection.execute("UPDATE is_settings SET reconcile_pending=1 WHERE generation=?", (generation,))
+        for book, index, error in failures:
+            self._record_index_page(generation, self._activity_target(book, index), error)
         return True
 
     def _remove_catalogue_batch(self, connection, generation, obsolete):
@@ -965,15 +1035,17 @@ class ImageSearchManager:
                 # Clear first so a concurrent scan can request another pass
                 # without its request being lost when this one completes.
                 connection.execute("UPDATE is_settings SET reconcile_pending=0 WHERE generation=?", (generation,))
-                books = [dict(row) for row in connection.execute(f"""SELECT id,source_root,path,format,pages,signature
-                FROM books b WHERE active=1 AND removed=0 AND format NOT IN ('pdf','epub','rar')
-                AND {INDEX_LIBRARY_SCOPE} ORDER BY id""")]
+                books = [dict(row) for row in connection.execute(f"""SELECT b.id,b.title,b.source_root,b.path,b.format,b.pages,b.signature,
+                COALESCE(NULLIF(m.title,''),b.title) AS display_title FROM books b
+                LEFT JOIN book_metadata m ON m.book_id=b.id WHERE b.active=1 AND b.removed=0
+                AND b.format NOT IN ('pdf','epub','rar') AND {INDEX_LIBRARY_SCOPE} ORDER BY b.id""")]
             total = sum(len(json.loads(book["pages"])) for book in books)
             done = 0
             if total:
                 self._set_activity("reconciling", generation, done=done, total=total)
             checked = []
             for book in books:
+                self._set_activity("reconciling", generation, done=done, total=total, work=self._activity_target(book))
                 for index, key in enumerate(json.loads(book["pages"])):
                     if not self._current(generation, connection):
                         return
@@ -1008,6 +1080,7 @@ class ImageSearchManager:
                 if not self._current(generation, connection):
                     return
                 connection.execute("UPDATE is_settings SET revision=revision+1,error=''")
+            return done
 
     def run_once(self):
         """One coordination pass or one page; useful for deterministic tests."""
@@ -1024,12 +1097,21 @@ class ImageSearchManager:
             with closing(self.library.connect()) as connection:
                 settings = self._settings(connection)
             generation = settings["generation"]
+            current_outcome = "paused" if settings["paused"] else "interrupted"
+            self._finish_index_run(current_outcome, unless_generation=generation)
             if not self._current(settings["generation"]):
                 self._stop_index_worker()
                 self._set_activity("disabled" if not settings["enabled"] else "paused", generation)
                 return False
             if settings["reconcile_pending"] and self._index_turn_due != settings["generation"]:
-                self._sync_catalogue(settings["generation"])
+                self._begin_index_run(generation)
+                checked = self._sync_catalogue(generation)
+                if checked:
+                    with self.activity_lock:
+                        run = self.index_run
+                        if run is not None and run["generation"] == generation:
+                            run["checked"] += checked
+                            run["lastProgressAt"] = time.time()
                 # A scan can request another pass while this one is still
                 # checking sources. Give one page a turn before reconciling
                 # again; otherwise a slow catalogue can starve decoding.
@@ -1038,18 +1120,24 @@ class ImageSearchManager:
                 return True
             self._index_turn_due = None
             with self.lock, closing(self.library.connect()) as connection:
-                job = connection.execute(f"""SELECT b.*,p.page_key,p.page_index,p.source_version,p.status AS index_status FROM is_pages p JOIN books b ON b.id=p.book_id
+                job = connection.execute(f"""SELECT b.*,p.page_key,p.page_index,p.source_version,p.status AS index_status,
+                    COALESCE(NULLIF(m.title,''),b.title) AS display_title FROM is_pages p JOIN books b ON b.id=p.book_id
+                    LEFT JOIN book_metadata m ON m.book_id=b.id
                     WHERE b.active=1 AND b.removed=0 AND {INDEX_LIBRARY_SCOPE} AND (p.status='pending' OR (p.status='ready' AND p.local_state='pending'))
                     ORDER BY CASE p.status WHEN 'pending' THEN 0 ELSE 1 END,b.id,p.page_index LIMIT 1""").fetchone()
-                if not job:
-                    self._stop_index_worker()
-                    self._set_activity("idle", generation)
-                    return bool(settings["reconcile_pending"])
-                job = dict(job)
+                if job:
+                    job = dict(job)
+            if not job:
+                self._stop_index_worker()
+                self._set_activity("idle", generation)
+                if not settings["reconcile_pending"]:
+                    self._finish_index_run("completed")
+                return bool(settings["reconcile_pending"])
             # Keep the row pending while another family owns the shared budget.
             # The decoder resource also prevents queries and indexing from
             # reserving two global slots for the same single decoder.
-            self._set_activity("waiting", generation)
+            self._begin_index_run(generation)
+            self._set_activity("waiting", generation, work=self._activity_target(job, job["page_index"]))
             with self.library.task_scheduler.slot(resource="image-search", cancel=lambda: not self._current(settings["generation"])) as acquired:
                 if not acquired:
                     return True
@@ -1075,6 +1163,7 @@ class ImageSearchManager:
             self.run_lock.release()
 
     def _run_index_job(self, job, generation):
+        work = self._activity_target(job, job["page_index"])
         try:
             result = self._index_page(job, generation)
             with self.lock, closing(self.library.connect()) as connection, connection:
@@ -1086,7 +1175,9 @@ class ImageSearchManager:
                     result["width"], result["height"], result["preview"], time.time(), result.get("local_features"), result.get("local_sketch"),
                     LOCAL_VERSION, job["id"], job["page_key"]))
                 connection.execute("UPDATE is_settings SET revision=revision+1,error=''")
+            self._record_index_page(generation, work)
         except Exception as error:
+            message = ""
             with self.lock, closing(self.library.connect()) as connection, connection:
                 if self._job_current(connection, job, generation):
                     message = str(error) if isinstance(error, self._error("x").__class__) else "图片索引失败，请重试或检查源图片。"
@@ -1099,6 +1190,8 @@ class ImageSearchManager:
                     connection.execute("UPDATE is_pages SET status='pending' WHERE book_id=? AND page_key=? AND status='running'",
                                        (job["id"], job["page_key"]))
                     connection.execute("UPDATE is_pages SET local_state='pending' WHERE book_id=? AND page_key=? AND local_state='running'", (job["id"], job["page_key"]))
+            if message:
+                self._record_index_page(generation, work, message)
         return True
 
     def _job_current(self, connection, job, generation):

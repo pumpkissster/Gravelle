@@ -4,7 +4,8 @@ import { createRoot } from 'react-dom/client';
 import { RiLogoutBoxRLine, RiNotification3Line, RiSettings3Line } from '@remixicon/react';
 import { Dropdown, DropdownDivider, DropdownItem, DropdownPopover, DropdownTrigger } from '@/components/base/dropdown/dropdown';
 import { mountOptimizationFilter } from './optimization-filters';
-import { mountIndexScope, mountIndexSpinner } from './index-controls';
+import { mountIndexScope, mountIndexSpinner, mountLibraryScanOption } from './index-controls';
+import { mountHomeLibraries } from './home-libraries';
 
 const iconClass = 'size-5 shrink-0 text-foreground-icon-secondary';
 const rowClass = 'min-h-9 text-body-medium';
@@ -80,4 +81,5 @@ window.GravelleAccountMenu = {
   },
 };
 window.GravelleOptimizationFilter = { mount: mountOptimizationFilter };
-window.GravelleIndexControls = { mountScope: mountIndexScope, mountSpinner: mountIndexSpinner };
+window.GravelleIndexControls = { mountScope: mountIndexScope, mountSpinner: mountIndexSpinner, mountLibraryScanOption };
+window.GravelleHomeLibraries = { mount: mountHomeLibraries };

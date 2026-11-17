@@ -182,6 +182,12 @@ class ImageSearchAPITests(unittest.TestCase):
         self.assertEqual(status, 200, payload)
         self.assertEqual(set(payload), {"enabled", "available", "indexing", "working"})
         self.assertEqual(self.request("/api/image-search/activity", actor="child")[:2], (200, {"working": False}))
+        status, activity, _ = self.request("/api/image-search/activity")
+        self.assertEqual(status, 200)
+        self.assertEqual(set(activity), {"working", "taskRuns"})
+        self.assertEqual(set(activity["taskRuns"]), {"scan", "index"})
+        self.assertEqual(activity["taskRuns"]["scan"]["recent"][0]["libraryName"], "Private library")
+        self.assertEqual(activity["taskRuns"], self.request("/api/image-search/status")[1]["taskRuns"])
 
     def test_index_scope_keeps_selected_features_and_only_rebuilds_eligible_pages(self):
         self.enable_index()
@@ -253,7 +259,14 @@ class ImageSearchAPITests(unittest.TestCase):
         self.assertTrue(all(item["match"] == "similar" for item in payload["results"]))
         for path in self.data.rglob("*"):
             if path.is_file() and path != self.app.service_lock.path:
-                self.assertNotIn(upload, path.read_bytes(), "Uploaded query bytes must not be retained")
+                try:
+                    stored = path.read_bytes()
+                except FileNotFoundError:
+                    if path.name in ("library.sqlite3-wal", "library.sqlite3-shm"):
+                        # The last SQLite connection can close after is_file().
+                        continue
+                    raise
+                self.assertNotIn(upload, stored, "Uploaded query bytes must not be retained")
         self.assertEqual(self.hash_sources(), self.source_hashes)
 
     def test_hidden_libraries_filter_results_and_thumbnails_for_every_account(self):

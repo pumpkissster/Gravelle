@@ -29,7 +29,7 @@ if __package__ in (None, ''):
 ARCHITECTURES = {'arm64': 'arm64', 'x64': 'x86_64'}
 MINIMUM_MACOS = '15.0'
 ENTITLEMENTS = {'com.apple.security.cs.allow-jit': True}
-LICENSE_PACKAGES = ('Pillow', 'PyInstaller', 'numpy', 'opencv-python-headless',
+LICENSE_PACKAGES = ('Pillow', 'PyInstaller', 'numpy', 'opencv-python-headless', 'watchdog',
                     'pyobjc-core', 'pyobjc-framework-Cocoa', 'pyobjc-framework-Quartz')
 PYOBJC_CORE_LICENSE_VERSION = '12.2.2'
 PYOBJC_CORE_LICENSE_SHA256 = '0ca04b07928d4872b9d9bb22187ca0426dd8bfab08f26eada0999a71dc81aaff'
@@ -216,6 +216,7 @@ def prepare_resources(root: Path, resources: Path, config: dict) -> None:
         'PDF reading uses pypdfium2 (Apache-2.0 or BSD-3-Clause) and PDFium. The complete '
         'PDFium and bundled component notices, including the libjpeg-turbo IJG license, '
         'are preserved in licenses/pypdfium2/.\n\n'
+        'Incremental media scanning uses watchdog (Apache-2.0). Its license is included in licenses/watchdog/.\n\n'
         'Shared photo pages and saved HTTPS certificate passwords use cryptography (Apache-2.0 or BSD-3-Clause), CFFI/pycparser (MIT), '
         'and the wheel\'s OpenSSL runtime. Full notices are under licenses/cryptography/, '
         'licenses/cffi/, and licenses/pycparser/. The browser fallback uses pinned @noble/ciphers '

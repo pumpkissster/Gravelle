@@ -6,6 +6,9 @@
 @source "./account-menu.jsx";
 @source "./optimization-filters.jsx";
 @source "./index-controls.jsx";
+@source "./home-libraries.jsx";
+@source "./components/base/carousel";
+@source "./components/base/buttons/icon-button.tsx";
 @source "./components/base/dropdown";
 @source "./components/base/select";
 @source "./components/base/checkbox";

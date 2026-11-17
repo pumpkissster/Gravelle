@@ -65,7 +65,11 @@ docker compose up -d gravelle
 Windows 安装版也支持在终端运行：
 
 ```powershell
-& "$env:LOCALAPPDATA\Programs\Gravelle\GravelleServer.exe" --reset-admin-password --data "$env:LOCALAPPDATA\Gravelle\data"
+$gravelleServerPath = Join-Path $env:LOCALAPPDATA 'Programs\Gravelle\runtime\GravelleServer.exe'
+if (-not (Test-Path -LiteralPath $gravelleServerPath)) {
+    $gravelleServerPath = Join-Path $env:LOCALAPPDATA 'Programs\Gravelle\GravelleServer.exe'
+}
+& $gravelleServerPath --reset-admin-password --data "$env:LOCALAPPDATA\Gravelle\data"
 ```
 
 数据目录必须已存在且包含有效管理员账户。工具不创建账户、不扫描作品，也不会重置其他用户的密码。重置前务必停止所有使用该数据目录的服务；服务运行期间会拒绝重置。

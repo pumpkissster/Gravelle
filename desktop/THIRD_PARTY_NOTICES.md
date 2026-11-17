@@ -2,6 +2,8 @@
 
 This distribution includes Python, Tcl/Tk and Pillow so users do not need to install them separately. Their license notices are included in the `licenses` directory and bundled runtime directories. PyInstaller is used to package this application; its bootloader distribution exception is included with its license notice.
 
+Incremental media scanning uses watchdog (Apache-2.0). Its license is included in `licenses/watchdog/`.
+
 Local screenshot and crop matching uses NumPy (BSD-3-Clause), OpenCV (Apache-2.0) and the opencv-python-headless packaging scripts (MIT). Package license files, including notices for components shipped by these wheels, are included in `licenses` and the bundled runtime directories. Matching runs locally on the CPU; no model download or GPU runtime is included.
 
 Model-avatar generation additionally uses the bundled YuNet face detector (MIT), copyright (c) 2020 Shiqi Yu. The unchanged model, complete upstream license, and pinned provenance are included under `runtime/_internal/models/yunet/`. It runs locally on the CPU only for avatar cropping; it is not used for image-search indexing and is never downloaded at runtime.

@@ -425,7 +425,6 @@ html[data-interface-skin="board"] .image-search-toggle:checked::after { transfor
 
 /* Collection cards preserve source image proportions and lazy-loading behavior. */
 html[data-interface-skin="board"] .library-tiles { gap: 20px; }
-html[data-interface-skin="board"] #app[data-view="home"] .library-tiles { --tile-shadow-gutter: 20px; }
 html[data-interface-skin="board"] #app .library-tile {
   border: 1px solid var(--line);
   border-radius: var(--board-radius);

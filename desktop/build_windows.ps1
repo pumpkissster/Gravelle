@@ -114,7 +114,7 @@ print('Preparing Gravelle '+version+' for '+repo)
             '/resource:Launcher.xaml,Launcher.xaml', '/resource:../assets/gravelle-wordmark.png,Wordmark.png',
             '/resource:../../static/gravelle-icon.png,Gravelle.png'
         )
-        & $compiler @arguments @references 'Launcher.cs' 'ControlOutline.cs'
+        & $compiler @arguments @references 'Launcher.cs' 'ControlOutline.cs' 'ReaderJob.cs'
         if ($LASTEXITCODE -ne 0) { throw 'WPF launcher compilation failed.' }
     } finally {
         Pop-Location
@@ -130,7 +130,7 @@ target=Path(sys.argv[1])/'licenses'
 target.mkdir(exist_ok=True)
 python_license=Path(sys.base_prefix)/'LICENSE.txt'
 if python_license.exists(): shutil.copyfile(python_license,target/'Python-LICENSE.txt')
-for name in ('Pillow','PyInstaller','numpy','opencv-python-headless'):
+for name in ('Pillow','PyInstaller','numpy','opencv-python-headless','watchdog'):
     dist=importlib.metadata.distribution(name)
     for entry in dist.files or []:
         if any(word in entry.name.lower() for word in ('license','copying','notice')) and entry.suffix.lower() in ('.txt','.md','.rst',''):

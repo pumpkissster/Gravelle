@@ -3,13 +3,53 @@
 from collections import deque
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
+import json
+import logging
+import sqlite3
 import threading
+import time
 
 
 MAX_TASK_CONCURRENCY = 8
 MAX_SCAN_INTERVAL_SECONDS = 7 * 24 * 60 * 60
 _POLL_SECONDS = .1
 _PRIORITY_BURST = 8
+_RECENT_RUNS = 10
+
+
+class TaskRunHistory:
+    """Keep recent terminal runs durable. Live progress never writes SQLite."""
+
+    def __init__(self, library):
+        self.library = library
+        self._lock = threading.Lock()
+        self._recent = {}
+        with closing(library.connect()) as connection, connection:
+            connection.execute("""CREATE TABLE IF NOT EXISTS task_run_history (
+                id INTEGER PRIMARY KEY, kind TEXT NOT NULL, record TEXT NOT NULL
+            )""")
+            for kind in ("scan", "index"):
+                rows = connection.execute("SELECT record FROM task_run_history WHERE kind=? ORDER BY id DESC LIMIT ?",
+                                          (kind, _RECENT_RUNS))
+                self._recent[kind] = deque((json.loads(row[0]) for row in rows), maxlen=_RECENT_RUNS)
+
+    def finish(self, kind, record, outcome):
+        entry = {**record, "endedAt": time.time(), "outcome": outcome}
+        with self._lock:
+            self._recent[kind].appendleft(entry)
+        try:
+            with closing(self.library.connect()) as connection, connection:
+                connection.execute("INSERT INTO task_run_history(kind,record) VALUES(?,?)",
+                                   (kind, json.dumps(entry, ensure_ascii=False, separators=(",", ":"))))
+                connection.execute("""DELETE FROM task_run_history WHERE kind=? AND id NOT IN (
+                    SELECT id FROM task_run_history WHERE kind=? ORDER BY id DESC LIMIT ?
+                )""", (kind, kind, _RECENT_RUNS))
+        except sqlite3.Error as error:
+            logging.getLogger("sumi").warning("Task run history could not be saved (%s)", type(error).__name__)
+
+    def recent(self, kind):
+        with self._lock:
+            return list(self._recent[kind])
 
 
 @dataclass(eq=False)

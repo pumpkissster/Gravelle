@@ -6,9 +6,9 @@
 
 ## 从 Docker Hub 安装
 
-镜像仓库为 [pumpkissster/gravelle](https://hub.docker.com/r/pumpkissster/gravelle)，当前版本为 `0.9.6`，也提供 `latest` 标签。Docker 会按宿主机选择 amd64 或 arm64 镜像。
+镜像仓库为 [pumpkissster/gravelle](https://hub.docker.com/r/pumpkissster/gravelle)，当前版本为 `0.9.8`，也提供 `latest` 标签。Docker 会按宿主机选择 amd64 或 arm64 镜像。
 
-可在 [0.9.6 发行页](https://github.com/pumpkissster/Gravelle/releases/tag/v0.9.6) 查看更新内容并下载 `Gravelle-Docker-0.9.6.zip` 配置包。
+可在 [0.9.8 发行页](https://github.com/pumpkissster/Gravelle/releases/tag/v0.9.8) 查看更新内容并下载 `Gravelle-Docker-0.9.8.zip` 配置包。
 
 自动扫描间隔可在网页「设置 → 性能设置」调整，设为 0 可关闭定时扫描。
 
@@ -17,7 +17,7 @@
 
 | 配置 | 内容 |
 | --- | --- |
-| `GRAVELLE_IMAGE` | `pumpkissster/gravelle:0.9.6` |
+| `GRAVELLE_IMAGE` | `pumpkissster/gravelle:0.9.8` |
 | `COMICS_PATH` | 宿主机写真根目录，例如 `/path/to/photos` |
 | `DATA_PATH` | 宿主机资料目录，例如 `/path/to/data`；已有安装保留原值 |
 | `PUID` / `PGID` | 对作品目录有读取权限、对资料目录有读写权限的用户 UID / GID |
@@ -72,7 +72,7 @@ docker compose -f compose.build.yaml -f compose.optimization.yaml up -d --build
 docker compose -f compose.build.yaml -f compose.optimization.yaml ps
 ```
 
-使用 Docker Hub 镜像时，将 `.env` 的 `GRAVELLE_IMAGE` 设为 `pumpkissster/gravelle:0.9.6`，再使用：
+使用 Docker Hub 镜像时，将 `.env` 的 `GRAVELLE_IMAGE` 设为 `pumpkissster/gravelle:0.9.8`，再使用：
 
 ```sh
 docker compose -f compose.yaml -f compose.optimization.yaml config
@@ -104,7 +104,7 @@ docker compose -f compose.yaml -f compose.optimization.yaml ps
 
 部署模板的默认服务名为 `gravelle`。已有安装升级时沿用原来的项目名称、服务名、`DATA_PATH`、`COMICS_PATH` 和运行用户配置；使用新模板前，将模板服务名调整为当前部署实际使用的服务名。不要创建第二个项目或服务同时使用同一资料目录，也不需要为软件改名而移动已有资料目录。
 
-如果升级后的数据库结构发生变化，回退时恢复升级前的完整资料备份，并使用对应旧镜像版本。
+数据库结构升级前会自动在 `/data/backups` 保存快照。需要回退时，按[数据库备份与恢复](database-recovery.md#docker)操作并使用对应旧镜像。
 
 ## 发布者配置 GitHub Actions
 

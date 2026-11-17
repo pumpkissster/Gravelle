@@ -3,7 +3,7 @@
 // Run with: node --test tests/test_reader_model.js
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { buildSpreads, spreadForPage, visualPages, effectiveMode, effectiveDirection, canScrollPage, createWheelPager, swipePageDelta, pageDimensions, pdfPageWidth, pageSource, createFullscreen } = require('../static/reader-model.js');
+const { buildSpreads, spreadForPage, visualPages, effectiveMode, effectiveDirection, canScrollPage, createWheelPager, swipePageDelta, bindMousePager, pageDimensions, pdfPageWidth, pageSource, createFullscreen } = require('../static/reader-model.js');
 
 test('default spreads preserve a standalone cover and logical page order', () => {
   assert.deepEqual(buildSpreads(0), []);
@@ -145,6 +145,75 @@ test('vertical swipes distinguish a page turn from horizontal movement, panning 
   assert.equal(swipePageDelta({ dx: 0, dy: -100, vertical: true, blocked: true }), 0);
   assert.equal(swipePageDelta({ dx: -100, dy: 5, direction: 'rtl' }), -1);
   assert.equal(swipePageDelta({ dx: -100, dy: 5, direction: 'ltr' }), 1);
+});
+
+function mousePagerFixture() {
+  const captured = [], turns = [], animations = [];
+  const viewport = Object.assign(new EventTarget(), { clientWidth: 640, scrollTop: 0, setPointerCapture(id) { captured.push(id); } });
+  const surface = { style: {}, animate(frames) { animations.push(frames); return { cancel() {} }; } };
+  const context = { revision: 1, direction: 'ltr' };
+  bindMousePager(viewport, surface, () => context, (delta, offset) => {
+    turns.push([delta, offset]);
+    if (context.canTurn === false) return false;
+    surface.style.translate = '';
+    return true;
+  });
+  function send(type, options = {}) {
+    const event = Object.assign(new Event(type, { cancelable: true }), {
+      pointerType: 'mouse', pointerId: 1, button: 0, clientX: 180, clientY: 100, detail: 1, ...options,
+    });
+    return viewport.dispatchEvent(event);
+  }
+  return { context, captured, turns, viewport, surface, animations, send };
+}
+
+test('mouse drag follows reading direction and suppresses only the drag click', () => {
+  const { context, captured, turns, send } = mousePagerFixture();
+  send('pointerdown'); send('pointermove', { clientX: 175 }); send('pointerup', { clientX: 175 });
+  assert.equal(send('click'), true);
+  assert.deepEqual(captured, []);
+  send('pointerdown'); send('pointermove', { clientX: 105 }); send('pointerup', { clientX: 70 });
+  assert.deepEqual(captured, [1]);
+  assert.deepEqual(turns, [[1, -110]]);
+  assert.equal(send('click', { detail: 0 }), true);
+  assert.equal(send('click'), false);
+  context.direction = 'rtl';
+  send('pointerdown'); send('pointerup', { clientX: 70 });
+  assert.deepEqual(turns, [[1, -110], [-1, -110]]);
+  send('pointerdown'); send('pointerup');
+  assert.equal(send('click'), true);
+});
+
+test('the page follows successive mouse moves and returns from the release offset on a short drag or at an edge', () => {
+  const { context, surface, animations, turns, send } = mousePagerFixture();
+  send('pointerdown'); send('pointermove', { clientX: 145 });
+  assert.equal(surface.style.translate, '-35px');
+  send('pointermove', { clientX: 122 });
+  assert.equal(surface.style.translate, '-58px');
+  send('pointerup', { clientX: 122 });
+  assert.equal(surface.style.translate, '');
+  assert.deepEqual(animations, [[{ translate: '-58px' }, { translate: '0px' }]]);
+  assert.deepEqual(turns, []);
+  context.canTurn = false;
+  send('pointerdown'); send('pointermove', { clientX: 279 }); send('pointerup', { clientX: 279 });
+  assert.deepEqual(turns, [[-1, 99]]);
+  assert.deepEqual(animations[1], [{ translate: '99px' }, { translate: '0px' }]);
+});
+
+test('mouse pager ignores canceled gestures, other pointers and a changing page', () => {
+  const { context, captured, turns, viewport, send } = mousePagerFixture();
+  send('pointerdown', { pointerType: 'touch' }); send('pointerup', { clientX: 75 });
+  send('pointerdown', { button: 2 }); send('pointerup', { clientX: 75 });
+  send('pointerdown'); send('pointermove', { clientX: 130 }); send('pointercancel'); send('pointerup', { clientX: 75 });
+  send('pointerdown'); send('pointerup', { clientY: 30 });
+  assert.equal(send('click'), false);
+  send('pointerdown'); context.revision++; send('pointerup', { clientX: 75 });
+  send('pointerdown'); viewport.scrollTop = 40; send('pointerup', { clientX: 75 });
+  context.blocked = true;
+  send('pointerdown'); send('pointerup', { clientX: 75 });
+  assert.equal(send('click'), false);
+  assert.deepEqual(captured, [1]);
+  assert.deepEqual(turns, []);
 });
 
 test('PDF resolution follows the displayed page on phones, HiDPI desktops and double spreads', () => {

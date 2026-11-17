@@ -18,7 +18,8 @@ from PIL import Image
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from image_search import _features
-from server import Library
+from server import Library, ReaderError
+from task_scheduler import TaskRunHistory
 
 
 class ImageSearchActivityTests(unittest.TestCase):
@@ -139,8 +140,8 @@ class ImageSearchActivityTests(unittest.TestCase):
         observed = []
         mark = self.manager._set_activity
 
-        def recording(stage, generation, done=0, total=0):
-            mark(stage, generation, done=done, total=total)
+        def recording(stage, generation, done=0, total=0, work=None):
+            mark(stage, generation, done=done, total=total, work=work)
             if stage == "reconciling":
                 observed.append((done, total))
 
@@ -193,6 +194,17 @@ class ImageSearchActivityTests(unittest.TestCase):
                 self.assertEqual(activity["background"]["active"], 1)
                 self.assertGreaterEqual(activity["background"]["queued"], 1)
                 self.assertFalse(activity["workerAlive"], "A manual run_once thread is not the manager's background thread")
+                payload = self.manager.activity_status(include_runs=True)
+                self.assertFalse(payload["working"])
+                waiting = payload["taskRuns"]["index"]
+                self.assertEqual(waiting["stage"], "waiting")
+                self.assertEqual(set(waiting["current"]), {
+                    "startedAt", "lastProgressAt", "work", "done", "failed",
+                    "checked", "totalToCheck", "lastFailure", "error",
+                })
+                self.assertEqual(set(waiting["current"]["work"]), {"bookId", "title", "page"})
+                self.assertEqual(waiting["current"]["work"]["title"], "album")
+                self.assertGreater(waiting["current"]["lastProgressAt"], 0)
             worker.join(timeout=5)
             self.assertFalse(worker.is_alive())
             self.assertEqual(errors, [])
@@ -201,6 +213,56 @@ class ImageSearchActivityTests(unittest.TestCase):
         self.assertIn("reading", stages)
         self.assertIn("decoding", stages)
         self.assertEqual(self.activity()["stage"], "idle")
+
+    def test_failure_is_reported_after_page_commit_and_survives_finished_run(self):
+        self.enable()
+        self.manager.run_once()
+        with patch.object(self.manager, "_index_page", side_effect=ReaderError("示例图片解码失败。", 422)):
+            self.assertTrue(self.manager.run_once())
+        index = self.manager.activity_status(include_runs=True)["taskRuns"]["index"]
+        self.assertEqual(index["stage"], "queued")
+        self.assertEqual(index["current"]["done"], 1)
+        self.assertEqual(index["current"]["failed"], 1)
+        failure = index["current"]["lastFailure"]
+        self.assertEqual(failure["reason"], "示例图片解码失败。")
+        self.assertEqual(failure["work"]["title"], "album")
+        self.assertEqual(failure["work"]["page"], 0)
+
+        with patch.object(self.manager, "_decode_exclusive", side_effect=self.decode_fixture):
+            self.assertTrue(self.manager.run_once())
+        self.assertFalse(self.manager.run_once())
+        index = self.manager.activity_status(include_runs=True)["taskRuns"]["index"]
+        self.assertEqual(index["stage"], "idle")
+        self.assertIsNone(index["current"])
+        entry = index["recent"][0]
+        self.assertEqual((entry["outcome"], entry["done"], entry["failed"]), ("warnings", 2, 1))
+        self.assertEqual(entry["lastFailure"], failure)
+        self.assertEqual(TaskRunHistory(self.library).recent("index")[0], entry)
+
+    def test_scan_exposes_current_work_and_keeps_finished_warnings(self):
+        (self.media / "damaged.cbz").write_bytes(b"not a zip")
+        observations = []
+        inspect = self.library.transcoding.inspect_book
+
+        def inspect_with_observation(book):
+            observations.append(self.manager.activity_status(include_runs=True)["taskRuns"]["scan"])
+            return inspect(book)
+
+        with patch.object(self.library.transcoding, "inspect_book", side_effect=inspect_with_observation):
+            self.library._scan_library(self.library._library_config(self.library_id))
+        self.assertEqual(len(observations), 1)
+        active = observations[0]
+        self.assertEqual(active["stage"], "inspecting")
+        self.assertEqual(active["current"]["work"]["title"], "album")
+        self.assertEqual(active["current"]["lastFailure"]["work"]["title"], "damaged")
+        self.assertGreater(active["current"]["lastProgressAt"], active["current"]["startedAt"])
+        scan = self.library.scan_task_status()
+        self.assertEqual(scan["stage"], "idle")
+        self.assertIsNone(scan["current"])
+        entry = scan["recent"][0]
+        self.assertEqual((entry["outcome"], entry["done"], entry["warnings"]), ("warnings", 1, 1))
+        self.assertGreaterEqual(entry["directories"], 2)
+        self.assertEqual(TaskRunHistory(self.library).recent("scan")[0], entry)
 
     def assert_stale_sync_failure_preserves_configuration(self, action, expected_stage):
         original_generation = self.enable()

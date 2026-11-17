@@ -98,6 +98,11 @@ def main(argv=None) -> int:
         from image_search import worker_main
         return worker_main(arguments[1:])
 
+    if arguments[:1] == ["--restore-database-backup"]:
+        restore_private_stdio()
+        from database_backup import main as restore_database_main
+        return restore_database_main(arguments[1:])
+
     parser = argparse.ArgumentParser(description="Gravelle macOS launcher")
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--serve", action="store_true")

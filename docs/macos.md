@@ -1,6 +1,6 @@
 # macOS 版
 
-Gravelle 0.9.7 提供 Apple 芯片与 Intel 两种 Mac 安装包，支持 macOS 15 及以上。更新内容见 [0.9.7 更新说明](releases/0.9.7.md)。
+Gravelle 0.9.8 提供 Apple 芯片与 Intel 两种 Mac 安装包，支持 macOS 15 及以上。更新内容见 [0.9.8 更新说明](releases/0.9.8.md)。
 
 启动器可配置独立分享端口与 HTTPS 端口，并提供忘记安全入口时的本机关闭操作；网页开关、已有证书、公网分享地址与恢复范围见[网络设置](network.md)。端口修改前先停止阅读器；使用自己的证书时，HTTPS 默认端口为 `8443`，启动器仍从本机 HTTP 打开管理页面。
 
@@ -8,8 +8,8 @@ Gravelle 0.9.7 提供 Apple 芯片与 Intel 两种 Mac 安装包，支持 macOS 
 
 从 [GitHub Releases](https://github.com/pumpkissster/Gravelle/releases/latest) 下载对应芯片的文件：
 
-- Apple 芯片（M 系列）：`Gravelle-macOS-0.9.7-arm64.dmg`
-- Intel：`Gravelle-macOS-0.9.7-x64.dmg`
+- Apple 芯片（M 系列）：`Gravelle-macOS-0.9.8-arm64.dmg`
+- Intel：`Gravelle-macOS-0.9.8-x64.dmg`
 
 另附同名 ZIP 备用包；文件校验值见发行页的 `SHA256SUMS.txt`。当前安装包使用 ad-hoc 签名，未完成 Apple 公证，系统可能显示安全提示。
 
@@ -30,6 +30,8 @@ DMG 包含 `Gravelle.app` 和 `Applications` 入口。将应用拖到“应用�
 Dock 应用图标采用白色圆角底板和原粉色 G；顶部菜单栏使用同一标识的系统模板图标，由 macOS 根据背景与外观显示黑白。端口框使用原生单行控件高度，保留系统键盘焦点提示。
 
 账户、阅读记录、缓存等数据保存于当前用户的 `~/Library/Application Support/Gravelle`，独立于 `.app`，应用更新不会覆盖数据。配置文件为该目录下的 `launcher.json`，数据库为 `data/library.sqlite3`，优化副本位于 `data/transcoded`。原始写真图片仍保存在用户选择的文件夹内。
+
+数据库结构升级前会自动创建快照。升级前仍可备份完整资料目录，需要回退时参阅[数据库备份与恢复](database-recovery.md#macos)。
 
 访问外部磁盘或受系统保护的文件夹时，由 macOS 提示相应访问权限；应根据实际需要授权。启用局域网访问后，其他设备使用启动器显示的局域网地址，并需要允许相应的本地网络及防火墙访问。端口可以绑定不代表另一台设备已验证连通。
 

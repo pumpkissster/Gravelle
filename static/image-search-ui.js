@@ -72,7 +72,7 @@
       const key = failureKey(item); if (seen.has(key)) return false; seen.add(key); return true;
     });
   }
-  function create({ searchHost, settingsHost, api, post, openBook, isAdmin, toast = () => {}, onManage = () => {}, onOpenFailure = () => {}, mountScope, onActivity = () => {} }) {
+  function create({ searchHost, settingsHost, api, post, openBook, isAdmin, toast = () => {}, onManage = () => {}, onOpenFailure = () => {}, mountScope, onActivity = () => {}, onTaskRuns = () => {}, onOpenRuns }) {
     const document = searchHost.ownerDocument;
     const state = { active: false, managing: false, watching: false, working: false, status: null, file: null, mime: '', url: '', results: [], searched: false, searching: false, busy: false, timer: null, statusRequest: null, generation: 0, fileGeneration: 0, catalog: '' };
     const queryGate = createRequestGate(); const search = {}; const settings = {};
@@ -87,6 +87,10 @@
     function setActivity(working) {
       const value = working === true;
       if (state.working !== value) { state.working = value; onActivity(value); }
+    }
+    function publishActivity(payload) {
+      setActivity(payload?.working);
+      onTaskRuns(isAdmin() ? payload?.taskRuns ?? (payload === null ? null : false) : null);
     }
     function scheduleStatus() {
       stopStatus();
@@ -194,6 +198,7 @@
     settings.retry = button('重试失败图片', 'button button-secondary', () => mutate('/api/image-search/actions', { action: 'retry' }));
     settings.rebuild = button('重建索引', 'button button-secondary', () => confirmAction('rebuild')); settings.clear = button('清理索引', 'button button-danger', () => confirmAction('clear')); settings.refresh = button('刷新', 'button button-secondary', () => loadStatus(true));
     tools.append(settings.pause, settings.retry, settings.rebuild, settings.clear, settings.refresh);
+    if (onOpenRuns) tools.append(button('查看运行记录', 'button button-secondary', onOpenRuns));
     settings.error = el('p', 'notice error'); settings.error.hidden = true; settings.error.setAttribute('role', 'alert');
     panel.append(enableRow, settings.message, settings.progress, settings.counts, tools, settings.error); settingsHost.append(panel);
     const scopePanel = el('section', 'settings-panel image-index-scope'); scopePanel.hidden = true;
@@ -309,7 +314,7 @@
       try {
         const payload = await post('/api/image-search/retry', { items: chosen.map(({ book_id, page_key }) => ({ book_id, page_key })) });
         if (generation !== failures.generation || !state.managing || !isAdmin()) return;
-        if (payload.snapshot) { state.status = payload.snapshot; setActivity(payload.snapshot.working); }
+        if (payload.snapshot) { state.status = payload.snapshot; publishActivity(payload.snapshot); }
         failures.selected.clear(); toast(`已重试 ${Number(payload.retried) || 0} 张图片${Number(payload.skipped) ? `，跳过 ${Number(payload.skipped)} 张` : ''}`);
         failures.busy = false; await loadFailures(failures.page);
       } catch (failure) { if (generation === failures.generation && failure.status !== 401) error(settings.failureError, failure.message || '图片重试失败。'); }
@@ -340,13 +345,18 @@
       try {
         const payload = await api(full ? '/api/image-search/status' : '/api/image-search/activity', { signal: request.signal });
         if (generation !== state.generation || request.signal.aborted) return;
-        setActivity(payload.working);
+        publishActivity(payload);
         if (!full) return;
         state.status = payload; error(settings.error, payload.error || ''); if (manual) error(search.error, ''); renderSearch(); renderSettings();
         const count = Number(payload.summary?.failed) || 0;
         if (state.managing && failures.expanded && !failures.loading && (count || failures.loaded) && (manual || !failures.loaded || (count !== failures.observedCount && !failures.selected.size && !failurePanel.contains(document.activeElement)))) loadFailures(failures.page);
         if (!payload.enabled) { cancelQuery(); clearResults(); }
-      } catch (failure) { if (generation === state.generation && !request.signal.aborted && failure.status !== 401) { if (full) error(state.managing ? settings.error : search.error, failure.message || '无法读取图片搜索状态。'); else setActivity(false); } }
+      } catch (failure) {
+        if (generation === state.generation && !request.signal.aborted && failure.status !== 401) {
+          publishActivity(false);
+          if (full) error(state.managing ? settings.error : search.error, failure.message || '无法读取图片搜索状态。');
+        }
+      }
       finally { if (state.statusRequest === request) { state.statusRequest = null; scheduleStatus(); } }
     }
     async function mutate(path, body) {
@@ -358,7 +368,7 @@
       try {
         const payload = await post(path, body);
         if (generation !== state.generation) return;
-        state.status = payload; setActivity(payload.working);
+        state.status = payload; publishActivity(payload);
         if (!payload.enabled || body.action === 'clear' || scopeChange) { cancelQuery(); clearResults(); }
         if (scopeChange) scopeDraft = undefined;
         toast(scopeChange ? '索引范围已保存。' : body.action === 'clear' ? '图片索引已清理。' : body.action === 'rebuild' ? '已开始重建图片索引。' : '图片搜索设置已更新。');
@@ -378,7 +388,7 @@
       showSettings() { if (!isAdmin() || state.managing) return; if (!state.active) { state.statusRequest?.abort(); state.statusRequest = null; } state.managing = true; renderSettings(); loadStatus(true); },
       hideSettings() { if (!state.managing) return; state.managing = false; scopeDraft = undefined; error(scopeError, ''); renderScope(); cancelFailures(true); if (confirm.open) confirm.close(); if (!state.active) { state.statusRequest?.abort(); state.statusRequest = null; scheduleStatus(); } },
       syncCatalog(signature) { if (state.catalog && state.catalog !== signature) { cancelQuery(); clearResults(); } state.catalog = signature; },
-      reset() { state.generation += 1; state.fileGeneration += 1; state.active = state.managing = state.watching = state.busy = false; setActivity(false); scopeDraft = undefined; cancelFailures(true); stopStatus(); state.statusRequest?.abort(); state.statusRequest = null; cancelQuery(); releasePreview(); Object.assign(state, { file: null, mime: '', status: null, catalog: '' }); clearResults(); error(search.error, ''); error(settings.error, ''); error(scopeError, ''); search.input.value = ''; if (confirm.open) confirm.close(); renderSearch(); renderSettings(); }
+      reset() { state.generation += 1; state.fileGeneration += 1; state.active = state.managing = state.watching = state.busy = false; publishActivity(null); scopeDraft = undefined; cancelFailures(true); stopStatus(); state.statusRequest?.abort(); state.statusRequest = null; cancelQuery(); releasePreview(); Object.assign(state, { file: null, mime: '', status: null, catalog: '' }); clearResults(); error(search.error, ''); error(settings.error, ''); error(scopeError, ''); search.input.value = ''; if (confirm.open) confirm.close(); renderSearch(); renderSettings(); }
     };
   }
   return { maxBytes, fileError, imageType, statusMessage, indexProgress, normalizeResults, normalizeFailures, failureKey, createRequestGate, create };

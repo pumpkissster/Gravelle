@@ -36,6 +36,7 @@ analysis = Analysis(
         'cryptography.hazmat.primitives.serialization.pkcs12',
         'desktop.core', 'desktop.platforms', 'desktop.runtime', 'desktop.macos_launcher',
         'PIL.Image', 'cv2', 'numpy', 'objc', 'AppKit', 'Foundation', 'Quartz', 'PyObjCTools.AppHelper',
+        'watchdog.observers.fsevents', '_watchdog_fsevents',
     ],
     hookspath=[], hooksconfig={}, runtime_hooks=[],
     excludes=['resvg_py', 'tkinter'], noarchive=False,
